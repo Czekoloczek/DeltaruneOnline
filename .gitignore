@@ -1,0 +1,19 @@
+# pliki gry i moda: nigdy do repo
+*.win
+*.win.*
+*.xdelta
+*.zip
+*.ogg
+*.dat
+data/
+game/
+mod/
+# zdekompilowany kod, wyniki budowania
+code_*/
+build/
+out/
+*.gml.orig
+# Python
+__pycache__/
+*.pyc
+.venv/
