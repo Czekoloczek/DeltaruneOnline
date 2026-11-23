@@ -63,8 +63,9 @@ int main(int argc, char **argv)
         if (f == quit_at) { printf("%s quits at frame %d (drnet_bye, no drnet_stop)\n", role, f); fflush(stdout); bye("test quit"); ExitProcess(0); }
         set_aux(f % 37 == 0 ? 100000 + f * 3 + me : 0);
         double all = exchange(f, bits_for(me, f));
-        if (all == -2) { printf("%s: %s at frame %d, noticed after %lu ms\n", role, status(), f, GetTickCount() - tf); return 0; }
-        if (all < 0) { printf("exchange timeout at frame %d\n", f); return 1; }
+        /* like the game (dronline_step): stop the network, which says goodbye to whoever is still there */
+        if (all == -2) { printf("%s: %s at frame %d, noticed after %lu ms\n", role, status(), f, GetTickCount() - tf); stop(); return 0; }
+        if (all < 0) { printf("exchange timeout at frame %d\n", f); stop(); return 1; }
         unsigned long long v = (unsigned long long)all;
         for (p = 1; p <= players; p++) v = v * 1099511628211ull + (unsigned long long)aux(p);
         sum = (sum ^ v) * 1099511628211ull;

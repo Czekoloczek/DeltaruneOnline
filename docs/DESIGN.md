@@ -70,8 +70,10 @@ left the game" and close, instead of freezing for the 10 s timeout. The last inp
 that is a frame behind still reach the same last frame. Every machine changes chapter in the same frame, so
 `dro_game_change` also marks the game as leaving: a goodbye that arrives then shows no message. `game_restart`
 fires Game End too, but the game goes on, so `dro_game_restart` suppresses that goodbye, and a player who sends
-input again after a goodbye counts as back. A crash or a killed process sends nothing, so the 10 s timeout
-remains for those.
+input newer than their goodbye counts as back. Older input that arrives after the goodbye (sent just before it, or
+reordered) does not. With 3 players, a client gets the other client's input only through the host, so once the host
+said goodbye, a client counts any missing input as "left". A crash or a killed process sends nothing, so the 10 s
+timeout remains for those.
 
 `delay=<frames>` in `dronline.ini` fixes *D* instead; with a fixed 0 the game waits out the network every
 frame and slows down above roughly 30 ms ping.

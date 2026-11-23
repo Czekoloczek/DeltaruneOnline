@@ -117,6 +117,7 @@ static int32_t hash_frame[MAXP + 1][HRING];
 static uint32_t hash_val[MAXP + 1][HRING];
 static int32_t desync_at = -1;
 static int gone[MAXP + 1];                  /* player said goodbye */
+static int32_t bye_last[MAXP + 1];          /* last frame in that goodbye */
 static char status[256];
 static FILE *log_file;
 static char host_addr[64] = "127.0.0.1";
@@ -320,13 +321,16 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             for (q = 2; q <= players; q++)
                 if (have_peer[q] && q != k->h.player) { stamp(&r, q); send_to(&peer[q], &r, sizeof(r)); }
         }
-        if (h->type == T_INPUT && gone[k->h.player]) {    /* back after a goodbye, e.g. both restarted together */
+        /* Back after a goodbye only with input newer than the goodbye. An older input packet can still arrive after
+           the goodbye (sent just before it, reordered, or held in a queue), and must not undo it (test 4b, 2026-11-23). */
+        if (h->type == T_INPUT && gone[k->h.player] && k->count && (int32_t)(k->first + k->count - 1) > bye_last[k->h.player]) {
             gone[k->h.player] = 0;
             logm("player %d sends input again", k->h.player);
         }
         if (h->type == T_BYE && !gone[k->h.player]) {
             gone[k->h.player] = 1;
-            logm("player %d said goodbye (last frame %d)", k->h.player, k->count ? (int)(k->first + k->count - 1) : -1);
+            bye_last[k->h.player] = k->count ? (int32_t)(k->first + k->count - 1) : -1;
+            logm("player %d said goodbye (last frame %d)", k->h.player, bye_last[k->h.player]);
         }
         SetEvent(ev_input);
     } else if (h->type == T_HASH && len >= (int)sizeof(hash_pkt)) {
@@ -489,7 +493,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; return r; }
     for (p = 0; p <= MAXP; p++) {
-        have_peer[p] = 0; gone[p] = 0; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
+        have_peer[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
         for (i = 0; i < RING; i++) frame_of[p][i] = -1;
         for (i = 0; i < HRING; i++) hash_frame[p][i] = -1;
     }
