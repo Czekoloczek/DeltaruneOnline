@@ -44,8 +44,8 @@ The first prototype targets Chapter 5 and is tested with two copies of the game 
 
 ## Usage
 
-You need Python 3, the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI and `drnet.dll`
-(build it with `native/build.sh`).
+You need Python 3.11 or newer, the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI
+and `drnet.dll` (build it with `native/build.sh`).
 
 The easiest way is `patcher/build.py`. It checks that your Chapter 5 and the mod are exactly the versions it knows,
 applies the mod with xdelta3, runs `dronline_patch.py`, and writes `data.win` and `drnet.dll` to
