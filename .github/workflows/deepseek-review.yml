@@ -1,0 +1,95 @@
+name: DeepSeek Review
+
+# Przegląd PR-a przez DeepSeek, tylko NA ŻĄDANIE (automatyczny przegląd każdego PR-a robi Claude,
+# claude-code-review.yml). Dwa sposoby:
+#
+#   1. Komentarz pod PR-em (tylko właściciel, członkowie i współpracownicy repo):
+#          /deepseek-review
+#          /deepseek-review model=pro reasoning=max
+#          /deepseek-review reasoning=none sprawdź głównie haki serca
+#      model:     flash (deepseek-flash, domyślny, tani) albo pro (deepseek-v4-pro, dokładniejszy, ~4x droższy)
+#      reasoning: none (bez myślenia), low, high (domyślny), max. To parametr reasoning_effort API;
+#                 none wyłącza tryb myślenia ({"thinking": {"type": "disabled"}}).
+#      Reszta pierwszej linii i kolejne linie idą do recenzenta jako uwaga.
+#   2. Ręcznie: Actions > DeepSeek Review > Run workflow (numer PR-a, model, reasoning, uwaga).
+#
+# Skrypt: tools/deepseek_review.py (sama biblioteka standardowa Pythona). Wynik to jeden komentarz pod PR-em.
+#
+# Sekret DEEPSEEK_API_KEY dodaje admin repo w Settings > Secrets and variables > Actions. Bez niego przebieg
+# kończy się komentarzem, że przegląd pominięto. PR-y z forków są pomijane: ich kodu nie wysyłamy do
+# zewnętrznego API.
+#
+# Bezpieczeństwo: issue_comment działa na workflowie i kodzie z main, z sekretami, także dla PR-ów z forków.
+# Dlatego NIE robimy checkoutu kodu PR-a i niczego z niego nie uruchamiamy: diff przychodzi z API jako tekst
+# i trafia tylko do DeepSeek. Komentarz idzie przez env, nigdy przez ${{ }} w skrypcie.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Numer PR-a
+        required: true
+        type: number
+      model:
+        description: Model
+        type: choice
+        default: deepseek-flash
+        options: [deepseek-flash, deepseek-v4-pro]
+      reasoning:
+        description: Poziom myślenia (none = bez myślenia)
+        type: choice
+        default: high
+        options: [none, low, high, max]
+      note:
+        description: Uwaga dla recenzenta (opcjonalna)
+        type: string
+        required: false
+
+# Każdy komentarz pod każdym PR-em i issue uruchamia ten workflow (job niżej zwykle się pomija). Grupa per PR
+# tylko dla prawdziwych żądań; inne komentarze dostają własną grupę, żeby np. komentarz bota pod tym samym PR-em
+# nie anulował trwającego przeglądu. Nowe żądanie pod tym samym PR-em anuluje poprzednie.
+concurrency:
+  group: "${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.comment.body, '/deepseek-review')) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
+  cancel-in-progress: true
+
+# Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
+permissions: {}
+
+jobs:
+  deepseek-review:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       startsWith(github.event.comment.body, '/deepseek-review') &&
+       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read         # checkout skryptu i docs/DESIGN.md
+      pull-requests: write   # komentarz z wynikiem i reakcja 👀 pod żądaniem
+
+    steps:
+      # Gałąź domyślna (issue_comment) albo ta wybrana przy ręcznym uruchomieniu, NIE kod PR-a.
+      # Potrzebne są tylko skrypt i opis projektu.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tools/deepseek_review.py
+            docs/DESIGN.md
+          sparse-checkout-cone-mode: false
+
+      - name: Przegląd DeepSeek
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PR: ${{ github.event.issue.number || inputs.pr }}
+          REQUEST: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REQUESTER: ${{ github.event.comment.user.login || github.actor }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_REASONING: ${{ inputs.reasoning }}
+          INPUT_NOTE: ${{ inputs.note }}
+        run: python3 -I tools/deepseek_review.py
