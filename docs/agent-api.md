@@ -37,8 +37,9 @@ queue filled.
 Messages are JSON objects, one per line (`\n`, a `\r` before it is ignored), UTF-8, in both directions. Every
 command may carry an `"id"` (a string or a number); the replies to it carry the same id, `null` without one. The
 game takes the lines of a connection in the order they came and answers each in that order (`state`, `queued`,
-`cleared`, `error`). Only `done` comes later, when its input has been played, so it can follow the answers to
-commands sent after that input: match replies by `type` and `id`.
+`cleared`, `error`), with two exceptions. `done` comes later, when its input has been played, so it can follow the
+answers to commands sent after that input. And a command refused because too many are waiting (see the limits)
+gets its error at once, ahead of the answers to the commands that wait. So match replies by `type` and `id`.
 
 | Command | Replies |
 |---|---|
@@ -54,8 +55,9 @@ without a gap. The agent's buttons are added to the keyboard's and gamepad's, so
 
 **Limits.** 60 steps in a command, 3600 frames in a step, 10 input commands in the queue, 64 KB in a line. A
 command over a limit is answered with an error and nothing of it is queued. A game frame takes up to 32 commands;
-more than that at once are refused with `too many commands are waiting for the game`. The game keeps at most 4 MB
-of replies for an agent that does not read them, then closes the connection.
+more than that at once are refused with `too many commands are waiting for the game`, and that error does not
+wait for the frame: it arrives before the replies to the 32. The game keeps at most 4 MB of replies for an agent
+that does not read them, then closes the connection.
 
 **When a connection ends,** its queued input ends with it as after a `clear`: the buttons are released, and the
 next connection starts with an empty queue.
