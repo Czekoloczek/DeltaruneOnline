@@ -1,10 +1,11 @@
-"""Tests for the patcher's rewrite rules and the obj_heart hooks.
+"""Tests for the patcher's rewrite rules, the obj_heart hooks and the faint SOULs of the other players.
 
 The GML snippets below are written for these tests and only imitate the shape of the game's code;
 nothing from the game or the mod is stored here. Run: python3 -m unittest discover -s tests -v
 """
 import copy
 import os
+import re
 import sys
 import unittest
 
@@ -153,6 +154,98 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("return false;", dp.HEART_OFF)
         self.assertIn("function dro_heart_collide_p1(_dro_b)", dp.HEART_OFF)
 
+
+
+# Made-up draw code in the shape of the SOUL draws (no game code): what the other_souls rewrite must do.
+SOUL_DRAW = """if (color == 2)
+{
+    draw_sprite_ext(spr_tail, 0, tx + x_offset, ty, image_xscale, image_yscale, 0, c_orange, 0.025);
+    draw_sprite_ext(sprite_index, image_index2, x2 + _w2 + x_offset, y2 + _h2, xs, ys, image_angle, image_blend2, image_alpha);
+    draw_sprite_ext(spr_arrow, 0, x + (i * 16) + 16, y + 10, 1, 1, 0, draw_get_colour(), 1);
+    draw_sprite_ext(spr_x, 0, xx + get(1), yy, 1, 1, 0, c_white, 1);
+    draw_text(x2, y2, "a, (b)");
+}
+else
+{
+    image_index3 += image_speed3;
+    draw_sprite_ext(sprite_index, image_index3, x3, y3, 1, image_yscale, image_angle, image_blend3, 1);
+    draw_sprite_part_ext(spr_part, 0, 0, 0, 10, 10, x2 - 5, y2, 1, 1, c_white, a[0]);
+    draw_self();
+}
+"""
+
+
+class SoulAlpha(unittest.TestCase):
+    def run_on(self, **texts):
+        t = dict(texts)
+        note = dp.soul_alpha(t)
+        return t, note
+
+    def test_heart_draws_follow_the_heart_they_draw(self):
+        t, note = self.run_on(**{dp.HEART_DRAW: SOUL_DRAW})
+        d = t[dp.HEART_DRAW]
+        self.assertIn("image_blend2, (image_alpha) * dronline_heart_alpha(2));", d)
+        self.assertIn("image_blend3, (1) * dronline_heart_alpha(3));", d)
+        self.assertIn("draw_get_colour(), (1) * dronline_heart_alpha(1));", d)
+        self.assertIn("c_white, (a[0]) * dronline_heart_alpha(2));", d)
+        # a position that names no heart: the nearest one, from the same expressions
+        self.assertIn("c_orange, (0.025) * dronline_heart_alpha_at(tx + x_offset, ty));", d)
+        # a position with a call is never evaluated twice
+        self.assertIn("yy, 1, 1, 0, c_white, 1);", d)
+        self.assertIn("dronline_draw_self(dronline_heart_alpha(1));", d)
+        self.assertNotIn("draw_self()", d)
+        self.assertIn('draw_text(x2, y2, "a, (b)");', d)
+        self.assertTrue(note.startswith("obj_heart 6 draws (1 by the nearest heart, 1 left as they are)"))
+
+    def test_only_alpha_changes(self):
+        # drawing only: removing the factors gives back the original code, statement for statement
+        t, _ = self.run_on(**{dp.HEART_DRAW: SOUL_DRAW})
+        back = re.sub(r"\(([^()]*(?:\[[^\]]*\])?)\) \* dronline_heart_alpha(?:_at)?\((?:[^()]|\([^()]*\))*\)", r"\1",
+                      t[dp.HEART_DRAW])
+        back = back.replace("dronline_draw_self(dronline_heart_alpha(1))", "draw_self()")
+        self.assertEqual(back, SOUL_DRAW)
+
+    def test_owner_objects(self):
+        graze = "if (controls == 2)\n    draw_sprite_ext(sprite_index, 0, x2 + x_offset, y2, 1, 1, angle, c_white, grazetimer / 6);\ngrazetimer -= 1;\n"
+        slime = ("surface_set_target(s);\ndraw_sprite_ext(spr_white, 0, 10, 10, 1, 1, 0, c_white, 1);\nsurface_reset_target();\n"
+                 "draw_surface_ext(s, x, y, 1, 1, 0, c_gray, 1);\n")
+        orange = "draw_sprite_ext(sprite_index, image_index, x, y, 1, 1, 0, image_blend, image_alpha);\ndraw_self();\n"
+        t, note = self.run_on(**{"gml_Object_obj_grazebox_Draw_0": graze, "gml_Object_obj_heart_slime_Draw_0": slime,
+                                 "gml_Object_obj_orangeheart_Draw_0": orange})
+        self.assertIn("c_white, (grazetimer / 6) * dronline_soul_alpha_controls(1));\ngrazetimer -= 1;", t["gml_Object_obj_grazebox_Draw_0"])
+        # the slime is drawn into a surface first: only the surface on the screen is dimmed
+        self.assertIn("c_white, 1);\nsurface_reset_target", t["gml_Object_obj_heart_slime_Draw_0"])
+        self.assertIn("c_gray, (1) * dronline_soul_alpha_controls(0));", t["gml_Object_obj_heart_slime_Draw_0"])
+        self.assertIn("image_blend, (image_alpha) * dronline_soul_alpha_controls(0));\n"
+                      "dronline_draw_self(dronline_soul_alpha_controls(0));", t["gml_Object_obj_orangeheart_Draw_0"])
+        self.assertIn("obj_grazebox 1", note)
+        self.assertIn("obj_orangeheart 2", note)
+
+    def test_purple_only_inside_with_obj_heart(self):
+        purple = ("draw_sprite_ext(spr_ui, 0, x, y, 1, 1, 0, c_white, 1);\n"
+                  "with (obj_heart)\n{\n    if (other.controls == 1)\n"
+                  "        draw_sprite_ext(sprite_index, -1, x2 + other.x_shake, y2, 1, 1, 0, c_red, image_alpha);\n}\n"
+                  "draw_sprite_ext(spr_ui, 1, x, y, 1, 1, 0, c_white, 1);\n")
+        t, note = self.run_on(**{dp.PURPLE_DRAW: purple})
+        p = t[dp.PURPLE_DRAW]
+        self.assertIn("c_red, (image_alpha) * dronline_heart_alpha(2));", p)
+        self.assertEqual(p.count("c_white, 1);"), 2, "the purple SOUL's own drawing is not a heart")
+        self.assertIn("purple SOUL 1", note)
+
+    def test_missing_entries(self):
+        t, note = self.run_on()
+        self.assertEqual(t, {})
+        self.assertIn("obj_heart has no Draw", note)
+
+    def test_after_the_heart_hooks(self):
+        # the Draw wrap of the own SOUL and the alpha rewrite work together, in the order patch() runs them
+        t = heart_texts(**{dp.HEART_DRAW: SOUL_DRAW})
+        dp.heart_hooks(t)
+        dp.soul_alpha(t)
+        d = t[dp.HEART_DRAW]
+        self.assertTrue(d.startswith("dronline_heart_draw(true);\n"))
+        self.assertTrue(d.rstrip().endswith("dronline_heart_draw(false);"))
+        self.assertIn("dronline_heart_alpha(3)", d)
 
 if __name__ == "__main__":
     unittest.main()

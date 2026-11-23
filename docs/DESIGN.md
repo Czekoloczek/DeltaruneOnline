@@ -102,6 +102,32 @@ The price: the other players' hearts on your screen lag behind what they see by 
 bullet seems to pass through another player's heart without a hit, or to hit it from a distance. Every hit
 follows what the dodging player saw.
 
+**Other players' SOULs are faint.** Several hearts of the same shape on one screen get mixed up, so each machine
+draws only its own player's SOUL fully; the others are drawn at `other_souls` opacity from `dronline.ini` (default
+0.1, 0 hides them, 1 draws them as the game does). The setting is local: players may choose different values, and
+they don't need to match. It is drawing only. The patcher multiplies the alpha argument of the calls that draw a SOUL
+by a factor that is 1 offline, in solo and for the local player's own heart, and adds, removes or reorders no
+statement, so every heart still moves, dodges, grazes and is hit on every machine and the state hash is unchanged
+(obj_heart's Draw advances the animation of hearts 2 and 3 itself, and obj_grazebox counts down its timer there:
+both keep running). The calls it changes:
+
+- obj_heart's Draw, which draws all hearts of the Local Multiplayer mod (heart *k* at x/y, x2/y2, x3/y3): a call
+  belongs to the heart whose coordinates its position names. That covers the heart, the invulnerability animation
+  (a sprite animation, no blink), the death break and the yellow and orange extras. A position that names no heart
+  (an orange tail at `tx, ty`) goes to the nearest heart, with ties going to the local player; a position that
+  contains a call is not evaluated twice and stays as it is. `draw_self()` becomes `dronline_draw_self(factor)`.
+  In the purple SOUL's mode 7 only the heart at x/y is drawn, for whoever plays the turn, so it stays full.
+- The purple SOUL draws the hearts a second time inside `with (obj_heart)` in obj_purplecontrols' Draw: the same
+  rule, only inside that block.
+- Objects that hold one player's SOUL and say whose in `controls`: obj_grazebox (graze sparkles, 1–3),
+  obj_orangeheart (the orange chase SOUL with its afterimages, 0–2), obj_date_heart (0–2) and obj_heart_slime
+  (0–2; it draws into a surface, so only the surface on the screen is dimmed). -1 means no owner and stays full.
+
+Not covered yet: the heart shards after a death (plain obj_marker instances without an owner, whose alpha is game
+state), obj_dashpath (the mod draws it at heart 1 for every player) and the mod's outline in obj_fusebomb_big
+(also always at heart 1). The patcher prints how many calls it changed per object after "other players' SOULs
+drawn faint".
+
 `native/test_drnet.c` checks the DLL alone: host and client exchange pseudo-random input and events under
 Wine, optionally with test latency, and print running checksums of everything they received; they must match.
 Results: no latency → delay 0, 33 ms frames; 30 ms each way → ping 61 ms, delay 1, 33 ms frames; 60 ms each
@@ -140,8 +166,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 
 - `python3 -m unittest discover -s tests -v` (standard library only):
   - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
-    settings) and the obj_heart hooks, including "all or nothing" when the game's code looks different. The GML
-    snippets are written for the tests and only imitate the game's code.
+    settings), the obj_heart hooks, including "all or nothing" when the game's code looks different, and the faint
+    SOULs of the other players (which heart a draw belongs to, nothing but the alpha changes). The GML snippets are
+    written for the tests and only imitate the game's code.
   - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
     types, with no function of more than 4 arguments taking a string (the pitfalls below). Every option the GML
@@ -363,13 +390,11 @@ WireGuard puts both PCs on one private network, so the game works as on a LAN:
 invisible `gamescope --backend headless` instances and prints both `drnet.log` files. Result on Chapter 5
 (Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync.
 
-## Planned: own SOUL and split camera
+## Planned: split camera
 
-Both are drawing-only changes, so they must never change game state or consume the shared RNG:
+The faint SOULs of the other players are done (see "Own SOUL" above). The split camera is a drawing-only change
+too, so it must never change game state or consume the shared RNG:
 
-- **Own SOUL**: in battle, draw the local player's heart normally and the other players' hearts with lower
-  alpha or an outline. Only the Draw event of the heart objects changes; their positions and collisions stay
-  identical on every machine.
 - **Split camera**: game logic keeps using the one shared camera (`camerax()`/`cameray()` are read by many
   scripts), so it must stay identical everywhere. The split view is extra rendering on top: when the players
   are further apart than a threshold, each machine additionally draws a second view around its local player.

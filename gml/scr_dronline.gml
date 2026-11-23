@@ -35,6 +35,9 @@
 //                                              sends input for the local player (docs/agent-api.md). Never open to
 //                                              the network; any program on this PC can connect, so leave it off
 //                                              unless you use it
+//   other_souls = 0.1                          (host/client) opacity of the other players' SOULs in battle on this screen,
+//                                              so they are not mistaken for your own: 0 = hidden, 1 = as in the game.
+//                                              Drawing only, the hearts still dodge and get hit on every machine
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -54,6 +57,7 @@ function dronline_init()
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
     global.dro_agent_tries = 0;
+    global.dro_other_souls = 0.1;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -85,6 +89,7 @@ function dronline_init()
         global.dro_script_end = string_lower(ini_read_string("online", "script_end", "idle"));
         global.dro_srec_file = ini_read_string("online", "script_record", "");
         global.dro_agent_port = ini_read_real("online", "agent", 0);
+        global.dro_other_souls = clamp(ini_read_real("online", "other_souls", 0.1), 0, 1);
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -1220,6 +1225,85 @@ function dronline_heart_unswap()
         }
     }
     global.dro_swap = 0;
+}
+
+// ---- other players' SOULs: drawn faint (other_souls), so nobody mistakes another heart for their own ----
+// Drawing only. The patcher multiplies the alpha argument of the draw calls that draw a SOUL (obj_heart's Draw,
+// the graze sparkles, the purple, orange-chase, date and slime hearts) by one of the functions below. The game
+// state never changes: every heart still moves, dodges and is hit on every machine, and nothing here reads the
+// shared random numbers. Offline, in solo and for the local player's own heart the factor is 1.
+
+// Opacity factor for the SOUL of player p (1..3) on this screen; p < 1 means "no owner" (single player): 1.
+function dronline_soul_alpha(p)
+{
+    if (!variable_global_exists("dro_net") || !global.dro_net || global.dro_other_souls >= 1)
+        return 1;
+    if (p < 1 || p > 3 || p == global.dro_player)
+        return 1;
+    return global.dro_other_souls;
+}
+
+// In an object that draws one player's SOUL and says whose in `controls`: first = the value of player 1
+// (obj_grazebox counts 1..3, obj_orangeheart, obj_date_heart and obj_heart_slime 0..2 with -1 for no owner).
+function dronline_soul_alpha_controls(first)
+{
+    if (!variable_instance_exists(id, "controls") || !is_numeric(controls))
+        return 1;
+    return dronline_soul_alpha(controls - first + 1);
+}
+
+// draw_self() with the alpha multiplied by f (the patcher's replacement in the SOUL draws).
+function dronline_draw_self(f)
+{
+    if (sprite_index >= 0)
+        draw_sprite_ext(sprite_index, image_index, x, y, image_xscale, image_yscale, image_angle, image_blend, image_alpha * f);
+}
+
+// In obj_heart (its Draw, or code inside with (obj_heart)): heart k is drawn at x/y, x2/y2 or x3/y3. In the purple
+// SOUL's mode 7 only the heart at x/y is drawn and it belongs to whoever plays the turn, so it stays as it is.
+function dronline_heart_alpha(k)
+{
+    if (k == 1 && variable_instance_exists(id, "inMode7") && inMode7)
+        return 1;
+    return dronline_soul_alpha(k);
+}
+
+// For a draw in obj_heart's Draw whose position names no heart (an orange tail at tx, ty, ...): the heart
+// nearest to (px, py). A tie goes to the local player, so an overlapping own heart is never dimmed.
+function dronline_heart_alpha_at(px, py)
+{
+    if (!variable_global_exists("dro_net") || !global.dro_net || global.dro_other_souls >= 1)
+        return 1;
+    var n = (variable_global_exists("playeramount") && is_numeric(global.playeramount)) ? clamp(global.playeramount, 1, 3) : 1;
+    var me = global.dro_player;
+    var best = 0;
+    var bd = -1;
+    for (var k = 1; k <= n; k++)
+    {
+        var hx = x;
+        var hy = y;
+        if (k == 2)
+        {
+            if (!variable_instance_exists(id, "x2"))
+                break;
+            hx = x2;
+            hy = y2;
+        }
+        else if (k == 3)
+        {
+            if (!variable_instance_exists(id, "x3"))
+                break;
+            hx = x3;
+            hy = y3;
+        }
+        var d = (hx - px) * (hx - px) + (hy - py) * (hy - py);
+        if (bd < 0 || d < bd || (d == bd && k == me))
+        {
+            best = k;
+            bd = d;
+        }
+    }
+    return dronline_heart_alpha(best);
 }
 
 // ---- Agent API: a program on this PC reads the game state and plays (docs/agent-api.md) ----
