@@ -17,12 +17,19 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 
 ### Roadmap
 
-1. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that returns
-   network input for remote players.
-2. **Transport**: GameMaker networking (`network_*`); one packet per frame with the frame number and button state.
-3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
-4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
-5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
+The full plan, with findings, phases, tasks and risks, is in [ROADMAP.md](ROADMAP.md). In short:
+
+0. **Tools and build pipeline**: rebuild the modded game from the player's own files with one command.
+1. **Spikes**: small experiments that answer the risky questions (networking, waiting for the partner, replays).
+2. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that can take
+   input from the network.
+3. **Session setup**: the host sends the save file, settings, language and random seed.
+4. **Lockstep loop**: GameMaker networking (`network_*`), input delay, waiting for the partner. First playable
+   prototype.
+5. **Determinism**: per-frame shared random seed, no gameplay dependence on audio playback or the system clock,
+   desync detection.
+6. **All chapters** and chapter changes.
+7. **Patcher and release**.
 
 The first prototype targets Chapter 5 and is tested with two copies of the game on one PC before going over a network.
 
@@ -38,8 +45,8 @@ Every player needs:
 From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 
 - random number calls in about 660 code files,
-- about 36 files that depend on audio state (for example the rhythm minigame),
-- about 52 files that read the system clock,
+- about 37 gameplay files that depend on audio state (for example the rhythm minigame),
+- about 27 gameplay files that read the system clock (more in drawing code, where it is harmless),
 - input is read directly in many places of both the game and the mod,
 - every chapter is a separate `data.win`, so changes have to be redone after game and mod updates.
 
