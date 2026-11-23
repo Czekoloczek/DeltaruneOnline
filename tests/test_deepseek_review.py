@@ -2,6 +2,7 @@
 fake GitHub and DeepSeek APIs (no network, no key)."""
 import http.client
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -436,13 +437,14 @@ class RepoScope(unittest.TestCase):
     def test_only_the_parts_asked_for(self):
         ok = FakeAPI().deepseek[0]
         api = FakeAPI(deepseek=[ok, ok])
-        self.assertEqual(self.review(api, PARTS="1, 2"), 0)
+        self.assertEqual(self.review(api, PARTS="2, 5"), 0)
         scopes = [b["messages"][1]["content"].split("ZAKRES TEJ CZĘŚCI")[1] for b in api.deepseek_bodies]
         self.assertEqual(len(scopes), 2)
-        self.assertIn("- gml/scr_dronline.gml", scopes[0])
-        self.assertIn("- native/drnet.c", scopes[1])
+        self.assertIn("- native/drnet.c", scopes[0])
+        self.assertIn("- tests/test_patcher.py", scopes[1])
         with open("deepseek-review-report.md", encoding="utf-8") as fh:
-            self.assertEqual(fh.read().count("\n## "), 2)
+            heads = re.findall(r"(?m)^## (\d+)\. ", fh.read())
+        self.assertEqual(heads, ["2", "5"])                       # numbered as in the form, so a rerun picks the same
 
     def test_bad_parts(self):
         for parts in ("0", "6", "a", "1,,2", "1-2"):

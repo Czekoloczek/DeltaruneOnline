@@ -596,12 +596,13 @@ def repo_messages(corpus, sha, count, title, files):
 
 
 def repo_report(sha, opts, sections, notes, sent_count, requester):
-    """The Markdown report: one section per part, then totals."""
+    """The Markdown report: one section per part (numbered as in REPO_PARTS, also when PARTS picks some), then
+    totals."""
     out = [REPO_MARKER, "# Przegląd DeepSeek całego repozytorium", "",
            f"Commit `{sha[:7]}` · `{opts['model']}`, reasoning `{opts['reasoning']}` · "
            f"{sent_count} plików w kontekście" + (f" · na prośbę: {requester}" if requester else ""), ""]
     totals = {"prompt": 0, "hit": 0, "out": 0, "think": 0}
-    for i, (title, files, review, finish, usage) in enumerate(sections, 1):
+    for i, title, files, review, finish, usage in sections:
         out += [f"## {i}. {title}", "", "<sub>" + ", ".join(f"`{p}`" for p in files) + "</sub>", ""]
         out.append(neutralize_mentions(review.strip()))
         if finish == "length":
@@ -671,12 +672,12 @@ def run_repo(env, http=http_json, sleep=time.sleep, root=ROOT, list_files=repo_f
                                    "i odpowiedź jest pusta. Spróbuj niższego poziomu reasoning.")
             if not review:
                 raise RuntimeError(f"DeepSeek zwrócił pustą odpowiedź (finish_reason {finish}).")
-            sections.append((title, files, review, finish, usage))
+            sections.append((index, title, files, review, finish, usage))
             print(f"{title}: {usage.get('prompt_tokens', '?')} wejścia "
                   f"({usage.get('prompt_cache_hit_tokens', 0)} z cache), {usage.get('completion_tokens', '?')} wyjścia")
         except RuntimeError as e:
             failed += 1
-            sections.append((title, files, f"_Nie udało się: {e}_", None, usage))   # a used answer is still billed
+            sections.append((index, title, files, f"_Nie udało się: {e}_", None, usage))   # a used answer is billed
             print(f"{title}: błąd: {e}")
 
     report = repo_report(sha, opts, sections, notes, len(sent), env.get("REQUESTER", "").strip())
