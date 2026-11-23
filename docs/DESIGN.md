@@ -124,7 +124,11 @@ why the settings live in `dronline.ini`.
 
 ## Automated tests (no game needed)
 
-Run on every pull request and push to main (`.github/workflows/tests.yml`):
+`bash tools/verify.sh` runs all of them in one go, with the lockstep test in three variants: 0 and 30 ms with 2
+players, and 3 players. `bash tools/setup_env.sh` installs the tools with apt, dnf or pacman; cloud agents such as
+CodeRabbit use the two scripts as their setup and startup scripts.
+
+They also run on every pull request and push to main (`.github/workflows/tests.yml`):
 
 - `python3 -m unittest discover -s tests -v` (standard library only):
   - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
