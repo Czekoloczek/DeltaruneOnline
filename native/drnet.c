@@ -123,13 +123,30 @@ static uint64_t now_us(void)
     return (uint64_t)c.QuadPart / qpf * 1000000 + (uint64_t)c.QuadPart % qpf * 1000000 / qpf;
 }
 
-/* Log to %LOCALAPPDATA%\\DELTARUNE\\drnet.log (the game's save folder), one file per Wine prefix / PC. */
+/* DRONLINE_ROLE: letters and digits, at most 16 (the same rule as dronline_init in scr_dronline.gml). */
+static int valid_role(const char *r)
+{
+    int i;
+    if (!r || !*r) return 0;
+    for (i = 0; r[i]; i++)
+        if (i >= 16 || !((r[i] >= 'a' && r[i] <= 'z') || (r[i] >= 'A' && r[i] <= 'Z') || (r[i] >= '0' && r[i] <= '9'))) return 0;
+    return 1;
+}
+
+/* Log to %LOCALAPPDATA%\\DELTARUNE\\drnet.log (the game's save folder), one file per Wine prefix / PC.
+ * Two copies on one PC share that folder: a copy started with DRONLINE_ROLE=<name> that reads its own
+ * dronline_<name>.ini (scr_dronline.gml) logs to drnet_<name>.log instead. */
 static void logm(const char *fmt, ...)
 {
     va_list ap;
     if (!log_file) {
-        char path[600]; const char *la = getenv("LOCALAPPDATA");
-        snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet.log", la ? la : ".");
+        char path[600]; const char *la = getenv("LOCALAPPDATA"), *role = getenv("DRONLINE_ROLE");
+        if (!la) la = ".";
+        snprintf(path, sizeof(path), "%s\\DELTARUNE\\dronline_%s.ini", la, valid_role(role) ? role : "");
+        if (valid_role(role) && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES)
+            snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet_%s.log", la, role);
+        else
+            snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet.log", la);
         log_file = fopen(path, "a");
         if (!log_file) return;
     }

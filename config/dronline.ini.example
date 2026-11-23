@@ -2,6 +2,8 @@
 ;   Windows: %LOCALAPPDATA%\DELTARUNE\dronline.ini
 ;   Linux/Proton: <prefix>/drive_c/users/steamuser/AppData/Local/DELTARUNE/dronline.ini
 ; No file or mode=off: the patched game behaves like the unpatched one.
+; Two copies on one PC: start each with DRONLINE_ROLE=<name> to read dronline_<name>.ini instead
+;   (tools\local_test.bat does that for a host and a client).
 [online]
 ; off | solo | record | replay   (host | client come with the network layer)
 mode=record

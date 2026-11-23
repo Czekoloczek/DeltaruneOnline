@@ -114,6 +114,14 @@ why the settings live in `dronline.ini`.
 
 `tools/local_test.sh` runs a host and a client in two Wine prefixes with copies of the same save folder.
 
+On Windows both copies share one save folder (`%LOCALAPPDATA%\DELTARUNE`), so they would read the same
+`dronline.ini`. A copy started with the environment variable `DRONLINE_ROLE=<name>` (letters and digits) reads
+`dronline_<name>.ini` instead, if that file exists, and `drnet.dll` then logs to `drnet_<name>.log`.
+`tools\local_test.bat "<game folder>"` creates `dronline_host.ini` and `dronline_client.ini` (client connects to
+127.0.0.1) and starts both copies; choose Chapter 5 in each window. Without the variable, or without the
+matching file, a copy uses `dronline.ini` and `drnet.log` as before. Windows passes environment variables on to
+child processes, so the role should survive the launcher's chapter change too.
+
 ## Testing without a network: record and replay
 
 `mode=record` stores the local bits of every frame in `dronline_input.bin` and writes a state

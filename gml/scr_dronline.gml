@@ -3,7 +3,8 @@
 // The patcher rewrites every keyboard/gamepad read in the game and the mod to the dro_* functions below.
 // This file itself is NOT rewritten, so it can still read the real devices.
 //
-// Config: dronline.ini in the game's save folder (%LOCALAPPDATA%\DELTARUNE).
+// Config: dronline.ini in the game's save folder (%LOCALAPPDATA%\DELTARUNE), or dronline_<role>.ini
+// when the environment variable DRONLINE_ROLE=<role> is set and that file exists (two copies on one PC).
 //   [online]
 //   mode   = off | solo | record | replay | host | client
 //   players = 2 | 3                            (host/client) number of players; also the Local Multiplayer player count
@@ -30,9 +31,16 @@ function dronline_init()
     global.dro_maxdelay = 6;
     global.dro_lag = 0;
     global.dro_jitter = 0;
-    if (file_exists("dronline.ini"))
+    // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
+    // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
+    // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
+    global.dro_ini = "dronline.ini";
+    var role = environment_get_variable("DRONLINE_ROLE");
+    if (role != "" && string_length(role) <= 16 && string_lettersdigits(role) == role && file_exists("dronline_" + role + ".ini"))
+        global.dro_ini = "dronline_" + role + ".ini";
+    if (file_exists(global.dro_ini))
     {
-        ini_open("dronline.ini");
+        ini_open(global.dro_ini);
         global.dro_mode = string_lower(ini_read_string("online", "mode", "off"));
         global.dro_player = clamp(ini_read_real("online", "player", 1), 1, 3);
         global.dro_seed = ini_read_real("online", "seed", 1234);
@@ -101,7 +109,7 @@ function dronline_init()
         // and draws the "waiting" text, then frame 1 blocks until everybody is there.
         global.dro_net = true;
         global.dro_connecting = true;
-        drnet_log("init: network started, room " + room_get_name(room));
+        drnet_log("init: network started, room " + room_get_name(room) + ", config " + global.dro_ini);
         if (global.dro_debug)
         {
             // hits travel as plain instance numbers: check that the runtime accepts them as ids
