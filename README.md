@@ -131,7 +131,8 @@ DeltaruneOnline's own code (the patcher, the GML, `drnet.dll`, the tools and the
 [GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). If you give someone a changed
 version, you must also give them its source code under the same license; it does not have to be published for
 everyone. If you run a changed version that other people use over a network (for example a server they connect
-to), you must offer each of those users its source code, free of charge.
+to), that version must clearly offer each of those users its source code, free of charge, from a network server,
+for example with a link to its repository (section 13 of the license).
 
 The license does not cover DELTARUNE or the Local Multiplayer mod: they keep their own licenses (the mod's is
 CC BY-NC-ND). A `data.win` you build combines this code with the game's, so never share it: everyone builds their own.
