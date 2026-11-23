@@ -66,8 +66,12 @@ RULES = [(re.compile(a), b) for a, b in RULES]
 
 HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here
 HOOK_END = "gml_Object_obj_time_Other_3"      # Game End
-HOOK_GUI = "gml_Object_obj_time_Draw_64"       # Draw GUI: status line
-DLL = os.path.join(REPO, "native", "build", "drnet.dll")
+HOOK_GUI = "gml_Object_obj_time_Draw_64"       # Draw GUI: status line, arrows to the other players
+# Own camera (camera=own, a draft): Pre-Draw moves the view to the local character for drawing, Post-Draw puts the
+# shared camera back before the next Step. Both calls go first, so an exit in the game's own code can't skip them.
+HOOK_PREDRAW = "gml_Object_obj_time_Draw_76"
+HOOK_POSTDRAW = "gml_Object_obj_time_Draw_77"
+DLL =os.path.join(REPO, "native", "build", "drnet.dll")
 
 # Own SOUL (see "own SOUL" in scr_dronline.gml): hits on a heart are decided by its owner while the
 # owner's input is delayed. Heart 1 is hit through obj_heart's collision event, hearts 2 and 3 through
@@ -120,6 +124,13 @@ def heart_hooks(texts):
            "function dro_heart_hooked()\n{\n    return true;\n}\n\n"
            "function dro_heart_collide_p1(_dro_b)\n{\n" + fn.rstrip() + "\n}\n")
     return gen, note
+
+
+def camera_hooks(texts):
+    """Puts the own-camera calls first in obj_time's Pre-Draw and Post-Draw; creates the events that obj_time lacks
+    (the importer adds an event for a new gml_Object_<object>_<event> entry)."""
+    texts[HOOK_PREDRAW] = "dronline_cam_begin();\n" + texts.get(HOOK_PREDRAW, "")
+    texts[HOOK_POSTDRAW] = "dronline_cam_end();\n" + texts.get(HOOK_POSTDRAW, "")
 
 
 def run_utmt(utmt, data, scripts, out=None, env_extra=None):
@@ -191,8 +202,9 @@ def patch(a, work):
         texts[name] = new
         calls += n
     heart_gml, heart_note = heart_hooks(texts)
+    camera_hooks(texts)
     for name, new in texts.items():
-        if new != srcs[name]:
+        if new != srcs.get(name):
             open(os.path.join(imp_dir, name + ".gml"), "w", encoding="utf-8").write(new)
             files += 1
     end_src = open(os.path.join(code_dir, HOOK_END + ".gml"), encoding="utf-8").read() if HOOK_END in names else ""

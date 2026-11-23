@@ -154,5 +154,20 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("function dro_heart_collide_p1(_dro_b)", dp.HEART_OFF)
 
 
+class CameraHooks(unittest.TestCase):
+    def test_creates_missing_events(self):
+        t = {}
+        dp.camera_hooks(t)
+        self.assertEqual(t[dp.HOOK_PREDRAW], "dronline_cam_begin();\n")
+        self.assertEqual(t[dp.HOOK_POSTDRAW], "dronline_cam_end();\n")
+
+    def test_goes_before_existing_code(self):
+        # an exit in the existing event must not skip the call that puts the shared camera back
+        t = {dp.HOOK_POSTDRAW: "if (a)\n    exit;\ndraw_x();\n"}
+        dp.camera_hooks(t)
+        self.assertTrue(t[dp.HOOK_POSTDRAW].startswith("dronline_cam_end();\n"))
+        self.assertTrue(t[dp.HOOK_POSTDRAW].endswith("draw_x();\n"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -47,3 +47,10 @@ debug=0
 ; 0 or no key = off. Never reachable from the network, but any program on this PC can connect, so leave it off
 ; unless you use it. Not tested in the game yet.
 ;agent=8765
+; (host/client) 1 (default): an arrow at the edge of your screen points to every other player whose character is out
+; of your view, in the overworld. 0 = no arrows.
+;arrows=1
+; (host/client) shared (default): one camera that follows player 1, as in the game. own: in the overworld your screen
+; follows your own character once it leaves the shared view, and glides back when you return. A DRAFT, not tested in
+; the game yet: it may cause a desync (docs/DESIGN.md, "Own camera").
+;camera=shared

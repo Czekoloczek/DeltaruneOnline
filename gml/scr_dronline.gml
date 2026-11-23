@@ -35,6 +35,12 @@
 //                                              sends input for the local player (docs/agent-api.md). Never open to
 //                                              the network; any program on this PC can connect, so leave it off
 //                                              unless you use it
+//   arrows = 1 | 0                             (host/client) 1: an arrow at the edge of your screen points to every
+//                                              other player whose character is out of your view (overworld only)
+//   camera = shared | own                      (host/client) own: in the overworld your screen follows your own
+//                                              character once it leaves the shared view; the game itself keeps the
+//                                              shared camera. A DRAFT, not tested in the game: see "Own camera" in
+//                                              docs/DESIGN.md before using it
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -54,6 +60,8 @@ function dronline_init()
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
     global.dro_agent_tries = 0;
+    global.dro_arrows = 1;
+    global.dro_camera = "shared";
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -85,6 +93,8 @@ function dronline_init()
         global.dro_script_end = string_lower(ini_read_string("online", "script_end", "idle"));
         global.dro_srec_file = ini_read_string("online", "script_record", "");
         global.dro_agent_port = ini_read_real("online", "agent", 0);
+        global.dro_arrows = ini_read_real("online", "arrows", 1);
+        global.dro_camera = string_lower(ini_read_string("online", "camera", "shared"));
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -118,6 +128,14 @@ function dronline_init()
     global.dro_obj_bullet = asset_get_index("obj_collidebullet");
     global.dro_obj_solid = asset_get_index("obj_battlesolid");
     global.dro_obj_purple = asset_get_index("obj_purplecontrols");
+    global.dro_obj_kris = asset_get_index("obj_mainchara");
+    global.dro_obj_cater = asset_get_index("obj_caterpillarchara");
+    global.dro_cam_moved = false;
+    global.dro_cam_room = -1;
+    global.dro_cam_x = 0;
+    global.dro_cam_y = 0;
+    global.dro_cam_sx = 0;
+    global.dro_cam_sy = 0;
     if (!global.dro_on)
         return;
     if (global.dro_mode == "host" || global.dro_mode == "client")
@@ -538,6 +556,173 @@ function dronline_draw()
     draw_text(4, 4, txt);
     draw_set_alpha(1);
     draw_set_color(c_white);
+    if (global.dro_net && global.dro_arrows)
+        dronline_draw_arrows();
+}
+
+// ---- where the other players are: own camera and arrows (overworld) ----
+// Drawing only, like the own SOUL: nothing here changes game state or uses the shared random numbers, so every
+// machine may draw something different. Only reads: no instances, no game variables written.
+
+// True in the overworld while the players walk freely: not in a battle, menu, textbox or cutscene.
+function dronline_walking()
+{
+    if (variable_global_exists("fighting") && global.fighting)
+        return false;
+    if (variable_global_exists("interact") && global.interact != 0)
+        return false;
+    return true;
+}
+
+// The instance player p walks with in the overworld, or noone. Player 1 is Kris (obj_mainchara). In the Local
+// Multiplayer mod players 2 and 3 steer a party member: the obj_caterpillarchara whose `controls` is 1 or 2.
+function dronline_chara(p)
+{
+    if (p == 1)
+    {
+        if (global.dro_obj_kris < 0 || !instance_exists(global.dro_obj_kris))
+            return noone;
+        return instance_find(global.dro_obj_kris, 0);
+    }
+    if (global.dro_obj_cater < 0)   // with (-1) would mean "with self"
+        return noone;
+    var found = noone;
+    with (global.dro_obj_cater)
+    {
+        if (variable_instance_exists(id, "controls") && controls == p - 1)
+            found = id;
+    }
+    return found;
+}
+
+// The view this machine shows: the shared camera, or the own camera while dronline_cam_begin has moved it.
+function dronline_view_x()
+{
+    return global.dro_cam_moved ? global.dro_cam_x : camera_get_view_x(view_camera[0]);
+}
+
+function dronline_view_y()
+{
+    return global.dro_cam_moved ? global.dro_cam_y : camera_get_view_y(view_camera[0]);
+}
+
+// Draw GUI: one arrow at the screen edge for every other player whose character is out of view.
+function dronline_draw_arrows()
+{
+    if (global.dro_connecting || !dronline_walking())
+        return;
+    var cam = view_camera[0];
+    var vx = dronline_view_x();
+    var vy = dronline_view_y();
+    var vw = camera_get_view_width(cam);
+    var vh = camera_get_view_height(cam);
+    var gw = display_get_gui_width();
+    var gh = display_get_gui_height();
+    if (vw <= 0 || vh <= 0)
+        return;
+    for (var p = 1; p <= global.dro_players; p++)
+    {
+        if (p == global.dro_player)
+            continue;
+        var c = dronline_chara(p);
+        if (c == noone || !c.visible)
+            continue;
+        var cx = (c.bbox_left + c.bbox_right) / 2;
+        var cy = (c.bbox_top + c.bbox_bottom) / 2;
+        if (cx >= vx && cx <= vx + vw && cy >= vy && cy <= vy + vh)
+            continue;
+        // from the middle of the screen towards the character, stopped at the edge
+        var dx = (cx - vx) * gw / vw - gw / 2;
+        var dy = (cy - vy) * gh / vh - gh / 2;
+        var m = 18;
+        var t = min((abs(dx) > 0) ? (gw / 2 - m) / abs(dx) : 1000000, (abs(dy) > 0) ? (gh / 2 - m) / abs(dy) : 1000000);
+        var ax = gw / 2 + dx * t;
+        var ay = gh / 2 + dy * t;
+        var ang = point_direction(0, 0, dx, dy);
+        var bx = ax - lengthdir_x(16, ang);
+        var by = ay - lengthdir_y(16, ang);
+        draw_set_alpha(0.85);
+        draw_set_color(c_black);
+        draw_triangle(ax + lengthdir_x(2, ang), ay + lengthdir_y(2, ang), bx + lengthdir_x(10, ang + 90), by + lengthdir_y(10, ang + 90), bx + lengthdir_x(10, ang - 90), by + lengthdir_y(10, ang - 90), false);
+        draw_set_color(c_white);
+        draw_triangle(ax, ay, bx + lengthdir_x(7, ang + 90), by + lengthdir_y(7, ang + 90), bx + lengthdir_x(7, ang - 90), by + lengthdir_y(7, ang - 90), false);
+        draw_set_halign(fa_center);
+        draw_set_valign(fa_middle);
+        draw_text(bx - lengthdir_x(12, ang), by - lengthdir_y(12, ang), "P" + string(p));
+        draw_set_halign(fa_left);
+        draw_set_valign(fa_top);
+        draw_set_alpha(1);
+    }
+}
+
+// Own camera (camera=own), DRAFT. Pre-Draw of obj_time (hooked by the patcher): while the local character is
+// out of the shared view, move the view so that it follows the local character, only for drawing. Post-Draw
+// (dronline_cam_end) puts the shared camera back before anything else runs, so every Step, Alarm and script
+// reads the shared camera on every machine. Draw events in between read the own camera: a Draw event that
+// stores something computed from the camera would make the machines differ (docs/DESIGN.md, "Own camera").
+function dronline_cam_begin()
+{
+    global.dro_cam_moved = false;
+    if (!variable_global_exists("dro_mode") || !global.dro_net || global.dro_connecting || global.dro_camera != "own")
+        return;
+    if (global.dro_player == 1 || !dronline_walking())   // the shared camera follows player 1 anyway
+    {
+        global.dro_cam_room = -1;
+        return;
+    }
+    var c = dronline_chara(global.dro_player);
+    if (c == noone)
+    {
+        global.dro_cam_room = -1;
+        return;
+    }
+    var cam = view_camera[0];
+    var sx = camera_get_view_x(cam);
+    var sy = camera_get_view_y(cam);
+    var vw = camera_get_view_width(cam);
+    var vh = camera_get_view_height(cam);
+    var cx = (c.bbox_left + c.bbox_right) / 2;
+    var cy = (c.bbox_top + c.bbox_bottom) / 2;
+    // close to the others: the shared view; further away: the view centred on the own character
+    var m = 40;
+    var tx = sx;
+    var ty = sy;
+    if (cx < sx + m || cx > sx + vw - m || cy < sy + m || cy > sy + vh - m)
+    {
+        tx = clamp(cx - vw / 2, 0, max(0, room_width - vw));
+        ty = clamp(cy - vh / 2, 0, max(0, room_height - vh));
+    }
+    // glide there; jump on a new room or after a cutscene
+    if (global.dro_cam_room != room)
+    {
+        global.dro_cam_x = sx;
+        global.dro_cam_y = sy;
+        global.dro_cam_room = room;
+    }
+    global.dro_cam_x += (tx - global.dro_cam_x) * 0.2;
+    global.dro_cam_y += (ty - global.dro_cam_y) * 0.2;
+    if (abs(tx - global.dro_cam_x) < 1 && abs(ty - global.dro_cam_y) < 1)
+    {
+        global.dro_cam_x = tx;
+        global.dro_cam_y = ty;
+    }
+    if (round(global.dro_cam_x) == round(sx) && round(global.dro_cam_y) == round(sy))
+        return;
+    global.dro_cam_sx = sx;
+    global.dro_cam_sy = sy;
+    global.dro_cam_x = round(global.dro_cam_x);
+    global.dro_cam_y = round(global.dro_cam_y);
+    camera_set_view_pos(cam, global.dro_cam_x, global.dro_cam_y);
+    global.dro_cam_moved = true;
+}
+
+// Post-Draw of obj_time (hooked by the patcher): the shared camera again, exactly where the game left it.
+// dro_cam_moved stays set until the next Pre-Draw, so the arrows (Draw GUI) use the view that was drawn.
+function dronline_cam_end()
+{
+    if (!variable_global_exists("dro_mode") || !global.dro_cam_moved)
+        return;
+    camera_set_view_pos(view_camera[0], global.dro_cam_sx, global.dro_cam_sy);
 }
 
 // Writes the recorded input when the game ends (called from obj_time Game End / Clean Up by the patcher).
