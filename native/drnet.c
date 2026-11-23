@@ -474,8 +474,9 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
        process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
        again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
-       SetHandleInformation alone can fail with layered Winsock providers (antivirus, VPN), and that is logged. */
-    sock = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+       SetHandleInformation alone can fail with layered Winsock providers (antivirus, VPN), and that is logged.
+       WSA_FLAG_OVERLAPPED keeps it the same kind of socket that socket() makes. */
+    sock = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
     if (sock == INVALID_SOCKET) {               /* Windows older than 7 SP1 does not know the flag */
         logm("WSASocketW failed (WSA %d), using socket()", WSAGetLastError());
         sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
