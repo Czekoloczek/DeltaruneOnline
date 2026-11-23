@@ -122,6 +122,30 @@ The chapter select launcher cannot carry session settings: it builds a fresh par
 (only `launcher`, `switch_<n>` and `returning_<n>`), so anything passed to `DELTARUNE.exe` is dropped. That is
 why the settings live in `dronline.ini`.
 
+## Automated tests (no game needed)
+
+`bash tools/verify.sh` runs all of them in one go, with the lockstep test in three variants: 0 and 30 ms with 2
+players, and 3 players. `bash tools/setup_env.sh` installs the tools with apt, dnf or pacman; cloud agents such as
+CodeRabbit use the two scripts as their setup and startup scripts.
+
+They also run on every pull request and push to main (`.github/workflows/tests.yml`):
+
+- `python3 -m unittest discover -s tests -v` (standard library only):
+  - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
+    settings) and the obj_heart hooks, including "all or nothing" when the game's code looks different. The GML
+    snippets are written for the tests and only imitate the game's code.
+  - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
+    and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
+    types, with no function of more than 4 arguments taking a string (the pitfalls below).
+- `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players]`: runs `test_drnet.exe` as a host and
+  its clients and fails unless every side ends with the same checksum of all received input and no desync. On
+  Linux it uses Wine (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`)
+  it runs natively. CI runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test
+  latency and with 3 players.
+
+Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
+files must not be in the repository or in CI.
+
 ## Testing on one PC
 
 `tools/local_test.sh` runs a host and a client in two Wine prefixes with copies of the same save folder.

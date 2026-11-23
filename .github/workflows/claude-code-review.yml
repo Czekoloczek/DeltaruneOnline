@@ -20,6 +20,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
+permissions: {}
+
 jobs:
   claude-review:
     # PR-y Dependabota też przechodzą: dla nich przegląd ocenia, czy podbicie można scalić.
@@ -32,8 +35,11 @@ jobs:
       actions: read          # odczyt wyników CI przy recenzji (bez tego 403)
 
     steps:
+      # Commit PR-a, a nie próbne scalenie z main: testy i pliki czytane przez przegląd odpowiadają
+      # wtedy dokładnie diffowi z `gh pr diff`, a zmiana main w trakcie przebiegu ich nie zmienia.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
       # Model i effort przeglądu wybiera podagent (krok „Podagent wybiera model i effort”).
@@ -57,8 +63,13 @@ jobs:
           DELETED: ${{ github.event.pull_request.deletions }}
         run: |
           lines=$((ADDED + DELETED))
-          files="$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)"
+          # Lista plików z API, a nie z `gh pr diff --name-only`: przy przeniesieniu daje też starą
+          # ścieżkę (gml/a.gml -> docs/a.gml liczy się jako rdzeń), a nazw spoza ASCII nie cytuje.
+          # Commit PR-a, dla którego liczymy pliki; krok wyboru sprawdza, czy nadal jest ostatni.
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)"
+          files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')"
           core="$(grep -cE '^(gml|native|patcher)/' <<< "$files" || true)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           if [ "$AUTHOR" = "dependabot[bot]" ]; then
             model=claude-sonnet-5-5; effort=medium; why="podbicie od Dependabota"
           elif [ "$core" -gt 0 ] && [ "$lines" -gt 400 ]; then
@@ -73,6 +84,7 @@ jobs:
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "effort=$effort" >> "$GITHUB_OUTPUT"
           echo "why=$why: $lines linii, plików rdzenia: $core" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
 
       # Krótki przebieg Claude przed przeglądem: patrzy na PR i sam decyduje, jakim modelem
       # i z jakim effort go przejrzeć. Zwraca JSON (--json-schema -> structured_output).
@@ -103,33 +115,56 @@ jobs:
             podbija wersje akcji; przegląd ma wtedy ocenić informacje o wydaniach.
 
             Do wyboru:
-            - model: claude-sonnet-5-5 (szybszy, wystarcza do dokumentacji, narzędzi,
-              prostych i mechanicznych zmian) albo claude-opus-5-5 (dokładniejszy; zmiany
-              logiki lockstepu, synchronizacji, wątków, kodu wstawianego do gry),
+            - model:
+              - claude-haiku-5-5: najtańszy, tylko do bardzo małych i mało znaczących zmian,
+                przy których przegląd nie ma czego głęboko analizować: literówki, komentarze,
+                opisy, przykładowe pliki ustawień, podbicie wersji akcji bez zmiany sposobu
+                jej użycia. Nigdy przy zmianach w gml/, native/ ani patcher/;
+              - claude-sonnet-5-5: szybszy, wystarcza do dokumentacji, narzędzi, prostych
+                i mechanicznych zmian;
+              - claude-opus-5-5: dokładniejszy; zmiany logiki lockstepu, synchronizacji,
+                wątków, kodu wstawianego do gry,
             - effort: low, medium, high albo xhigh. Wyższy przy zmianach dużych, subtelnych
               albo z ryzykiem rozjazdu; niski przy drobnych i oczywistych.
             Wybierz najtańsze połączenie, które da rzetelny przegląd. W `reason` napisz jednym
             zdaniem, dlaczego.
           claude_args: |
-            --model claude-sonnet-5-5 --effort low --max-turns 8 --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)" --json-schema '{"type":"object","properties":{"model":{"type":"string","enum":["claude-sonnet-5-5","claude-opus-5-5"]},"effort":{"type":"string","enum":["low","medium","high","xhigh"]},"reason":{"type":"string"}},"required":["model","effort","reason"],"additionalProperties":false}'
+            --model claude-sonnet-5-5 --effort low --max-turns 8 --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)" --json-schema '{"type":"object","properties":{"model":{"type":"string","enum":["claude-haiku-5-5","claude-sonnet-5-5","claude-opus-5-5"]},"effort":{"type":"string","enum":["low","medium","high","xhigh"]},"reason":{"type":"string"}},"required":["model","effort","reason"],"additionalProperties":false}'
 
       # Wybór podagenta przechodzi przez listę dozwolonych wartości, zanim trafi do claude_args
       # przeglądu (to tekst od modelu czytającego PR). Uzasadnienie idzie tylko do podsumowania.
+      # Haiku nigdy nie przegląda rdzenia: jeśli podagent go wybierze, a PR dotyka gml/, native/
+      # albo patcher/ (liczone przez krok zapasowy, nie przez model), przegląd idzie na Sonnecie.
+      # To samo, gdy PR dostał nowy commit po policzeniu plików: wtedy CORE może być nieaktualne.
       - name: Wybór modelu i effort
         id: wybor
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           OUT: ${{ steps.podagent.outputs.structured_output }}
           Z_MODEL: ${{ steps.zapas.outputs.model }}
           Z_EFFORT: ${{ steps.zapas.outputs.effort }}
           Z_WHY: ${{ steps.zapas.outputs.why }}
+          CORE: ${{ steps.zapas.outputs.core }}
+          COUNTED_SHA: ${{ steps.zapas.outputs.sha }}
         run: |
           model="$(jq -r '.model // empty' <<< "$OUT" 2>/dev/null || true)"
           effort="$(jq -r '.effort // empty' <<< "$OUT" 2>/dev/null || true)"
           reason="$(jq -r '.reason // empty' <<< "$OUT" 2>/dev/null || true)"
-          case "$model" in claude-sonnet-5-5|claude-opus-5-5) ;; *) model="" ;; esac
+          case "$model" in claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5) ;; *) model="" ;; esac
           case "$effort" in low|medium|high|xhigh) ;; *) effort="" ;; esac
           if [ -n "$model" ] && [ -n "$effort" ]; then
             src="podagent: $reason"
+            if [ "$model" = claude-haiku-5-5 ]; then
+              now="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha || true)"
+              if [ "${CORE:-0}" -gt 0 ]; then
+                model=claude-sonnet-5-5
+                src="$src (Haiku odrzucony: PR dotyka rdzenia, plików: $CORE)"
+              elif [ -z "$now" ] || [ "$now" != "$COUNTED_SHA" ]; then
+                model=claude-sonnet-5-5
+                src="$src (Haiku odrzucony: PR zmienił się po policzeniu plików)"
+              fi
+            fi
           else
             model="$Z_MODEL"; effort="$Z_EFFORT"; src="zapas, podagent nie zwrócił poprawnego wyboru ($Z_WHY)"
           fi
@@ -188,8 +223,22 @@ jobs:
             odpala Game End przy restarcie na starcie rozdziału, więc Game End nie może
             zamykać gniazda; `begin` to słowo kluczowe GML.
 
-            Testów automatycznych w repo nie ma, a gry nie da się tu uruchomić: oceniasz
-            z lektury kodu i docs/DESIGN.md.
+            Gry nie da się tu uruchomić. Możesz za to uruchomić testy bez gry (reguły patchera,
+            haki serca, spójność GML z drnet.c i add_extension.csx):
+
+                python3 -m unittest discover -s tests -v
+
+            Test lockstepu drnet.dll pod Wine robi workflow „Testy”; jego wynik odczytasz
+            narzędziami CI. Wnioski poparte uruchomieniem są warte więcej niż z samej lektury.
+            Diff PR-a bierz z `gh pr diff` (checkout nie ma historii main).
+            Checkout i testy dotyczą commitu ${{ github.event.pull_request.head.sha }}, a
+            `gh pr diff` zawsze pokazuje najnowszy stan PR-a. Zanim powołasz się na wynik
+            testów, sprawdź `gh pr view ${{ github.event.pull_request.number }} --json headRefOid`.
+            Jeśli wskazuje inny commit, napisz, że testy uruchomiłeś na starszej wersji PR-a.
+
+            Uwagi do konkretnych linii dodawaj jako komentarze inline
+            (mcp__github_inline_comment__create_inline_comment), a podsumowanie w komentarzu
+            śledzącym.
 
             AUTOR PR-a: ${{ github.event.pull_request.user.login }}.
 
@@ -223,6 +272,15 @@ jobs:
           # na tokeny i reguła nie powstaje. --allowedTools sumuje się z zestawem trybu tag,
           # więc Read/Grep/Glob nie trzeba tu wymieniać. gh release list/view służą ocenie
           # PR-ów Dependabota (informacje o wydaniach podbijanych akcji).
+          #
+          # Skill(code-review:code-review): bez tego prompt zaczynający się od
+          # /code-review:code-review nie uruchamia wtyczki (przeglądy PR 3 i 4 to zgłosiły).
+          # Komentarze inline idą przez serwer MCP akcji (mcp__github_inline_comment__...),
+          # który akcja włącza tylko, gdy narzędzie jest na liście. Celowo NIE `Bash(gh api:*)`,
+          # o które prosił przegląd: pozwala na niemal każde wywołanie API z tokenem przebiegu.
+          # `python3 -m unittest` wykonuje kod testów z PR-a; to hartowanie przeciw
+          # wstrzyknięciu, nie sandbox.
+          #
           # Model i effort z kroku „Wybór modelu i effort” (podagent albo zapas), zawsze z listy
           # dozwolonych wartości, a nie domyślne akcji, które zmieniałyby się z jej wersją.
-          claude_args: '--model ${{ steps.wybor.outputs.model }} --effort ${{ steps.wybor.outputs.effort }} --allowedTools "Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh release list:*),Bash(gh release view:*)"'
+          claude_args: '--model ${{ steps.wybor.outputs.model }} --effort ${{ steps.wybor.outputs.effort }} --allowedTools "Skill(code-review:code-review),mcp__github_inline_comment__create_inline_comment,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh release list:*),Bash(gh release view:*),Bash(python3 -m unittest:*)"'
