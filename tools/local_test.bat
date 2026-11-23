@@ -41,7 +41,8 @@ if not exist "%SAVE%\dronline_client.ini" (
 )
 set "DRONLINE_ROLE=host"
 start "" /D "%GAME%" "%GAME%\DELTARUNE.exe"
-timeout /t 3 /nobreak >nul
+rem wait 3 s (ping instead of timeout, which fails when started from another script)
+ping -n 4 127.0.0.1 >nul
 set "DRONLINE_ROLE=client"
 start "" /D "%GAME%" "%GAME%\DELTARUNE.exe"
 echo Started host and client.

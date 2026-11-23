@@ -197,16 +197,17 @@ reads in game logic.
   game fails with "Variable drnet_... not set before reading it" (`patcher/utmt/add_extension.csx`).
 - **Do not dispatch window messages while blocking.** Running GameMaker's window procedure in the
   middle of a frame deadlocked both games; peeking (`PM_NOREMOVE`) is enough to keep the window alive.
-- **A chapter change (`game_change()`) starts a new game process that inherits the old one's handles**, and the
-  old process exits without Clean Up. An inherited socket kept the host port bound inside the new process, so
-  hosting again failed. `drnet.c` therefore marks its socket as not inheritable (tested on Windows, 2026-11-23).
-- **No networking at process exit.** A goodbye sent from `DllMain` (`DLL_PROCESS_DETACH`) was logged as sent
-  but never arrived (Windows, 2026-11-23), so it is sent from Game End and the chapter change instead, while the
-  game still runs.
 - **DELTARUNE fires Game End when it restarts itself at chapter start** (`room_gms_debug_failsafe`
   → `ROOM_INITIALIZE`), so nothing in Game End may close the network socket.
 - Under Wine/Proton with two monitors, the game positions its window from the X11 monitor layout, which
   can differ from the Wayland compositor's layout, so windows may open off screen.
+- **The socket must not be inheritable.** A chapter change (`game_change()`) starts a new game process that
+  inherits the old one's handles, and the old process exits without Clean Up. An inherited socket kept the host
+  port bound inside the new process, so hosting again failed. `drnet.c` creates its socket with
+  `WSA_FLAG_NO_HANDLE_INHERIT` (making it non-inheritable afterwards passed the Windows test, 2026-11-23).
+- **No networking at process exit.** A goodbye sent from `DllMain` (`DLL_PROCESS_DETACH`) was logged as sent
+  but never arrived (Windows, 2026-11-23), so it is sent from Game End and the chapter change instead, while the
+  game still runs.
 
 ## Playing over WireGuard
 

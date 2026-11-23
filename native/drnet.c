@@ -471,12 +471,18 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     delay_auto = dly < 0; delay = delay_auto ? 0 : (int)dly;
     if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); return 0; }
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); return 0; }
-    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) return fail("socket");
     /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
        process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
-       again fails until that process ends (Phase 1 test, 2026-11-23; this fix passed the Windows test). */
-    SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0);
+       again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
+       SetHandleInformation alone can fail with layered Winsock providers (antivirus, VPN), and that is logged. */
+    sock = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+    if (sock == INVALID_SOCKET) {               /* Windows older than 7 SP1 does not know the flag */
+        logm("WSASocketW failed (WSA %d), using socket()", WSAGetLastError());
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCKET) return fail("socket");
+        if (!SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0))
+            logm("SetHandleInformation failed (%lu): a chapter change may keep port %g busy", GetLastError(), port);
+    }
     ioctlsocket(sock, FIONBIO, &nb);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
@@ -570,6 +576,8 @@ EXPORT double drnet_exchange(double frame, double my_bits)
         lock();
         ready = 1; left = 0;
         for (p = 1; p <= players; p++) if (!has_input(p, f)) { ready = 0; if (gone[p]) left = p; }
+        /* a client gets the other clients' input only through the host: once the host left, nothing missing arrives */
+        if (!ready && !left && !is_host && gone[1]) left = 1;
         if (left) left_status(left);
         now = now_us();
         if (!ready && now - last_send > 16000) {             /* resend while waiting */
