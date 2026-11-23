@@ -13,7 +13,9 @@ cd "$(dirname "$0")/build"
 WINE=${WINE:-wine}
 export WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="    # no Mono/Gecko install prompts
 export WINEPREFIX="${WINEPREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/dronline-test/pair}"
-"$WINE" cmd /c exit >/dev/null 2>&1 || true                    # create the prefix before two copies race for it
+mkdir -p "$(dirname "$WINEPREFIX")"                             # Wine creates the prefix, but not its parent
+# Create the prefix before two copies race for it; a failure here shows up as "did not finish" below.
+"$WINE" cmd /c exit >/dev/null 2>&1 || echo "warning: creating the Wine prefix $WINEPREFIX failed"
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
