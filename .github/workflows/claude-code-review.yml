@@ -73,6 +73,7 @@ jobs:
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "effort=$effort" >> "$GITHUB_OUTPUT"
           echo "why=$why: $lines linii, plików rdzenia: $core" >> "$GITHUB_OUTPUT"
+          echo "core=$core" >> "$GITHUB_OUTPUT"
 
       # Krótki przebieg Claude przed przeglądem: patrzy na PR i sam decyduje, jakim modelem
       # i z jakim effort go przejrzeć. Zwraca JSON (--json-schema -> structured_output).
@@ -103,18 +104,26 @@ jobs:
             podbija wersje akcji; przegląd ma wtedy ocenić informacje o wydaniach.
 
             Do wyboru:
-            - model: claude-sonnet-5-5 (szybszy, wystarcza do dokumentacji, narzędzi,
-              prostych i mechanicznych zmian) albo claude-opus-5-5 (dokładniejszy; zmiany
-              logiki lockstepu, synchronizacji, wątków, kodu wstawianego do gry),
+            - model:
+              - claude-haiku-5-5: najtańszy, tylko do bardzo małych i mało znaczących zmian,
+                przy których przegląd nie ma czego głęboko analizować: literówki, komentarze,
+                opisy, przykładowe pliki ustawień, podbicie wersji akcji bez zmiany sposobu
+                jej użycia. Nigdy przy zmianach w gml/, native/ ani patcher/;
+              - claude-sonnet-5-5: szybszy, wystarcza do dokumentacji, narzędzi, prostych
+                i mechanicznych zmian;
+              - claude-opus-5-5: dokładniejszy; zmiany logiki lockstepu, synchronizacji,
+                wątków, kodu wstawianego do gry,
             - effort: low, medium, high albo xhigh. Wyższy przy zmianach dużych, subtelnych
               albo z ryzykiem rozjazdu; niski przy drobnych i oczywistych.
             Wybierz najtańsze połączenie, które da rzetelny przegląd. W `reason` napisz jednym
             zdaniem, dlaczego.
           claude_args: |
-            --model claude-sonnet-5-5 --effort low --max-turns 8 --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)" --json-schema '{"type":"object","properties":{"model":{"type":"string","enum":["claude-sonnet-5-5","claude-opus-5-5"]},"effort":{"type":"string","enum":["low","medium","high","xhigh"]},"reason":{"type":"string"}},"required":["model","effort","reason"],"additionalProperties":false}'
+            --model claude-sonnet-5-5 --effort low --max-turns 8 --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)" --json-schema '{"type":"object","properties":{"model":{"type":"string","enum":["claude-haiku-5-5","claude-sonnet-5-5","claude-opus-5-5"]},"effort":{"type":"string","enum":["low","medium","high","xhigh"]},"reason":{"type":"string"}},"required":["model","effort","reason"],"additionalProperties":false}'
 
       # Wybór podagenta przechodzi przez listę dozwolonych wartości, zanim trafi do claude_args
       # przeglądu (to tekst od modelu czytającego PR). Uzasadnienie idzie tylko do podsumowania.
+      # Haiku nigdy nie przegląda rdzenia: jeśli podagent go wybierze, a PR dotyka gml/, native/
+      # albo patcher/ (liczone przez krok zapasowy, nie przez model), przegląd idzie na Sonnecie.
       - name: Wybór modelu i effort
         id: wybor
         env:
@@ -122,14 +131,19 @@ jobs:
           Z_MODEL: ${{ steps.zapas.outputs.model }}
           Z_EFFORT: ${{ steps.zapas.outputs.effort }}
           Z_WHY: ${{ steps.zapas.outputs.why }}
+          CORE: ${{ steps.zapas.outputs.core }}
         run: |
           model="$(jq -r '.model // empty' <<< "$OUT" 2>/dev/null || true)"
           effort="$(jq -r '.effort // empty' <<< "$OUT" 2>/dev/null || true)"
           reason="$(jq -r '.reason // empty' <<< "$OUT" 2>/dev/null || true)"
-          case "$model" in claude-sonnet-5-5|claude-opus-5-5) ;; *) model="" ;; esac
+          case "$model" in claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5) ;; *) model="" ;; esac
           case "$effort" in low|medium|high|xhigh) ;; *) effort="" ;; esac
           if [ -n "$model" ] && [ -n "$effort" ]; then
             src="podagent: $reason"
+            if [ "$model" = claude-haiku-5-5 ] && [ "${CORE:-0}" -gt 0 ]; then
+              model=claude-sonnet-5-5
+              src="$src (Haiku odrzucony: PR dotyka rdzenia, plików: $CORE)"
+            fi
           else
             model="$Z_MODEL"; effort="$Z_EFFORT"; src="zapas, podagent nie zwrócił poprawnego wyboru ($Z_WHY)"
           fi
