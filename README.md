@@ -24,6 +24,8 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
 3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
+   The virtual audio clock is done; still open are system clock reads in gameplay code (20 entries in Chapter 5)
+   and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
@@ -34,6 +36,9 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
      other players' hearts are dimmed, so several hearts are no longer confused;
    - **shared camera that splits when players drift apart**: one camera while everyone is close, split
      screen once a player walks too far away.
+8. **Session start**: send the host's save, mod settings (`keyconfig_mod.ini`) and language to every player
+   automatically; for now they are copied by hand.
+9. **Chapters 1 to 4**: port the patch; the hazard counts per chapter are in [docs/DESIGN.md](docs/DESIGN.md).
 
 The first prototype targets Chapter 5 and is tested with two copies of the game on one PC before going over a network.
 

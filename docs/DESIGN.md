@@ -16,6 +16,12 @@ it reads keys from `global.input_k[]` and gamepad buttons from `global.input_g[]
 Besides that, about 330 direct reads (`keyboard_check*`, `gamepad_*`) are spread over ~66 code entries
 of the game and the mod (Chapter 5, game 0.253 + mod v19).
 
+The **mouse** is not part of the virtual input yet. 8 entries in Chapter 5 read it; all but one are editors,
+test objects and debug code. The exception is a battle attack: in `obj_attack_blue_flowerbullet` (Step) a flower
+bullet explodes as soon as the mouse cursor is over it, so with the cursor in a different place on each screen
+the machines would desync. Online, mouse reads must answer the same value everywhere (for example a position far
+off screen).
+
 ## Virtual input layer (`gml/scr_dronline.gml`)
 
 1. Every machine reads **its own** keyboard and gamepad and turns them into **action bits** of its local
@@ -87,7 +93,22 @@ way → ping 121 ms, delay 2, 33 ms frames; 30 ms each way with a fixed delay 0 
 automatic delay avoids). Checksums identical in every run.
 
 Session start: all machines must start from the same files (save, `dr.ini`, key config) and the same seed.
-For now copy the host's save folder to the clients by hand; sending it automatically is planned.
+For now copy the host's save folder to the clients by hand; sending it automatically is planned. Two files in that
+folder change gameplay and are easy to forget when the transfer is automated:
+
+- **`keyconfig_mod.ini`**, the Local Multiplayer settings: `SHARE_INV` (shared inventory), `EASIER_BOSS`,
+  `OLD_RHYTHM` (old rhythm game), `PREF_RALSEI`, `P2_FEATHER_INVERT` / `P3_FEATHER_INVERT`. Colours and
+  controller numbers are local only. `PLAYER_AMOUNT` does not need copying: online, the player count comes from
+  `players` in `dronline.ini`. It is set when the network starts, and the patcher turns the mod's reads of
+  `PLAYER_AMOUNT` (new game, loading a save, the config menu) into `dro_ini_player_amount`, which returns the
+  session's count. F1–F3 still change it during play; they travel as input, so every machine applies them.
+- **`true_config.ini`**, which holds the language (`LANG`). English and Japanese text have different lengths, so
+  dialogue would end on different frames. Without the file the game picks the language from the OS locale, so a
+  Japanese Windows starts in Japanese.
+
+The chapter select launcher cannot carry session settings: it builds a fresh parameter list for the chapter
+(only `launcher`, `switch_<n>` and `returning_<n>`), so anything passed to `DELTARUNE.exe` is dropped. That is
+why the settings live in `dronline.ini`.
 
 ## Testing on one PC
 
@@ -117,9 +138,37 @@ If the logs match, the game is deterministic for that stretch of play, which is 
 | fps / delta time | 19 | 11 |
 | window / display | 17 | 9 |
 | file reads | 20 | 11 |
+| mouse | 42 | 8 |
 
 Random calls are fine as long as every machine consumes the RNG in the same order with the same seed.
 Clock, audio and fps reads are the real risks; record/replay shows which ones matter in practice.
+
+**System clock.** Audio state already goes through the virtual audio clock, but clock reads do not. Of the
+52 clock entries in Chapter 5, 30 are Draw events, which only change the picture. Of the other 22, `scr_save`
+only writes the date into the save file, and `scr_screenspace` only uses the clock as a cache key for the camera
+position and is called from Draw events alone. The remaining **20 are game logic** and need a frame-based clock
+(`frames × 1000 / 30` ms): `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
+`obj_cliff_petalwarp` (and its `_old` copy), `obj_dw_flowerydash`, `obj_dw_post_fountain_close`,
+`obj_flowery_runner`, `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, and the platformer objects `obj_plat_coin`,
+`obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
+`obj_plat_stringed_object`. The rhythm game times itself with `delta_time`, counted under fps / delta time.
+
+**Other chapters** (same scanner, game 0.253 + mod v19, uses / entries):
+
+| Hazard | Ch 1 | Ch 2 | Ch 3 | Ch 4 |
+|---|---|---|---|---|
+| random calls | 416 / 113 | 1951 / 524 | 2507 / 660 | 2338 / 519 |
+| system clock | 1 / 1 | 3 / 3 | 23 / 13 | 133 / 63 |
+| (clock outside Draw) | 1 | 3 | 7 | 34 |
+| audio state | 2 / 2 | 80 / 45 | 50 / 33 | 74 / 47 |
+| fps / delta time | 2 / 2 | 3 / 3 | 14 / 7 | 21 / 13 |
+| window / display | 14 / 9 | 15 / 9 | 22 / 13 | 20 / 12 |
+| file reads | 10 / 8 | 15 / 12 | 26 / 19 | 19 / 14 |
+| mouse | 0 / 0 | 15 / 6 | 34 / 9 | 36 / 8 |
+
+All five chapters share the same input design (`obj_time` Begin Step, slots 0–9 / 200–205 / 300–305), so the
+virtual input layer carries over; the work per chapter is mostly these hazards. Chapter 4 has the most clock
+reads in game logic.
 
 ## Pitfalls found while testing
 
@@ -134,6 +183,20 @@ Clock, audio and fps reads are the real risks; record/replay shows which ones ma
   → `ROOM_INITIALIZE`), so nothing in Game End may close the network socket.
 - Under Wine/Proton with two monitors, the game positions its window from the X11 monitor layout, which
   can differ from the Wayland compositor's layout, so windows may open off screen.
+
+## Playing over WireGuard
+
+WireGuard puts both PCs on one private network, so the game works as on a LAN:
+
+- Only the PC that runs the **WireGuard server** needs a forwarded port on its router: WireGuard's own UDP port
+  (51820 by default). The game's port needs no forwarding.
+- In `dronline.ini` on the clients, `host=` is the game host's **WireGuard address** (for example `10.8.0.1`),
+  not its public internet address.
+- Windows Firewall often classes the WireGuard network as *Public* and blocks incoming traffic. The game host
+  needs an inbound rule for **UDP 7845** (or for `DELTARUNE.exe`) on that network. With the star topology only
+  the host needs it.
+- Packets are small (16 frames of input per packet), so WireGuard's lower MTU is no problem.
+- Any PC can be the game host; it does not have to be the one running the WireGuard server.
 
 ## Headless test
 
