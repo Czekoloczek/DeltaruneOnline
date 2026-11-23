@@ -1,0 +1,16 @@
+# Konfiguracja aktualizacji zależności.
+# https://docs.github.com/code-security/dependabot/working-with-dependabot/dependabot-options-reference
+#
+# Menedżera pakietów repo dziś nie ma: patcher używa tylko biblioteki standardowej Pythona,
+# drnet.dll buduje mingw-w64, a UndertaleModTool, grę i mod każdy gracz ma u siebie.
+# Zostają akcje w workflowach. Gdy dojdzie np. requirements.txt, dopisz tu wpis "pip".
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      # Codziennie (dni robocze), jak w pozostałych repo.
+      interval: "daily"
+    commit-message:
+      prefix: "ci"
