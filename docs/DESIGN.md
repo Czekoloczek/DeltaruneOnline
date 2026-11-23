@@ -122,8 +122,10 @@ Run on every pull request and push to main (`.github/workflows/tests.yml`):
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
     types, with no function of more than 4 arguments taking a string (the pitfalls below).
 - `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players]`: runs `test_drnet.exe` as a host and
-  its clients under Wine and fails unless every side ends with the same checksum of all received input and no
-  desync. CI runs it with 0, 30 and 60 ms test latency and with 3 players.
+  its clients and fails unless every side ends with the same checksum of all received input and no desync. On
+  Linux it uses Wine (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`)
+  it runs natively. CI runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test
+  latency and with 3 players.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
