@@ -35,8 +35,11 @@ jobs:
       actions: read          # odczyt wyników CI przy recenzji (bez tego 403)
 
     steps:
+      # Commit PR-a, a nie próbne scalenie z main: testy i pliki czytane przez przegląd odpowiadają
+      # wtedy dokładnie diffowi z `gh pr diff`, a zmiana main w trakcie przebiegu ich nie zmienia.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
       # Model i effort przeglądu wybiera podagent (krok „Podagent wybiera model i effort”).
