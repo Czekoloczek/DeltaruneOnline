@@ -6,15 +6,21 @@
 set -eu
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+# Wine goes in a separate step everywhere: without it only the lockstep test is skipped, so a missing Wine package
+# must not stop the rest of the setup.
+NO_WINE="Wine not available here: tools/verify.sh will skip the lockstep test"
 if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-        python3 gcc-mingw-w64-x86-64 wine wine64 xdelta3
+        python3 gcc-mingw-w64-x86-64 xdelta3
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends wine wine64 \
+        || echo "$NO_WINE"
 elif command -v dnf >/dev/null 2>&1; then
     $SUDO dnf install -y python3 mingw64-gcc xdelta
-    $SUDO dnf install -y wine-core || echo "Wine not available here: tools/verify.sh will skip the lockstep test"
+    $SUDO dnf install -y wine-core || echo "$NO_WINE"
 elif command -v pacman >/dev/null 2>&1; then
-    $SUDO pacman -S --needed --noconfirm python mingw-w64-gcc wine xdelta3
+    $SUDO pacman -S --needed --noconfirm python mingw-w64-gcc xdelta3
+    $SUDO pacman -S --needed --noconfirm wine || echo "$NO_WINE"
 else
     echo "Unknown package manager. Install by hand: Python 3.11+, x86_64-w64-mingw32-gcc, Wine, xdelta3."
     exit 1
