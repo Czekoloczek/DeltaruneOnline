@@ -18,6 +18,9 @@
 //   player = 1 | 2 | 3                         local player
 //   seed   = 1234                              shared random seed
 //   pad    = -1                                local gamepad index, -1 = first connected
+//   debug  = 0 | 1                             (testing) 1: also write dronline_state.txt (the instances at every
+//                                              checkpoint up to frame 2400, for tools/diff_state.py) and log every
+//                                              state hash after that frame
 //   script = dronline_script.bin               (host/client/solo) take the local player's input from this file instead of
 //                                              the keyboard and gamepad: one little-endian u16 of action bits per input
 //                                              frame, written by script_record or by tools/input_script.py from a text script
