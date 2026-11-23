@@ -1,6 +1,6 @@
 name: Claude Code Review
 
-# Wzorowane na ISAPX, bez kroków jego środowiska Pythona (tu nie ma testów do uruchomienia).
+# Wzorowane na ISAPX, bez kroków jego środowiska Pythona: testy stąd działają na systemowym Pythonie runnera.
 #
 # Sekret CLAUDE_CODE_OAUTH_TOKEN musi być w DWÓCH miejscach: w sekretach Actions (PR-y ludzi)
 # i w sekretach Dependabota (przebiegi, które wyzwala Dependabot, widzą tylko te drugie).
@@ -41,6 +41,18 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
+
+      # Wiki to osobne repo, którego PR nie zmienia; przegląd czyta je, żeby wskazać strony
+      # nieaktualne po tej zmianie. Wiki jest publiczne, więc wystarcza token przebiegu.
+      # Gdy klonowanie się nie uda, przegląd i tak rusza i pisze, że wiki nie sprawdził.
+      - name: Wiki do porównania z PR-em
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: _wiki
+          fetch-depth: 1
+          persist-credentials: false
 
       # Model i effort przeglądu wybiera podagent (krok „Podagent wybiera model i effort”).
       # Ten krok liczy tylko ZAPASOWY wybór, użyty gdy podagent nic nie zwróci. Rdzeń
@@ -235,6 +247,16 @@ jobs:
             `gh pr diff` zawsze pokazuje najnowszy stan PR-a. Zanim powołasz się na wynik
             testów, sprawdź `gh pr view ${{ github.event.pull_request.number }} --json headRefOid`.
             Jeśli wskazuje inny commit, napisz, że testy uruchomiłeś na starszej wersji PR-a.
+
+            AKTUALNOŚĆ DOKUMENTACJI (pomiń przy PR-ach Dependabota): sprawdź, czy po tej zmianie
+            nie zostały nieaktualne README.md, docs/DESIGN.md, config/dronline.ini.example,
+            komentarz z ustawieniami na górze gml/scr_dronline.gml ani opisy i pomoc skryptów
+            w tools/, patcher/ i native/ (zasada w CLAUDE.md). Kopia wiki leży w katalogu _wiki/:
+            to osobne repo, nie część PR-a. Wymień strony wiki do poprawienia po scaleniu, a jeśli
+            katalogu brak, napisz, że wiki nie sprawdziłeś. Dla każdej nieaktualnej rzeczy podaj
+            plik albo stronę, fragment i to, co powinien teraz mówić. Zbierz to w podsumowaniu
+            w osobnej sekcji „Dokumentacja” (dla plików z diffu także inline) i NIE zakładaj
+            dla tego issues: to poprawki do tego PR-a albo do wiki, a nie błędy.
 
             Uwagi do konkretnych linii dodawaj jako komentarze inline
             (mcp__github_inline_comment__create_inline_comment), a podsumowanie w komentarzu
