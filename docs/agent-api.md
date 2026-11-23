@@ -41,7 +41,7 @@ python3 tools/deepseek_player.py "walk to the save point and save"
 ```
 
 Every turn it reads the state, sends DeepSeek a few lines about it (room, where the player is, the dialogue, a
-choice, the nearest objects with their offset), the goal and the last six turns, and plays the steps the model
+choice, the save point menu when the state has it, the nearest objects with their offset), the goal and the last six turns, and plays the steps the model
 answers with (the text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s). A dialogue box
 that only waits for confirm is answered without asking the model, unless confirm changed nothing last time; its
 text still goes into the turns the model is shown. The run ends when the model says the goal is reached (exit 0)

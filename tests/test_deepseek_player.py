@@ -135,6 +135,11 @@ class Prompt(unittest.TestCase):
              "desync": -1}
         self.assertEqual(p.summarize(s), "chapter=2")
 
+    def test_save_menu(self):
+        s = {"save_menu": {"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0, "overwrite_x": 0}}
+        self.assertIn('save point menu: {"stage":0,"x":0,"y":0,', p.summarize(s))
+        self.assertNotIn("save point menu", p.summarize({"save_menu": None, "room": "r"}))
+
     def test_long_dialogue_and_many_objects_are_cut(self):
         s = {"player": 1, "players_pos": [{"player": 1, "x": 0, "y": 0}],
              "dialogue": [{"text": "a" * 5000, "waiting": False}],

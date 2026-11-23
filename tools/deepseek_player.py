@@ -152,6 +152,13 @@ def summarize(state):
         opts = [" ".join(str(o).split())[:60] for o in (c.get("options") or [])]
         out.append("choice: %s, selected %s (0 left, 1 right, 2 up, 3 down)" % (
             json.dumps(opts, ensure_ascii=False), c.get("selected")))
+    sm = s.get("save_menu")
+    if isinstance(sm, dict):
+        # The key of the Agent API's save point menu (PR 37 of the game side); the numbers are the game's own.
+        out.append("save point menu: %s. stage 0: main box, cursor x,y = Save (0,0), Return (1,0), Storage (0,1), "
+                   "Recruits (1,1), x=2 a saved message waits for confirm; stage 1: file slot 0-2, 3 Return; "
+                   "overwrite=1: overwrite question, overwrite_x 0 Save 1 Return"
+                   % json.dumps(sm, separators=(",", ":"))[:200])
     near = []
     for o in (s.get("nearby") or [])[:MAX_NEARBY]:
         if not isinstance(o, dict):
