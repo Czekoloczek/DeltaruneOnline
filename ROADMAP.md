@@ -207,9 +207,11 @@ starts.
 
 Goal: learn the few things that decide the design before writing much code. Each spike is a throw-away build.
 
-**Status (2026-11-23):** one test build covers spikes 1, 2, 3 and 5 (`patcher/ch5/net_test.csx`). It compiles into
-Chapter 5 and changes nothing else; it now needs a test on Windows. Test steps and result tables:
-[docs/spikes.md](docs/spikes.md).
+**Status (2026-11-23):** one test build covers spikes 1, 2, 3 and 5 (`patcher/ch5/net_test.csx`). Test steps and
+results: [docs/spikes.md](docs/spikes.md). First test on one PC: the connection and the per-frame messages work
+(no lost frames, both games run at the same speed), and network messages always arrive between Step and End Step.
+The freeze trick wakes objects one frame late and in a different order, so test 2 tries other ways to wake them.
+Still to do: the WireGuard test and the chapter change.
 
 - [ ] **S** *Network hello:* the test build already compiles. Run two copies on one PC and check that a message sent
   by one arrives in the other's async networking event.

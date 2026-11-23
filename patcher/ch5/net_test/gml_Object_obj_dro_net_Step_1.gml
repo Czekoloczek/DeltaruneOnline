@@ -20,8 +20,4 @@ if (dn_state == 4)
     }
     dn_arrivals = 0;
 }
-if (dn_freeze_check > 0)
-{
-    dn_freeze_check = 0;
-    dro_net_freeze_compare();
-}
+dro_net_fz_after();

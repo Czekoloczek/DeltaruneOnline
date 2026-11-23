@@ -21,7 +21,7 @@ array_push(_lines, _title);
 array_push(_cols, (dn_state == 4) ? c_lime : c_white);
 if (dn_freeze_timer > 0)
 {
-    array_push(_lines, "FREEZE TEST: game paused, " + string(dn_freeze_timer) + " frames left");
+    array_push(_lines, "FREEZE TEST " + string(dn_fz_variant) + " (" + dro_net_fz_name(dn_fz_variant) + "): paused, " + string(dn_freeze_timer) + " frames left");
     array_push(_cols, c_aqua);
 }
 if (dn_prompt)
@@ -39,9 +39,9 @@ if (dn_status != "")
     array_push(_lines, dn_status);
     array_push(_cols, dn_status_color);
 }
-if (dn_state == 4 && (current_time - dn_last_msg) > 2000)
+if (dn_state == 4 && (current_time - dn_last_msg) > 500)
 {
-    array_push(_lines, "Partner silent for " + string(floor((current_time - dn_last_msg) / 1000)) + " s");
+    array_push(_lines, "Partner silent for " + string(current_time - dn_last_msg) + " ms");
     array_push(_cols, c_orange);
 }
 if (dn_show == 2)
@@ -58,6 +58,11 @@ if (dn_show == 2)
     if (dn_freeze_result != "")
     {
         array_push(_lines, dn_freeze_result);
+        array_push(_cols, c_aqua);
+    }
+    for (var _i = 0; _i < array_length(dn_fz_results); _i++)
+    {
+        array_push(_lines, dn_fz_results[_i]);
         array_push(_cols, c_aqua);
     }
 }

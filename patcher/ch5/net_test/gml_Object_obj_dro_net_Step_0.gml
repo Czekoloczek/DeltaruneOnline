@@ -55,7 +55,7 @@ else
         if (dn_state != 0)
             dro_net_close("Stopped with F7.", true, false);
     }
-    if (keyboard_check_pressed(vk_f8) && dn_freeze_timer == 0 && dn_freeze_check == 0)
+    if (keyboard_check_pressed(vk_f8) && dn_fz_variant < 0)
         dn_freeze_request = true;
     if (keyboard_check_pressed(vk_f9))
         dn_show = (dn_show + 1) mod 3;

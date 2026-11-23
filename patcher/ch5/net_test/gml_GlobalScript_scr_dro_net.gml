@@ -11,6 +11,7 @@
 //
 // This code only reads the game's state (input and object list). It never changes
 // gameplay, except during the F8 freeze test, which pauses and resumes all objects.
+// Test 2 changes: five-variant freeze test, "Partner silent" after 500 ms, protocol 2.
 
 function dro_net_pad(_n)
 {
@@ -293,7 +294,7 @@ function dro_net_stat_lines()
     var _h = dn_hist_per_frame;
     array_push(_l, "Per frame 0:" + string(_h[0]) + " 1:" + string(_h[1]) + " 2:" + string(_h[2]) + " 3+:" + string(_h[3]) + ", longest wait " + string(dn_quiet_max) + " fr");
     var _p = dn_hist_phase;
-    array_push(_l, "Arrived in BeginStep " + string(_p[1]) + ", Step " + string(_p[2]) + ", EndStep " + string(_p[3]) + ", after draw " + string(_p[4]));
+    array_push(_l, "Arrived after my BeginStep " + string(_p[1]) + ", Step " + string(_p[2]) + ", EndStep " + string(_p[3]) + ", draw " + string(_p[4]));
     array_push(_l, "Partner holds: " + dro_net_mask_text(dn_remote_mask));
     array_push(_l, "FPS " + string(fps) + ", slowest frame " + string(round(dn_slow_frame)) + " ms");
     return _l;
@@ -307,14 +308,20 @@ function dro_net_write_summary(_why)
         dro_net_log("    " + _l[_i]);
 }
 
-// Freeze test (F8): the same trick the game uses for its console pause.
-// List all objects, deactivate everything except obj_dro_net for 60 frames,
-// then wake exactly those objects again and check that the list is unchanged.
+// Freeze test (F8). One press runs five variants in a row, 3 normal frames apart:
+//   0 control   nothing is deactivated (shows whether the object list order is stable by itself)
+//   1 forward   deactivate all for 30 frames, wake each object in the old order
+//   2 reverse   deactivate all for 30 frames, wake each object in reverse order
+//   3 all       deactivate all for 30 frames, wake with instance_activate_all() (the game's console pause)
+//   4 same      deactivate all and wake in the same event (no frame skipped)
+// Each variant lists all objects just before (Draw GUI End) and again at the next Begin Step,
+// when woken objects are back, and compares the two lists.
 function dro_net_snapshot()
 {
     var _ids = [];
     var _xs = [];
     var _ys = [];
+    var _objs = [];
     with (all)
     {
         if (object_index != obj_dro_net)
@@ -322,66 +329,180 @@ function dro_net_snapshot()
             array_push(_ids, id);
             array_push(_xs, x);
             array_push(_ys, y);
+            array_push(_objs, object_index);
         }
     }
-    return [_ids, _xs, _ys];
+    return [_ids, _xs, _ys, _objs];
 }
 
-function dro_net_freeze_begin()
+function dro_net_fz_name(_v)
 {
-    dn_freeze_before = dro_net_snapshot();
-    audio_pause_all();
-    instance_deactivate_all(true);
-    dn_freeze_timer = 60;
-    dn_freeze_result = "Freeze test running (2 seconds)...";
-    dro_net_log("Freeze test: froze " + string(array_length(dn_freeze_before[0])) + " objects for 60 frames");
+    var _names = ["control", "forward", "reverse", "activate_all", "same frame"];
+    return _names[_v];
 }
 
-function dro_net_freeze_finish()
+function dro_net_fz_start(_v)
+{
+    dn_fz_variant = _v;
+    dn_freeze_before = dro_net_snapshot();
+    var _ids = dn_freeze_before[0];
+    if (_v >= 1 && _v <= 3)
+    {
+        audio_pause_all();
+        instance_deactivate_all(true);
+        dn_freeze_timer = 30;
+        return;
+    }
+    if (_v == 4)
+    {
+        instance_deactivate_all(true);
+        for (var _i = 0; _i < array_length(_ids); _i++)
+            instance_activate_object(_ids[_i]);
+    }
+    dn_fz_pending = true;
+}
+
+function dro_net_fz_wake()
 {
     var _ids = dn_freeze_before[0];
-    for (var _i = 0; _i < array_length(_ids); _i++)
-        instance_activate_object(_ids[_i]);
+    if (dn_fz_variant == 1)
+    {
+        for (var _i = 0; _i < array_length(_ids); _i++)
+            instance_activate_object(_ids[_i]);
+    }
+    else if (dn_fz_variant == 2)
+    {
+        for (var _i = array_length(_ids) - 1; _i >= 0; _i--)
+            instance_activate_object(_ids[_i]);
+    }
+    else
+    {
+        instance_activate_all();
+    }
     audio_resume_all();
-    dn_freeze_now = dro_net_snapshot();
-    dn_freeze_check = 1;
+    dn_fz_pending = true;
 }
 
-function dro_net_same_order(_a, _b)
+// Called from Draw GUI End every frame.
+function dro_net_fz_tick()
 {
-    if (array_length(_a) != array_length(_b))
-        return false;
-    for (var _i = 0; _i < array_length(_a); _i++)
+    if (dn_fz_variant < 0)
     {
-        if (_a[_i] != _b[_i])
-            return false;
-    }
-    return true;
-}
-
-function dro_net_freeze_compare()
-{
-    var _before = dn_freeze_before;
-    var _now = dn_freeze_now;
-    var _later = dro_net_snapshot();
-    var _n = array_length(_before[0]);
-    var _n_now = array_length(_now[0]);
-    var _same_now = dro_net_same_order(_before[0], _now[0]);
-    var _same_later = dro_net_same_order(_before[0], _later[0]);
-    var _moved = 0;
-    if (_same_now)
-    {
-        for (var _i = 0; _i < _n; _i++)
+        if (dn_freeze_request)
         {
-            if (_now[1][_i] != _before[1][_i] || _now[2][_i] != _before[2][_i])
-                _moved += 1;
+            dn_freeze_request = false;
+            dn_fz_results = [];
+            dn_freeze_result = "Freeze test running...";
+            dro_net_log("==== Freeze test (" + dn_version + ") ====");
+            dro_net_fz_start(0);
         }
+        return;
     }
-    var _verdict = "FAILED";
-    if (_same_now)
-        _verdict = "OK";
-    else if (_same_later)
-        _verdict = "OK one frame later";
-    dn_freeze_result = "Freeze test " + _verdict + ": " + string(_n) + " objects, " + string(_n_now) + " back at once, moved " + string(_moved);
-    dro_net_log(dn_freeze_result + ". Order right after wake: " + (_same_now ? "same" : "different") + ", one frame later: " + (_same_later ? "same" : "different") + " (" + string(array_length(_later[0])) + " objects)");
+    if (dn_fz_pending)
+        return;
+    if (dn_freeze_timer > 0)
+    {
+        dn_freeze_timer -= 1;
+        if (dn_freeze_timer == 0)
+            dro_net_fz_wake();
+        return;
+    }
+    if (dn_fz_gap > 0)
+    {
+        dn_fz_gap -= 1;
+        if (dn_fz_gap == 0)
+            dro_net_fz_start(dn_fz_variant + 1);
+    }
+}
+
+// Called from Begin Step every frame.
+function dro_net_fz_after()
+{
+    if (!dn_fz_pending)
+        return;
+    dn_fz_pending = false;
+    var _line = dro_net_fz_compare(dn_freeze_before, dro_net_snapshot(), dro_net_fz_name(dn_fz_variant));
+    array_push(dn_fz_results, _line);
+    if (dn_fz_variant >= 4)
+    {
+        dn_fz_variant = -1;
+        dn_freeze_result = "Freeze test done (see the log for details)";
+        dro_net_log("==== Freeze test done ====");
+    }
+    else
+    {
+        dn_fz_gap = 3;
+    }
+}
+
+function dro_net_fz_names(_snap, _limit)
+{
+    var _s = "";
+    var _n = min(array_length(_snap[0]), _limit);
+    for (var _i = 0; _i < _n; _i++)
+        _s += object_get_name(_snap[3][_i]) + "#" + string(_snap[0][_i]) + " ";
+    if (array_length(_snap[0]) > _limit)
+        _s += "... (" + string(array_length(_snap[0])) + " in total)";
+    return _s;
+}
+
+// Compares two object lists. Returns a one-line verdict and writes details to the log.
+function dro_net_fz_compare(_before, _after, _label)
+{
+    var _nb = array_length(_before[0]);
+    var _na = array_length(_after[0]);
+    var _where = ds_map_create();
+    for (var _i = 0; _i < _na; _i++)
+        ds_map_set(_where, string(_after[0][_i]), _i);
+    var _common = 0;
+    var _increasing = true;
+    var _decreasing = true;
+    var _last = -1;
+    var _moved = 0;
+    var _obj_last = ds_map_create();
+    var _obj_kept = true;
+    for (var _i = 0; _i < _nb; _i++)
+    {
+        var _key = string(_before[0][_i]);
+        if (!ds_map_exists(_where, _key))
+            continue;
+        var _pos = ds_map_find_value(_where, _key);
+        if (_common > 0)
+        {
+            if (_pos < _last)
+                _increasing = false;
+            if (_pos > _last)
+                _decreasing = false;
+        }
+        _last = _pos;
+        _common += 1;
+        if (_after[1][_pos] != _before[1][_i] || _after[2][_pos] != _before[2][_i])
+            _moved += 1;
+        var _okey = string(_before[3][_i]);
+        if (ds_map_exists(_obj_last, _okey) && _pos < ds_map_find_value(_obj_last, _okey))
+            _obj_kept = false;
+        ds_map_set(_obj_last, _okey, _pos);
+    }
+    ds_map_destroy(_where);
+    ds_map_destroy(_obj_last);
+    var _order = "same order";
+    if (!_increasing)
+    {
+        if (_decreasing && _common > 1)
+            _order = "REVERSED";
+        else
+            _order = "REORDERED";
+        if (_obj_kept)
+            _order += " (each object type kept its own order)";
+        else
+            _order += " (also within one object type)";
+    }
+    var _line = _label + ": " + _order + ", " + string(_common) + "/" + string(_nb) + " back, " + string(_na - _common) + " new, moved " + string(_moved);
+    dro_net_log("Freeze " + _line);
+    if (!_increasing || _common != _nb)
+    {
+        dro_net_log("    before: " + dro_net_fz_names(_before, 60));
+        dro_net_log("    after:  " + dro_net_fz_names(_after, 60));
+    }
+    return _line;
 }

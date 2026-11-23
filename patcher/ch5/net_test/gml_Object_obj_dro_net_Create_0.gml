@@ -1,8 +1,8 @@
 // DeltaruneOnline, Phase 1 network test object.
 // Persistent; one instance is created at the end of obj_time's Create event.
-dn_version = "DRO phase1 test 1";
+dn_version = "DRO phase1 test 2";
 dn_magic = 1146244913; // "DRO1"
-dn_proto = 1;
+dn_proto = 2;
 ini_open("deltarune_online.ini");
 dn_port = ini_read_real("online", "port", 7777);
 dn_last_ip = ini_read_string("online", "last_ip", "127.0.0.1");
@@ -27,10 +27,12 @@ dn_phase = 0; // last event of this object that ran: 1 BeginStep, 2 Step, 3 EndS
 dn_game_frame = 0;
 dn_freeze_request = false;
 dn_freeze_timer = 0;
-dn_freeze_check = 0;
-dn_freeze_before = [[], [], []];
-dn_freeze_now = [[], [], []];
+dn_freeze_before = [[], [], [], []];
 dn_freeze_result = "";
+dn_fz_variant = -1; // -1 = no freeze test running, else the variant being tested (0 to 4)
+dn_fz_pending = false; // true = compare the object list at the next Begin Step
+dn_fz_gap = 0;
+dn_fz_results = [];
 dn_buf = buffer_create(64, buffer_grow, 1);
 network_set_config(network_config_use_non_blocking_socket, 1);
 network_set_config(network_config_connect_timeout, 5000);
