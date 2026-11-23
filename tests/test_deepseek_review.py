@@ -2,6 +2,7 @@
 fake GitHub and DeepSeek APIs (no network, no key)."""
 import http.client
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -116,7 +117,7 @@ class Output(unittest.TestCase):
 class FakeAPI:
     """GitHub and DeepSeek in one; records every call."""
 
-    def __init__(self, fork=False, deepseek=None, files=None, shas=None):
+    def __init__(self, fork=False, deepseek=None, files=None, shas=None, files_per_fetch=None):
         self.calls, self.comments, self.deepseek_bodies = [], [], []
         self.fork = fork
         self.shas = list(shas or ["abcdef1234"])  # head.sha per read of the PR; the last one stays
@@ -126,6 +127,8 @@ class FakeAPI:
                                                        "prompt_cache_hit_tokens": 1000,
                                                        "completion_tokens_details": {"reasoning_tokens": 200}}})]
         self.files = files if files is not None else [f("gml/a.gml"), f("README.md")]
+        # files of the PR per fetch, for a PR that gets a new commit while it is read; the last one stays
+        self.files_per_fetch = list(files_per_fetch or [])
 
     def __call__(self, method, url, headers, body=None, timeout=60):
         self.calls.append((method, url, headers))
@@ -142,6 +145,8 @@ class FakeAPI:
                          "user": {"login": "dev"}, "head": {"ref": "feat", "sha": sha, "repo": head_repo},
                          "base": {"ref": "main", "repo": {"full_name": "o/r"}}}
         if "/pulls/7/files" in url:
+            if self.files_per_fetch:
+                return 200, self.files_per_fetch.pop(0) if len(self.files_per_fetch) > 1 else self.files_per_fetch[0]
             return 200, self.files
         if url.endswith("/issues/7/comments"):
             self.comments.append(body["body"])
@@ -267,6 +272,7 @@ class Run(unittest.TestCase):
         self.assertLessEqual(now[0], r.DEEPSEEK_BUDGET + 400)   # 2 attempts, not 3
         self.assertEqual(now[0], 400 + 10 + 400)
 
+    @unittest.skipUnless(hasattr(signal, "SIGALRM"), "no SIGALRM (Windows): hard_deadline is a no-op there")
     def test_hard_deadline(self):
         start = time.monotonic()
         with self.assertRaises(TimeoutError):
@@ -276,10 +282,16 @@ class Run(unittest.TestCase):
         time.sleep(0.3)                                      # the timer is off again: nothing fires here
 
     def test_new_commit_during_fetch_uses_the_new_commit(self):
-        api = FakeAPI(shas=["1111111aaa", "2222222bbb", "2222222bbb"])
+        api = FakeAPI(shas=["1111111aaa", "2222222bbb", "2222222bbb"],
+                      files_per_fetch=[[f("gml/a.gml", patch="@@ -1 +1 @@\n-a\n+first_commit_line")],
+                                       [f("gml/a.gml", patch="@@ -1 +1 @@\n-a\n+second_commit_line")]])
         self.assertEqual(self.run_review(api), 0)
         self.assertIn("commit `2222222`", api.comments[0])
-        self.assertIn("commit 2222222", api.deepseek_bodies[0]["messages"][1]["content"])
+        prompt = api.deepseek_bodies[0]["messages"][1]["content"]
+        self.assertIn("commit 2222222", prompt)
+        # the diff sent is the one fetched for the new commit, not the first one
+        self.assertIn("second_commit_line", prompt)
+        self.assertNotIn("first_commit_line", prompt)
 
     def test_pr_that_keeps_moving_is_skipped(self):
         api = FakeAPI(shas=["a1", "b2", "c3", "d4", "e5"])
