@@ -46,6 +46,8 @@ jobs:
           sh native/test_pair.sh 30 450 2
           sh native/test_pair.sh 60 450 2
           sh native/test_pair.sh 0 450 3
+          # trzeci gracz dołącza 12 s później: pozostali czekają na niego, zamiast odpaść po 10 s
+          sh native/test_pair.sh 0 150 3 12
 
   # To samo na prawdziwym Windowsie: prawdziwy Winsock i ładowanie DLL zamiast ich odpowiedników z Wine.
   # Gracze na Windowsie uruchamiają grę dokładnie tak. Na prywatnym repo minuty Windowsa liczą się podwójnie.
@@ -70,3 +72,4 @@ jobs:
           sh native/test_pair.sh 30 450 2
           sh native/test_pair.sh 60 450 2
           sh native/test_pair.sh 0 450 3
+          sh native/test_pair.sh 0 150 3 12
