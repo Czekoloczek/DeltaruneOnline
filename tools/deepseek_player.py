@@ -331,7 +331,8 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
 
 def frames_in(text):
     """How many frames steps written as text make, counted without building them (a model could answer
-    "999999999 right"). Steps that do not parse count 0: text_to_frames says what is wrong with them."""
+    "999999999 right"). Steps that do not parse count 0: text_to_frames says what is wrong with them. A number of
+    seconds too big for a frame count ("wait 1e308s") raises ValueError."""
     total = 0
     for line in text.splitlines():
         for step in line.split("#", 1)[0].split(";"):
@@ -347,7 +348,9 @@ def frames_in(text):
                     total += times * (1 + gap)
                 elif len(w) == 2:
                     total += input_script.parse_frames(w[0])
-            except (ValueError, OverflowError):
+            except OverflowError:
+                raise ValueError("the step %r makes too many frames" % step.strip()[:60])
+            except ValueError:
                 pass
     return total
 
@@ -376,7 +379,10 @@ def parse_answer(content, max_frames):
     asked = frames_in(do)
     if asked > max(MAX_ANSWER_FRAMES, max_frames):
         raise ValueError("the steps make %d frames; send at most %d a turn" % (asked, max_frames))
-    frames = agent_client.text_to_frames(do)        # ScriptError is a ValueError
+    try:
+        frames = agent_client.text_to_frames(do)    # ScriptError is a ValueError
+    except OverflowError:
+        raise ValueError("a step makes too many frames")
     agent_client.frames_to_steps(frames)            # only the seven buttons of the agent
     return why, do.strip(), frames[:max_frames], done, len(frames)
 

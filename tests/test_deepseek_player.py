@@ -214,6 +214,10 @@ class Answers(unittest.TestCase):
             with self.assertRaises(ValueError, msg=do) as cm:
                 p.parse_answer(answer(do), 150)
             self.assertIn("send at most 150", str(cm.exception))
+        for do in ("wait 1e308s", "1e400s right", "wait infs", "tap z 2 1e308s"):
+            with self.assertRaises(ValueError, msg=do) as cm:
+                p.parse_answer(answer(do), 150)
+            self.assertIn("too many frames", str(cm.exception))
         self.assertEqual(p.frames_in("20 right; tap z 2 3 # 9 up\nwait 1.5s; tap x"), 20 + 8 + 45 + 2)
         self.assertEqual(p.frames_in("20 rihgt; nonsense here too"), 20)
 
