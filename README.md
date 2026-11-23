@@ -103,13 +103,19 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 
 ## Contributing
 
+- **Found a bug?** Open an issue with the bug report form. Report security problems privately, as described in
+  [SECURITY.md](SECURITY.md).
 - **Never commit game or mod files**: `data.win`, `.xdelta` patches, decompiled code, sprites, audio, or built output.
   The `.gitignore` blocks the common ones.
 - Express changes as code and rules that the patcher applies to the user's local files, not as copies of modified
   game or mod code.
 - Say which chapter, game version and mod version a change targets.
+- Update the docs your change affects in the same pull request (README, `docs/DESIGN.md`, the ini example, script
+  help), and list the wiki pages that need an update in its description. The rules for AI agents and reviewers,
+  this one included, are in [CLAUDE.md](CLAUDE.md).
 - Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build and the lockstep test,
-  all without game files. `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
+  all without game files. The lockstep test needs Wine on Linux; without it `verify.sh` skips that test and says so.
+  `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
 - Claude reviews every pull request on its own. For a second opinion from DeepSeek, PolskiKapsel or Czekoloczek
   (the only logins on the workflow's list) comments `/deepseek-review` on the pull request (options: `model=flash|pro`, `reasoning=none|low|high|max`; see

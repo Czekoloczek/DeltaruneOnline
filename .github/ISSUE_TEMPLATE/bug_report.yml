@@ -1,0 +1,70 @@
+name: Bug report
+description: Something went wrong while building or playing (desync, crash, connection, wrong behaviour).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Please never attach `data.win`, `.xdelta` files or other game or mod files: they must not be shared here.
+        `drnet.log` contains the address you connected to. If it is a public IP, replace it with `x.x.x.x` before attaching the file.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead. Include the exact message and the frame number if the game showed one (for example "DESYNC at frame 1234").
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How you played
+      options:
+        - Online, 2 players
+        - Online, 3 players
+        - Two copies on one PC (local test)
+        - Offline (mode=off or solo)
+        - Building the online version (did not get to play)
+    validations:
+      required: true
+  - type: dropdown
+    id: hash
+    attributes:
+      label: Same data.win on every PC?
+      description: Compare the SHA-256 of `chapter5_windows/data.win` ([how](https://github.com/Czekoloczek/DeltaruneOnline/wiki/Building-the-online-version#steps), step 6).
+      options:
+        - "Yes, the SHA-256 matches on every PC"
+        - "No, it differs"
+        - "I did not check"
+        - "Not relevant (offline or build problem)"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System of every PC
+      description: Windows version, or Linux distribution with the Proton or Wine version.
+      placeholder: "host: Windows 11; client: CachyOS, GE-Proton10-34"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: DELTARUNE version, Local Multiplayer version, and the DeltaruneOnline commit you built from (`git log -1 --format=%h`).
+      placeholder: "DELTARUNE 1.05 (Steam), Local Multiplayer v19, DeltaruneOnline 3db47d2"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: drnet.log from every PC
+      description: |
+        Drag the files here. They are in the save folder:
+        - Windows: `%LOCALAPPDATA%\DELTARUNE\drnet.log`
+        - Linux/Proton: `<prefix>/drive_c/users/steamuser/AppData/Local/DELTARUNE/drnet.log`
+        Two copies on one PC write `drnet_<role>.log`. Replace public IP addresses first (see above).
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: Settings you changed in `dronline.ini`, screenshots, whether it happens every time.

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting
+    url: https://github.com/Czekoloczek/DeltaruneOnline/wiki/Troubleshooting
+    about: Error messages, desyncs and the usual fixes, before you open an issue.
+  - name: Playing with a friend
+    url: https://github.com/Czekoloczek/DeltaruneOnline/wiki/Playing-with-a-friend
+    about: Hosting, joining, sharing the save and playing over the internet.
