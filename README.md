@@ -44,16 +44,39 @@ The first prototype targets Chapter 5 and is tested with two copies of the game 
 
 ## Usage
 
-You need Python 3 and the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI.
+You need Python 3.11 or newer, the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI
+and `drnet.dll` (build it with `native/build.sh`).
+
+The easiest way is `patcher/build.py`. It checks that your Chapter 5 and the mod are exactly the versions it knows,
+applies the mod with xdelta3, runs `dronline_patch.py`, and writes `data.win` and `drnet.dll` to
+`build/chapter5_windows/`. At the end it prints the SHA-256 of the new `data.win`:
+
+```
+python3 patcher/build.py --game "DELTARUNE" --mod "deltarunelocalmultiplayer_v19" \
+    --utmt PATH/UndertaleModCli.dll --out build
+```
+
+Or run the patcher yourself on a Chapter 5 `data.win` that already has the mod. It writes `chapter5_online.win`
+and puts `drnet.dll` next to it:
 
 ```
 python3 patcher/dronline_patch.py --utmt PATH/UndertaleModCli.dll \
     --data "DELTARUNE/chapter5_windows/data.win" --out chapter5_online.win
 ```
 
-Back up your `data.win`, then replace it with `chapter5_online.win`. Without a config file the patched game
-behaves like the original. To enable a mode, copy `config/dronline.ini.example` to the save folder as
-`dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it works and how to test determinism.
+To install, whichever way you built it:
+
+1. Copy your whole DELTARUNE folder and play from the copy. Leave the Steam folder as it is: Steam can put its own
+   files back when it updates or verifies the game, and then your `data.win` no longer matches your partner's.
+2. Put both files into the copy's `chapter5_windows` folder: the patched file as `data.win` (rename
+   `chapter5_online.win` if you ran the patcher yourself) and `drnet.dll` next to it.
+3. Compare the SHA-256 of that `data.win` with every other player's. `build.py` prints it; otherwise run
+   `certutil -hashfile data.win SHA256` on Windows or `sha256sum data.win`. If they differ, the games will not stay
+   in sync.
+
+Without a config file the patched game behaves like the original. To enable a mode, copy
+`config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it
+works and how to test determinism.
 
 ## Requirements
 
