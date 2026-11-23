@@ -13,6 +13,10 @@ name: DeepSeek Review
 #      Reszta pierwszej linii i kolejne linie idą do recenzenta jako uwaga.
 #   2. Ręcznie: Actions > DeepSeek Review > Run workflow (numer PR-a, model, reasoning, uwaga); też tylko te
 #      dwa loginy, choć uruchomić workflow może każdy z prawem zapisu.
+#   3. Ręcznie z zakresem `repo`: przegląd CAŁEGO repozytorium z wybranej gałęzi, część po części (gml/,
+#      native/, patcher/, tools/, testy z CI i konfiguracją), każda z całym kodem jako kontekstem. Raport trafia
+#      do podsumowania przebiegu (strona runu w Actions), a jeśli podasz numer PR-a, także pod ten PR.
+#      Przy reasoning=max to kilka-kilkanaście minut i kilkanaście-kilkadziesiąt centów.
 #
 # Skrypt: tools/deepseek_review.py (sama biblioteka standardowa Pythona). Wynik to jeden komentarz pod PR-em.
 #
@@ -29,9 +33,14 @@ on:
     types: [created]
   workflow_dispatch:
     inputs:
+      scope:
+        description: Zakres (pr = diff jednego PR-a, repo = całe repozytorium z wybranej gałęzi)
+        type: choice
+        default: pr
+        options: [pr, repo]
       pr:
-        description: Numer PR-a
-        required: true
+        description: Numer PR-a (dla zakresu pr wymagany; dla repo opcjonalny, wtedy raport idzie też pod ten PR)
+        required: false
         type: number
       model:
         description: Model
@@ -64,7 +73,7 @@ on:
 # grupę, żeby ani komentarz bota, ani `/deepseek-review` od kogoś spoza listy nie anulował trwającego przeglądu.
 # Nowe żądanie z listy pod tym samym PR-em anuluje poprzednie.
 concurrency:
-  group: "${{ github.workflow }}-${{ (contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.event.comment.user.login || github.actor) && contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.triggering_actor) && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
+  group: "${{ github.workflow }}-${{ (contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.event.comment.user.login || github.actor) && contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.triggering_actor) && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))) && format('{0}-{1}', inputs.scope || 'pr', github.event.issue.number || inputs.pr || github.ref_name) || github.run_id }}"
   cancel-in-progress: true
 
 # Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
@@ -79,21 +88,29 @@ jobs:
        (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))
     runs-on: ubuntu-latest
     # Skrypt kończy wszystkie próby DeepSeek w 11 minut (DEEPSEEK_BUDGET), żeby zdążyć z komentarzem o błędzie.
-    timeout-minutes: 15
+    # Zakres repo to do pięciu takich części po kolei.
+    timeout-minutes: ${{ inputs.scope == 'repo' && 60 || 15 }}
     permissions:
-      contents: read         # checkout skryptu i docs/DESIGN.md
+      contents: read         # checkout skryptu i docs/DESIGN.md (przy zakresie repo: całego repozytorium)
       pull-requests: write   # komentarz z wynikiem i reakcja 👀 pod żądaniem
 
     steps:
       # Gałąź domyślna (issue_comment) albo ta wybrana przy ręcznym uruchomieniu, NIE kod PR-a.
       # Potrzebne są tylko skrypt i opis projektu.
-      - uses: actions/checkout@v7
+      - if: inputs.scope != 'repo'
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
           sparse-checkout: |
             tools/deepseek_review.py
             docs/DESIGN.md
           sparse-checkout-cone-mode: false
+
+      # Zakres repo: całe repozytorium z gałęzi wybranej przy ręcznym uruchomieniu (tylko te dwa loginy).
+      - if: inputs.scope == 'repo'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Przegląd DeepSeek
         env:
@@ -106,4 +123,5 @@ jobs:
           INPUT_MODEL: ${{ inputs.model }}
           INPUT_REASONING: ${{ inputs.reasoning }}
           INPUT_NOTE: ${{ inputs.note }}
+          SCOPE: ${{ inputs.scope || 'pr' }}
         run: python3 -I tools/deepseek_review.py

@@ -3,6 +3,7 @@ fake GitHub and DeepSeek APIs (no network, no key)."""
 import http.client
 import os
 import sys
+import tempfile
 import time
 import unittest
 
@@ -328,6 +329,98 @@ class Run(unittest.TestCase):
         self.assertIn(allow + "github.triggering_actor)", job_if)
         self.assertEqual(job_if.count("fromJSON("), 2)  # no second, wider list (e.g. author_association)
         self.assertRegex(wf, r"issue_comment:\n\s+types: \[created\]\n")
+
+
+class RepoScope(unittest.TestCase):
+    """scope=repo: the whole checkout, part by part, with the same cached prefix."""
+
+    PATHS = ["README.md", "docs/DESIGN.md", "gml/scr_dronline.gml", "native/drnet.c", "patcher/dronline_patch.py",
+             "tests/test_patcher.py", "tools/input_script.py"]
+
+    def setUp(self):
+        self.old_cwd = os.getcwd()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.tmp.name)            # the report file is written to the working directory
+
+    def tearDown(self):
+        os.chdir(self.old_cwd)
+        self.tmp.cleanup()
+
+    def review(self, api, **kw):
+        e = env(SCOPE="repo", REQUEST="", COMMENT_ID="", PR="", INPUT_MODEL="deepseek-flash", INPUT_REASONING="max",
+                GITHUB_SHA="0123456789abcdef")
+        e.update(kw)
+        return r.run_repo(e, http=api, sleep=lambda s: None, root=ROOT, list_files=lambda root: list(self.PATHS))
+
+    def test_every_part_once_with_the_same_prefix(self):
+        api = FakeAPI(deepseek=[FakeAPI().deepseek[0] for _ in range(5)])
+        self.assertEqual(self.review(api), 0)
+        bodies = api.deepseek_bodies
+        self.assertEqual(len(bodies), 5)
+        self.assertEqual({b["reasoning_effort"] for b in bodies}, {"max"})
+        users = [b["messages"][1]["content"] for b in bodies]
+        prefix = users[0].split("ZAKRES TEJ CZĘŚCI")[0]
+        for b, u in zip(bodies, users):
+            self.assertEqual(b["messages"][0]["content"], r.REPO_SYSTEM)
+            self.assertTrue(u.startswith(prefix))
+        self.assertIn("=== gml/scr_dronline.gml", prefix)
+        self.assertIn("=== docs/DESIGN.md", prefix)           # documentation is context, not a part
+        self.assertRegex(prefix, r"\n\s*1\| ")                  # numbered lines
+        self.assertIn("- native/drnet.c", users[1].split("ZAKRES TEJ CZĘŚCI")[1])
+        self.assertNotIn("- gml/scr_dronline.gml", users[1].split("ZAKRES TEJ CZĘŚCI")[1])
+        self.assertIn("- tests/test_patcher.py", users[4].split("ZAKRES TEJ CZĘŚCI")[1])
+        self.assertFalse([c for c in api.calls if c[1] != r.API_URL])   # no PR given: nothing on GitHub
+        with open("deepseek-review-report.md", encoding="utf-8") as fh:
+            report = fh.read()
+        self.assertEqual(report.count("\n## "), 5)
+        self.assertIn("commit `0123456`", report.lower())
+        self.assertNotIn(KEY, report)
+
+    def test_report_goes_under_the_pr_in_pieces(self):
+        long = (200, {"choices": [{"message": {"content": "x" * 25_000}, "finish_reason": "stop"}]})
+        api = FakeAPI(deepseek=[long] * 5)
+        self.assertEqual(self.review(api, PR="7"), 0)
+        self.assertGreater(len(api.comments), 1)
+        for c in api.comments:
+            self.assertTrue(c.startswith(r.REPO_MARKER))
+            self.assertLessEqual(len(c), 65_000)
+        self.assertEqual(sum(c.count("x" * 25_000) for c in api.comments), 5)
+
+    def test_a_failed_part_does_not_stop_the_rest(self):
+        ok = FakeAPI().deepseek[0]
+        api = FakeAPI(deepseek=[(401, {"error": {"message": "bad"}}), ok, ok, ok, ok])
+        self.assertEqual(self.review(api), 0)
+        with open("deepseek-review-report.md", encoding="utf-8") as fh:
+            report = fh.read()
+        self.assertIn("Nie udało się", report)
+        self.assertEqual(report.count("gml/a.gml:3"), 4)
+
+    def test_no_key(self):
+        api = FakeAPI()
+        self.assertEqual(self.review(api, DEEPSEEK_API_KEY=""), 0)
+        self.assertEqual(api.calls, [])
+
+    def test_corpus_skips_binary_and_huge_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name, data in (("a.py", b"print(1)\n"), ("b.bin", b"\0\1\2"), ("c.txt", b"y" * 50)):
+                with open(os.path.join(d, name), "wb") as fh:
+                    fh.write(data)
+            corpus, notes, sent = r.build_corpus(d, ["a.py", "b.bin", "c.txt"], max_file=40)
+        self.assertEqual(sent, ["a.py"])
+        self.assertEqual(set(notes), {"b.bin", "c.txt"})
+        self.assertIn("1| print(1)", corpus)
+
+    def test_repo_files_lists_tracked_files(self):
+        if not os.path.isdir(os.path.join(ROOT, ".git")):
+            self.skipTest("no git checkout")
+        self.assertIn("tools/deepseek_review.py", r.repo_files(ROOT))
+
+    def test_workflow_offers_the_repo_scope(self):
+        with open(os.path.join(ROOT, ".github", "workflows", "deepseek-review.yml"), encoding="utf-8") as fh:
+            wf = fh.read()
+        self.assertIn("options: [pr, repo]", wf)
+        self.assertIn("SCOPE: ${{ inputs.scope || 'pr' }}", wf)
+        self.assertIn("if: inputs.scope == 'repo'", wf)
 
 
 if __name__ == "__main__":
