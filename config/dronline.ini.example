@@ -2,10 +2,13 @@
 ;   Windows: %LOCALAPPDATA%\DELTARUNE\dronline.ini
 ;   Linux/Proton: <prefix>/drive_c/users/steamuser/AppData/Local/DELTARUNE/dronline.ini
 ; No file or mode=off: the patched game behaves like the unpatched one.
+; Step-by-step setup for online play: https://github.com/Czekoloczek/DeltaruneOnline/wiki/Playing-with-a-friend
 [online]
-; off | solo | record | replay   (host | client come with the network layer)
-mode=record
-; local player: 1, 2 or 3
+; host | client: online play (the host is player 1)
+; off: like the unpatched game
+; solo | record | replay: testing without a network (see docs/DESIGN.md)
+mode=off
+; local player: 1, 2 or 3 (the host is always 1)
 player=1
 ; shared random seed (all players must use the same one)
 seed=1234
