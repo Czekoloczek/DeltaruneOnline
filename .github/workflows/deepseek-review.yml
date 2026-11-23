@@ -1,0 +1,133 @@
+name: DeepSeek Review
+
+# Przegląd PR-a przez DeepSeek, tylko NA ŻĄDANIE (automatyczny przegląd każdego PR-a robi Claude,
+# claude-code-review.yml). Dwa sposoby:
+#
+#   1. Komentarz pod PR-em (tylko loginy z listy niżej: PolskiKapsel i Czekoloczek):
+#          /deepseek-review
+#          /deepseek-review model=pro reasoning=max
+#          /deepseek-review reasoning=none sprawdź głównie haki serca
+#      model:     flash (deepseek-flash, domyślny, tani) albo pro (deepseek-v4-pro, dokładniejszy, ~4x droższy)
+#      reasoning: none (bez myślenia), low, high (domyślny), max. To parametr reasoning_effort API;
+#                 none wyłącza tryb myślenia ({"thinking": {"type": "disabled"}}).
+#      Reszta pierwszej linii i kolejne linie idą do recenzenta jako uwaga.
+#   2. Ręcznie: Actions > DeepSeek Review > Run workflow (numer PR-a, model, reasoning, uwaga); też tylko te
+#      dwa loginy, choć uruchomić workflow może każdy z prawem zapisu.
+#   3. Ręcznie z zakresem `repo`: przegląd CAŁEGO repozytorium z wybranej gałęzi, część po części (gml/,
+#      native/, patcher/, tools/, testy z CI i konfiguracją), każda z całym kodem jako kontekstem. Raport trafia
+#      do podsumowania przebiegu (strona runu w Actions), a jeśli podasz numer PR-a, także pod ten PR.
+#      Pole `parts` (np. `1,2`) powtarza tylko wybrane części, np. te, które się nie udały.
+#      Przy reasoning=max to około pół godziny i kilkadziesiąt centów za całość.
+#
+# Skrypt: tools/deepseek_review.py (sama biblioteka standardowa Pythona). Wynik to jeden komentarz pod PR-em.
+#
+# Sekret DEEPSEEK_API_KEY dodaje admin repo w Settings > Secrets and variables > Actions. Bez niego przebieg
+# kończy się komentarzem, że przegląd pominięto. PR-y z forków są pomijane: ich kodu nie wysyłamy do
+# zewnętrznego API.
+#
+# Bezpieczeństwo: issue_comment działa na workflowie i kodzie z main, z sekretami, także dla PR-ów z forków.
+# Dlatego NIE robimy checkoutu kodu PR-a i niczego z niego nie uruchamiamy: diff przychodzi z API jako tekst
+# i trafia tylko do DeepSeek. Komentarz idzie przez env, nigdy przez ${{ }} w skrypcie.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Zakres (pr = diff jednego PR-a, repo = całe repozytorium z wybranej gałęzi)
+        type: choice
+        default: pr
+        options: [pr, repo]
+      pr:
+        description: Numer PR-a (dla zakresu pr wymagany; dla repo opcjonalny, wtedy raport idzie też pod ten PR)
+        required: false
+        type: number
+      model:
+        description: Model
+        type: choice
+        default: deepseek-flash
+        options: [deepseek-flash, deepseek-v4-pro]
+      reasoning:
+        description: Poziom myślenia (none = bez myślenia)
+        type: choice
+        default: high
+        options: [none, low, high, max]
+      note:
+        description: Uwaga dla recenzenta (opcjonalna)
+        type: string
+        required: false
+      parts:
+        description: Tylko dla zakresu repo, numery części po przecinku (1 GML, 2 native, 3 patcher, 4 tools, 5 testy/CI); puste = wszystkie
+        type: string
+        required: false
+
+# KTO MOŻE ZAMÓWIĆ PRZEGLĄD: tylko loginy z listy ["PolskiKapsel", "Czekoloczek"] (klucz DeepSeek należy do
+# Kuby i to on płaci). Lista jest w dwóch miejscach, w `group` i w `if` joba, i musi być w obu identyczna
+# (pilnuje tego test w tests/test_deepseek_review.py). Sprawdzane są dwie osoby i obie muszą być na liście:
+# - autor komentarza (`github.event.comment.user.login`), a przy ręcznym uruchomieniu ten, kto je uruchomił
+#   (`github.actor`). Boty (dependabot[bot], claude[bot], coderabbitai[bot]) nie są na liście, więc ich
+#   komentarze nic nie uruchamiają;
+# - `github.triggering_actor`, czyli ten, kto uruchomił TEN przebieg. Przy „Re-run” to osoba klikająca, a nie
+#   autor komentarza, więc nikt spoza listy nie powtórzy cudzego przeglądu na koszt klucza.
+# Edycja komentarza niczego nie uruchamia (`types: [created]`), więc nie da się dopisać polecenia do starego
+# komentarza. Zmiana loginu na GitHubie wymaga poprawienia listy.
+#
+# Każdy komentarz pod każdym PR-em i issue uruchamia ten workflow (job niżej zwykle się pomija). Grupa per PR
+# tylko dla żądań, które job naprawdę wykona (ten sam warunek co `if` joba); inne komentarze dostają własną
+# grupę, żeby ani komentarz bota, ani `/deepseek-review` od kogoś spoza listy nie anulował trwającego przeglądu.
+# Nowe żądanie z listy pod tym samym PR-em anuluje poprzednie.
+concurrency:
+  group: "${{ github.workflow }}-${{ (contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.event.comment.user.login || github.actor) && contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.triggering_actor) && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))) && format('{0}-{1}', inputs.scope || 'pr', github.event.issue.number || inputs.pr || github.ref_name) || github.run_id }}"
+  cancel-in-progress: true
+
+# Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
+permissions: {}
+
+jobs:
+  deepseek-review:
+    if: >-
+      contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), github.event.comment.user.login || github.actor) &&
+      contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), github.triggering_actor) &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))
+    runs-on: ubuntu-latest
+    # Skrypt kończy wszystkie próby DeepSeek w 11 minut (DEEPSEEK_BUDGET), żeby zdążyć z komentarzem o błędzie.
+    # Zakres repo to do pięciu części po kolei, każda do 20 minut (REPO_BUDGET).
+    timeout-minutes: ${{ inputs.scope == 'repo' && 110 || 15 }}
+    permissions:
+      contents: read         # checkout skryptu i docs/DESIGN.md (przy zakresie repo: całego repozytorium)
+      pull-requests: write   # komentarz z wynikiem i reakcja 👀 pod żądaniem
+
+    steps:
+      # Gałąź domyślna (issue_comment) albo ta wybrana przy ręcznym uruchomieniu, NIE kod PR-a.
+      # Potrzebne są tylko skrypt i opis projektu.
+      - if: inputs.scope != 'repo'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            tools/deepseek_review.py
+            docs/DESIGN.md
+          sparse-checkout-cone-mode: false
+
+      # Zakres repo: całe repozytorium z gałęzi wybranej przy ręcznym uruchomieniu (tylko te dwa loginy).
+      - if: inputs.scope == 'repo'
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Przegląd DeepSeek
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          PR: ${{ github.event.issue.number || inputs.pr }}
+          REQUEST: ${{ github.event.comment.body }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          REQUESTER: ${{ github.event.comment.user.login || github.actor }}
+          INPUT_MODEL: ${{ inputs.model }}
+          INPUT_REASONING: ${{ inputs.reasoning }}
+          INPUT_NOTE: ${{ inputs.note }}
+          SCOPE: ${{ inputs.scope || 'pr' }}
+          PARTS: ${{ inputs.parts }}
+        run: python3 -I tools/deepseek_review.py
