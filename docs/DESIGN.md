@@ -93,6 +93,10 @@ The shared simulation moves a heart *D* frames after its owner pressed the keys.
   3 return the reported bullet. Instance numbers match on every machine because the simulation is identical.
 - Frames sent without delay carry no `LAG_BIT` and keep the game's own collisions, since there the shared
   position already is what the owner sees. Purple/mode 7 and other special hit code stay shared too.
+- The hooks are all or nothing. Hits may only follow the owner's view if the owner's heart is drawn there, so
+  the patcher also leaves them off when obj_heart has no Draw event, or its Draw contains `exit` or `return`
+  (which would skip the call that puts the shared position back). It then prints why after "own SOUL hooks",
+  and every heart moves and is hit with the delay. Chapter 5's Draw is wrapped.
 
 The price: the other players' hearts on your screen lag behind what they see by their delay, so now and then a
 bullet seems to pass through another player's heart without a hit, or to hit it from a distance. Every hit
@@ -124,9 +128,10 @@ why the settings live in `dronline.ini`.
 
 ## Automated tests (no game needed)
 
-`bash tools/verify.sh` runs all of them in one go, with the lockstep test in three variants: 0 and 30 ms with 2
-players, and 3 players. The lockstep test needs Wine on Linux (Git Bash on Windows runs it natively); without
-Wine, or with `SKIP_LOCKSTEP=1`, `verify.sh` skips it, says so, and still ends with OK, so read its output.
+`bash tools/verify.sh` runs all of them in one go, with the lockstep test in four variants: 0 and 30 ms with 2
+players, 3 players, and 3 players of whom the last joins 12 s late. The lockstep test needs Wine on Linux (Git
+Bash on Windows runs it natively); without Wine, or with `SKIP_LOCKSTEP=1`, `verify.sh` skips it, says so, and
+still ends with OK, so read its output.
 `bash tools/setup_env.sh` installs the tools with apt, dnf or pacman, and only warns when no Wine package is
 available. Cloud agents such as CodeRabbit run `setup_env.sh` as their setup script and are told to check
 changes with `verify.sh`.
@@ -139,12 +144,15 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
     snippets are written for the tests and only imitate the game's code.
   - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
-    types, with no function of more than 4 arguments taking a string (the pitfalls below).
-- `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players]`: runs `test_drnet.exe` as a host and
-  its clients and fails unless every side ends with the same checksum of all received input and no desync. On
-  Linux it uses Wine (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`)
-  it runs natively. CI runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test
-  latency and with 3 players.
+    types, with no function of more than 4 arguments taking a string (the pitfalls below). Every option the GML
+    passes to `drnet_option` is one `drnet.c` knows, and every `dronline.ini` key the GML reads is in
+    `config/dronline.ini.example` and in the settings comment of `gml/scr_dronline.gml`.
+- `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]`: runs `test_drnet.exe` as a
+  host and its clients and fails unless every side ends with the same checksum of all received input and no
+  desync. With `late_s`, the last client starts that many seconds after the others. On Linux it uses Wine
+  (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
+  runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
+  players, and with a third player who joins 12 s late.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
@@ -172,6 +180,10 @@ python3 tools/compare_hashes.py dronline_hash_record.txt dronline_hash_replay.tx
 ```
 
 If the logs match, the game is deterministic for that stretch of play, which is exactly what lockstep needs.
+The script fails when they differ and also when the replay log is shorter than the record log, since a replay
+that stopped early proves nothing. A longer replay is fine: it goes on without input after the recording ends.
+Game End closes the log, and DELTARUNE fires Game End when it restarts itself at chapter start; the next frame
+opens the log again, so both logs cover the whole run.
 
 ## Scripted input: unattended tests and replays
 
@@ -313,6 +325,8 @@ Some logic follows the music: the Chapter 5 logo appears on `audio_sound_get_tra
 time notes by it, and many scripts wait for `audio_is_playing`. Audio starts with a different latency on every
 machine (this caused a 1-pixel desync in the intro), so online every audio state read is answered from the
 lockstep frame counter: position = offset + frames since start / 30 × pitch, with pause, resume, stop,
-set-position and pitch tracked per sound instance. The real sound still plays normally.
+set-position and pitch tracked per sound instance. The real sound still plays normally. A sound that ends on its
+own is dropped from that table 10 s later (checked every 300 frames, the same on every machine), so the table
+does not grow with every text sound and step of a long session.
 
 Local-only keys (`Esc` held to quit, `F4` fullscreen) read the real keyboard; they do not change game state.
