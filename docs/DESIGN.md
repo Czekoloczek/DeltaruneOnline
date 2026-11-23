@@ -170,6 +170,36 @@ python3 tools/compare_hashes.py dronline_hash_record.txt dronline_hash_replay.tx
 
 If the logs match, the game is deterministic for that stretch of play, which is exactly what lockstep needs.
 
+## Scripted input: unattended tests and replays
+
+For tests with nobody at the keys, each machine can take its own player's input from a file instead of the
+keyboard and gamepad. Settings in `[online]` (host, client and solo):
+
+- `script=<file>`: one little-endian u16 of action bits per input frame (the layout of `dronline_local_bits`), the
+  same format `mode=record` writes. Esc and F4 still read the real keyboard. Online, an input frame is an
+  exchanged frame, so the time spent waiting for the others does not use up the script.
+- `script_end=idle|keys|quit`: after the last frame, no input (default), the real keyboard and gamepad again, or
+  closing the game the normal way, so the others see "the other player left the game" (test G4 without a person).
+- `script_record=<file>`: writes the input this machine used, frame by frame, in the same format. An existing file
+  is kept and the recording goes to `<file>.2`, `<file>.3`, ..., because a chapter change starts a new game process.
+  Copies on one PC share the save folder, so with `DRONLINE_ROLE` the role goes into the name
+  (`dronline_rec.bin` becomes `dronline_rec_host.bin`) and two copies never write the same file.
+
+`tools/input_script.py compile <script.txt> <out.bin>` turns a text script into that file
+(`wait 3s`, `tap confirm 2 15`, `20 right`, `10 up+cancel`; see the tool's help), `dump` turns a recording back into
+text. To replay a two-player session: record it with the same `delay=<frames>` on every machine (`delay=auto`
+picks the delay from the ping, and a different delay moves every input), then give each machine its own
+recording as `script=` with that delay and the same saves and seed. The status line shows `script n/total` and
+`REC`, and `drnet.log` notes when the script starts and ends.
+
+A script covers one launch of the chapter: after a chapter change the new process starts it from the top again.
+The launcher itself is not patched, so a test without people starts Chapter 5 directly, in `chapter5_windows`:
+`DELTARUNE.exe -game data.win launcher`. The `launcher` parameter matters: without it the chapter looks for its
+music in `chapter5_windows/mus/`, the music stream fails, and the Chapter 5 logo (which follows the music
+position) never finishes. Online that is a desync as soon as the other machine's logo moves on (two-PC idle test,
+frame 90). A sound that fails to play online is logged in `drnet.log`, and the first 2400 frames log the parts of
+every state hash (room, instance count, summed x and y, plot), so the first differing checkpoint shows what differs.
+
 ## Determinism hazards
 
 `tools/scan_determinism.py` lists them. Chapter 5 (game 0.253 + mod v19):

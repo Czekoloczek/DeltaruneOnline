@@ -30,3 +30,12 @@ maxdelay=6
 ; testing only: extra latency in ms added to every packet this machine sends, and random extra 0..jitter ms
 lag=0
 jitter=0
+; (host/client/solo) scripted input for unattended tests: play the local player's input from this file instead of
+; the keyboard and gamepad (Esc and F4 still work). Make it with tools/input_script.py from a text script, or
+; record it with script_record. Replaying a recording frame for frame needs the same fixed delay=<frames>.
+;script=dronline_script.bin
+; after the last scripted frame: idle (no input), keys (keyboard and gamepad again) or quit (close the game)
+;script_end=idle
+; write the local player's input of every frame to this file (an existing file is kept, the new one gets .2, .3, ...;
+; with DRONLINE_ROLE the role goes into the name: dronline_rec_host.bin)
+;script_record=dronline_rec.bin

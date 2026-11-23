@@ -8,6 +8,10 @@
 # HOST_KEYS="10:z 13:z 16:z": press keys in the host game at those seconds after start (xdotool).
 # The save folders get debug=1, so each side also writes dronline_state.txt (instances per checkpoint).
 # LAG=40: 40 ms of extra latency per packet on each side (ping about 80 ms). DELAY=auto|<frames> (default auto).
+# HOST_SCRIPT / CLIENT_SCRIPT=<file.txt|file.bin>: that side plays this input script instead of the keyboard
+# (tools/input_script.py; a .txt is compiled first). SCRIPT_END=idle|keys|quit: what follows its last frame.
+# Each side starts with the "launcher" parameter, as the chapter select passes it: without it the chapter
+# looks for its music in chapter<N>_windows/mus/, and the Chapter 5 logo waits for its music forever.
 set -e
 GAME="$1"; CH="${2:-5}"; SECS="${3:-40}"
 BASE="${XDG_CACHE_HOME:-$HOME/.cache}/dronline-test"
@@ -20,14 +24,22 @@ for r in host client; do
     : > "$LOG"
     D="$(dirname "$LOG")"; rm -f "$D/dronline_state.txt"
     grep -q '^debug=' "$D/dronline.ini" || echo 'debug=1' >> "$D/dronline.ini"
-    sed -i '/^lag=/d; /^delay=/d' "$D/dronline.ini"
+    sed -i '/^lag=/d; /^delay=/d; /^script=/d; /^script_end=/d' "$D/dronline.ini"
     printf 'lag=%s\ndelay=%s\n' "${LAG:-0}" "${DELAY:-auto}" >> "$D/dronline.ini"
+    if [ "$r" = host ]; then SCRIPT="${HOST_SCRIPT:-}"; else SCRIPT="${CLIENT_SCRIPT:-}"; fi
+    if [ -n "$SCRIPT" ]; then
+        case "$SCRIPT" in
+            *.bin) cp "$SCRIPT" "$D/dronline_script.bin" ;;
+            *) python3 "$(dirname "$0")/input_script.py" compile "$SCRIPT" "$D/dronline_script.bin" ;;
+        esac
+        printf 'script=dronline_script.bin\nscript_end=%s\n' "${SCRIPT_END:-idle}" >> "$D/dronline.ini"
+    fi
 done
 start_one() {   # role WxH
     set -- "$1" "${2%x*}" "${2#*x}"
     ( cd "$GAME/chapter${CH}_windows" && STEAM_COMPAT_DATA_PATH="$BASE/proton-$1" DRONLINE_ROLE="$1" \
       gamescope --backend headless -W "$2" -H "$3" -- sh -c 'echo "$DISPLAY" > "$0"; exec "$@"' "$BASE/display-$1" \
-      "$PROTON/proton" run "$GAME/DELTARUNE.exe" -game data.win \
+      "$PROTON/proton" run "$GAME/DELTARUNE.exe" -game data.win launcher \
       > "$BASE/headless-$1.log" 2>&1 & )
 }
 start_one host ${HOST_RES:-1280x960}
