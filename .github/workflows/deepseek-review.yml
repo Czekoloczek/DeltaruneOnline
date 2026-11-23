@@ -16,7 +16,8 @@ name: DeepSeek Review
 #   3. Ręcznie z zakresem `repo`: przegląd CAŁEGO repozytorium z wybranej gałęzi, część po części (gml/,
 #      native/, patcher/, tools/, testy z CI i konfiguracją), każda z całym kodem jako kontekstem. Raport trafia
 #      do podsumowania przebiegu (strona runu w Actions), a jeśli podasz numer PR-a, także pod ten PR.
-#      Przy reasoning=max to kilka-kilkanaście minut i kilkanaście-kilkadziesiąt centów.
+#      Pole `parts` (np. `1,2`) powtarza tylko wybrane części, np. te, które się nie udały.
+#      Przy reasoning=max to około pół godziny i kilkadziesiąt centów za całość.
 #
 # Skrypt: tools/deepseek_review.py (sama biblioteka standardowa Pythona). Wynik to jeden komentarz pod PR-em.
 #
@@ -56,6 +57,10 @@ on:
         description: Uwaga dla recenzenta (opcjonalna)
         type: string
         required: false
+      parts:
+        description: Tylko dla zakresu repo, numery części po przecinku (1 GML, 2 native, 3 patcher, 4 tools, 5 testy/CI); puste = wszystkie
+        type: string
+        required: false
 
 # KTO MOŻE ZAMÓWIĆ PRZEGLĄD: tylko loginy z listy ["PolskiKapsel", "Czekoloczek"] (klucz DeepSeek należy do
 # Kuby i to on płaci). Lista jest w dwóch miejscach, w `group` i w `if` joba, i musi być w obu identyczna
@@ -88,8 +93,8 @@ jobs:
        (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))
     runs-on: ubuntu-latest
     # Skrypt kończy wszystkie próby DeepSeek w 11 minut (DEEPSEEK_BUDGET), żeby zdążyć z komentarzem o błędzie.
-    # Zakres repo to do pięciu takich części po kolei.
-    timeout-minutes: ${{ inputs.scope == 'repo' && 60 || 15 }}
+    # Zakres repo to do pięciu części po kolei, każda do 20 minut (REPO_BUDGET).
+    timeout-minutes: ${{ inputs.scope == 'repo' && 110 || 15 }}
     permissions:
       contents: read         # checkout skryptu i docs/DESIGN.md (przy zakresie repo: całego repozytorium)
       pull-requests: write   # komentarz z wynikiem i reakcja 👀 pod żądaniem
@@ -124,4 +129,5 @@ jobs:
           INPUT_REASONING: ${{ inputs.reasoning }}
           INPUT_NOTE: ${{ inputs.note }}
           SCOPE: ${{ inputs.scope || 'pr' }}
+          PARTS: ${{ inputs.parts }}
         run: python3 -I tools/deepseek_review.py

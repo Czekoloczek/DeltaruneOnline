@@ -19,6 +19,7 @@ Standard library only. Environment:
   REQUEST, COMMENT_ID, REQUESTER    the /deepseek-review comment, when the run comes from one
   INPUT_MODEL, INPUT_REASONING, INPUT_NOTE   the manual run's inputs, when there is no comment
   SCOPE                             pr (default) or repo; GITHUB_SHA names the reviewed commit for repo
+  PARTS                             scope=repo only: which parts to review, e.g. "1,2" (empty: all of them)
 
 The key only ever goes into the Authorization header of the request to api.deepseek.com. It is never printed,
 and DeepSeek's error messages are redacted before they are logged.
@@ -140,9 +141,9 @@ def parse_request(body):
     return parse_options(found.get("model"), found.get("reasoning"), text)
 
 
-def request_body(model, reasoning, messages):
-    """The chat completions request for these options."""
-    body = {"model": model, "messages": messages, "stream": False, "max_tokens": MAX_TOKENS[reasoning]}
+def request_body(model, reasoning, messages, caps=MAX_TOKENS):
+    """The chat completions request for these options; `caps` is the output cap per reasoning level."""
+    body = {"model": model, "messages": messages, "stream": False, "max_tokens": caps[reasoning]}
     if reasoning == "none":
         body["thinking"] = {"type": "disabled"}
         body["temperature"] = 0.2      # has no effect with thinking on, so it is only sent without it
@@ -499,6 +500,12 @@ REPO_PARTS = (
 )
 MAX_REPO_CHARS = 700_000         # the numbered code sent as context (about 200K tokens; the model takes 1M)
 MAX_REPO_FILE = 150_000          # a bigger file is listed but not sent
+# A part thinks far longer than a PR diff: on 2026-11-23, with the 64K cap of MAX_TOKENS at max, the GML and
+# native/ parts spent every output token on reasoning and came back empty. These are the API's own defaults
+# (128K at max; the model's ceiling is 384K). At about 190 tokens per second, 128K takes some 11 minutes, so a
+# part gets 20 minutes (REPO_BUDGET) and the job's timeout-minutes allows five of them.
+REPO_MAX_TOKENS = {"none": 8000, "low": 32000, "high": 64000, "max": 128000}
+REPO_BUDGET = 1200
 REPO_MARKER = "<!-- deepseek-review-repo -->"
 
 REPO_SYSTEM = """Jesteś recenzentem kodu w projekcie DeltaruneOnline. Dostajesz CAŁE repozytorium (numer linii na
@@ -632,33 +639,44 @@ def run_repo(env, http=http_json, sleep=time.sleep, root=ROOT, list_files=repo_f
         summary("Brak sekretu DEEPSEEK_API_KEY; przegląd pominięty.")
         return 0
 
+    parts = (env.get("PARTS") or "").replace(" ", "")
+    wanted = {int(n) for n in parts.split(",")} if re.fullmatch(r"\d+(,\d+)*", parts) else set()
+    if parts and not (wanted and wanted <= set(range(1, len(REPO_PARTS) + 1))):
+        summary(f"PARTS to numery części od 1 do {len(REPO_PARTS)} po przecinku (np. 1,2), a jest {parts!r}.")
+        return 1
+
     paths = list_files(root)
     corpus, notes, sent = build_corpus(root, paths)
     sha = env.get("GITHUB_SHA", "") or "unknown"
     summary(f"Przegląd całego repo: {len(sent)} plików, {len(corpus)} znaków kontekstu, {opts['model']}, "
             f"reasoning {opts['reasoning']}.")
     sections, failed = [], 0
-    for title, prefixes in REPO_PARTS:
+    for index, (title, prefixes) in enumerate(REPO_PARTS, 1):
         files = [p for p in sent if p.startswith(prefixes)]
-        if not files:
+        if not files or wanted and index not in wanted:
             continue
         messages = repo_messages(corpus, sha, len(sent), title, files)
         if opts["note"]:
             messages[1]["content"] += f"\n\nUwaga osoby, która zamówiła przegląd:\n<<<\n{opts['note']}\n>>>"
+        body = request_body(opts["model"], opts["reasoning"], messages, REPO_MAX_TOKENS)
+        usage = None
         try:
-            answer = call_deepseek(key, request_body(opts["model"], opts["reasoning"], messages), http, sleep)
+            answer = call_deepseek(key, body, http, sleep, timeout=REPO_BUDGET, budget=REPO_BUDGET)
+            usage = answer.get("usage") or {}
             choice = (answer.get("choices") or [{}])[0]
             review = ((choice.get("message") or {}).get("content") or "").strip()
             finish = choice.get("finish_reason")
+            if not review and finish == "length":
+                raise RuntimeError(f"cały limit {body['max_tokens']} tokenów wyjścia poszedł na myślenie "
+                                   "i odpowiedź jest pusta. Spróbuj niższego poziomu reasoning.")
             if not review:
-                raise RuntimeError("DeepSeek zwrócił pustą odpowiedź.")
-            sections.append((title, files, review, finish, answer.get("usage")))
-            usage = answer.get("usage") or {}
+                raise RuntimeError(f"DeepSeek zwrócił pustą odpowiedź (finish_reason {finish}).")
+            sections.append((title, files, review, finish, usage))
             print(f"{title}: {usage.get('prompt_tokens', '?')} wejścia "
                   f"({usage.get('prompt_cache_hit_tokens', 0)} z cache), {usage.get('completion_tokens', '?')} wyjścia")
         except RuntimeError as e:
             failed += 1
-            sections.append((title, files, f"_Nie udało się: {e}_", None, None))
+            sections.append((title, files, f"_Nie udało się: {e}_", None, usage))   # a used answer is still billed
             print(f"{title}: błąd: {e}")
 
     report = repo_report(sha, opts, sections, notes, len(sent), env.get("REQUESTER", "").strip())

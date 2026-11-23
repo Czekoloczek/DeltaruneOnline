@@ -381,6 +381,7 @@ class RepoScope(unittest.TestCase):
         bodies = api.deepseek_bodies
         self.assertEqual(len(bodies), 5)
         self.assertEqual({b["reasoning_effort"] for b in bodies}, {"max"})
+        self.assertEqual({b["max_tokens"] for b in bodies}, {r.REPO_MAX_TOKENS["max"]})
         users = [b["messages"][1]["content"] for b in bodies]
         prefix = users[0].split("ZAKRES TEJ CZĘŚCI")[0]
         for b, u in zip(bodies, users):
@@ -432,6 +433,35 @@ class RepoScope(unittest.TestCase):
         self.assertIn("Nie udało się", report)
         self.assertEqual(report.count("gml/a.gml:3"), 4)
 
+    def test_only_the_parts_asked_for(self):
+        ok = FakeAPI().deepseek[0]
+        api = FakeAPI(deepseek=[ok, ok])
+        self.assertEqual(self.review(api, PARTS="1, 2"), 0)
+        scopes = [b["messages"][1]["content"].split("ZAKRES TEJ CZĘŚCI")[1] for b in api.deepseek_bodies]
+        self.assertEqual(len(scopes), 2)
+        self.assertIn("- gml/scr_dronline.gml", scopes[0])
+        self.assertIn("- native/drnet.c", scopes[1])
+        with open("deepseek-review-report.md", encoding="utf-8") as fh:
+            self.assertEqual(fh.read().count("\n## "), 2)
+
+    def test_bad_parts(self):
+        for parts in ("0", "6", "a", "1,,2", "1-2"):
+            api = FakeAPI()
+            self.assertEqual(self.review(api, PARTS=parts), 1, parts)
+            self.assertEqual(api.calls, [], parts)
+
+    def test_answer_used_up_on_thinking(self):
+        usage = {"prompt_tokens": 1000, "completion_tokens": 128000, "prompt_cache_hit_tokens": 0,
+                 "completion_tokens_details": {"reasoning_tokens": 128000}}
+        empty = (200, {"choices": [{"message": {"content": ""}, "finish_reason": "length"}], "usage": usage})
+        ok = FakeAPI().deepseek[0]
+        api = FakeAPI(deepseek=[empty, ok, ok, ok, ok])
+        self.assertEqual(self.review(api), 0)
+        with open("deepseek-review-report.md", encoding="utf-8") as fh:
+            report = fh.read()
+        self.assertIn("poszedł na myślenie", report)
+        self.assertIn("129200 wyjścia (128800 na myślenie)", report)   # the empty answer is billed too
+
     def test_no_key(self):
         api = FakeAPI()
         self.assertEqual(self.review(api, DEEPSEEK_API_KEY=""), 0)
@@ -458,6 +488,8 @@ class RepoScope(unittest.TestCase):
         self.assertIn("options: [pr, repo]", wf)
         self.assertIn("SCOPE: ${{ inputs.scope || 'pr' }}", wf)
         self.assertIn("if: inputs.scope == 'repo'", wf)
+        self.assertIn("PARTS: ${{ inputs.parts }}", wf)
+        self.assertIn("      parts:\n", wf)
 
 
 if __name__ == "__main__":
