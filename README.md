@@ -97,6 +97,8 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 
 ## Contributing
 
+- **Found a bug?** Open an issue with the bug report form. Report security problems privately, as described in
+  [SECURITY.md](SECURITY.md).
 - **Never commit game or mod files**: `data.win`, `.xdelta` patches, decompiled code, sprites, audio, or built output.
   The `.gitignore` blocks the common ones.
 - Express changes as code and rules that the patcher applies to the user's local files, not as copies of modified
