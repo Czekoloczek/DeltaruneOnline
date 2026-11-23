@@ -118,6 +118,15 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
   `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
 
+## License
+
+DeltaruneOnline's own code (the patcher, the GML, `drnet.dll`, the tools and the tests) is free software under the
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). If you share a changed version, or
+run one as a service for other people, you must publish its source under the same license.
+
+The license does not cover DELTARUNE or the Local Multiplayer mod: they keep their own licenses (the mod's is
+CC BY-NC-ND). A `data.win` you build combines this code with the game's, so never share it: everyone builds their own.
+
 ## Credits
 
 - **Local Multiplayer mod** by Yomsman, based on the multiplayer mods by Across_the_games and -S-.
