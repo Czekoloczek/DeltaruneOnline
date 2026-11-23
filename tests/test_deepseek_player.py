@@ -561,6 +561,35 @@ class Loop(unittest.TestCase):
         self.assertIn("too little left", cm.exception.why)
         self.assertEqual(model.asked, [])
 
+    def test_time_limit_around_the_state_read_and_the_pause(self):
+        now = [0.0]
+        with agent_client.AgentClient(port=self.game.port) as game:
+            read = game.state
+            reads = []
+
+            def state():
+                reads.append(1)
+                if len(reads) == 2:         # the read after the answer ends after the time is up
+                    now[0] += 61
+                return read()
+            game.state = state
+            with self.assertRaises(p.Stop) as cm:
+                p.play(game, p.FakeModel([answer("20 right", "go", True)]), "go", max_minutes=1,
+                       clock=lambda: now[0])
+        self.assertEqual(cm.exception.code, 3)          # "done" is not accepted once the time is up
+        self.assertEqual(self.game.x, 0)
+        now, slept = [0.0], []
+
+        def sleep(seconds):
+            slept.append(seconds)
+            now[0] += seconds
+        model = p.FakeModel([answer("wait 1"), answer("wait 1")])
+        with agent_client.AgentClient(port=self.game.port) as game:
+            with self.assertRaises(p.Stop) as cm:
+                p.play(game, model, "go", max_minutes=1, pause=1000, clock=lambda: now[0], sleep=sleep)
+        self.assertEqual(cm.exception.code, 3)
+        self.assertEqual(slept, [60.0])                 # the pause stops at the time limit, not after 1000 s
+
     def test_dialogue_that_does_not_go_away_goes_to_the_model(self):
         self.game.dialogue = ["* Stuck.", 0]
         self.game.apply = lambda bits: None     # confirm changes nothing

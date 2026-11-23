@@ -659,7 +659,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             raise Stop(3, "spending limit: %.4f of %.4f USD spent, the next call could cost %.4f" % (
                 spent, max_usd, worst))
         if last_call is not None and clock() - last_call < pause:
-            sleep(pause - (clock() - last_call))
+            sleep(max(0.0, min(pause - (clock() - last_call), max_minutes * 60 - (clock() - start))))
         left = max_minutes * 60 - (clock() - start)
         if left < deepseek_review.MIN_ATTEMPT:
             raise Stop(3, "time limit (%g min): too little left for a call" % max_minutes)
@@ -683,6 +683,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             continue
         bad = 0
         record.update(why=why, do=do, done=done, frames=len(frames))
+        now = game.state()
         if clock() - start > max_minutes * 60:
             log.write(record, "%3d  %-34s  %s | %s (not played: time is up)  [%.4f USD]" % (
                 turn, short(state)[:34], why, do or "-", spent))
@@ -690,7 +691,6 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         # The answer is for the screen the model was shown. If that changed during the call (a cutscene, a timer,
         # the keyboard), or the save menu's cursor moved, the answer is not played: the model is asked again about
         # the new screen. Either way the save guard and --until look at the state from after the call.
-        now = game.state()
         if screen(now) != screen(state) or now.get("save_menu") != state.get("save_menu"):
             note = "not played: the screen changed while you were thinking"
             history.append("turn %d: %s -> %s (%s)" % (turn, do or "(nothing)", change(state, now), note))
