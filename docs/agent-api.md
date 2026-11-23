@@ -4,10 +4,13 @@ An AI agent (for example Claude Code on the player's PC) can play DELTARUNE from
 reads the game state as JSON and sends input such as "hold right for 30 frames, then press confirm". Version 1
 covers the **overworld and dialogue**. In a battle the agent can only see `"battle": true`.
 
-> **Status: not yet tested in the game.** The network side (protocol, input queue, timing) is tested without the
-> game, on Linux under Wine and on Windows (`native/test_agent.py`). The GML that reads the game state has never
-> been compiled by UndertaleModTool or run in the game, and the names of the game's objects and variables below
-> come from the first draft's specification: nobody has checked them in the game yet.
+> **Status: tried in the game once, in `mode=solo`.** In chapter 5 (Linux, under Proton) an agent connected,
+> read the state and played: the file select, loading a save, walking, talking to a save point, the menu. `room`,
+> player 1 in `players_pos`, `nearby` and `dialogue` matched the screen. Not tried in the game yet: an agent in an
+> online game, a chapter change with an agent connected, a choice box (`choice`), and players 2 and 3 in
+> `players_pos`; the names of the game's objects and variables for those come from the first draft's
+> specification. The network side (protocol, input queue, timing) is tested without the game, on Linux under Wine
+> and on Windows (`native/test_agent.py`).
 
 ## Turning it on
 
@@ -87,8 +90,8 @@ chapter does not have is `null`.
 | `chapter`, `room` | `global.chapter`, and the room's name |
 | `mode`, `player`, `players`, `online` | the `dronline.ini` mode, the local player (1 to 3), the number of players in the game (the mod's `global.playeramount`; online it starts as `players` of `dronline.ini`), whether the network is on |
 | `desync` | the frame of the first desync, -1 for none |
-| `interact` | `global.interact`: 0 free to move, 1 dialogue or cutscene, 6 the dark world menu, other values as they are |
-| `menuno`, `submenu` | `global.menuno` (-1: no menu), `global.submenu` |
+| `interact` | `global.interact`: 0 free to move, 1 dialogue, a cutscene or a save point's menu, 5 the Dark World menu, other values as they are |
+| `menuno`, `submenu` | `global.menuno` and `global.submenu`, the page of the Dark World menu. They do not say whether a menu is open (`interact` does): `menuno` is 0 after loading a save, before the menu has been opened once |
 | `battle`, `can_move` | `global.fighting == 1`; `interact == 0` and no battle |
 | `players_pos` | a list of `{"player","object","name","x","y","facing"}`. Player 1 is `obj_mainchara`; in the Local Multiplayer mod players 2 and 3 are the `obj_caterpillarchara` with `controls` 1 and 2 (`name`: `susie`, `ralsei`, `noelle`). `facing`: 0 down, 1 right, 2 up, 3 left. A player without an instance is left out |
 | `dialogue` | a list, one entry per `obj_writer` (at most 8): `raw` (the text with the game's control codes), `text` (without them), `shown` (characters typed so far), `length`, `waiting` (the box waits for confirm), `x`, `y` |
@@ -99,6 +102,13 @@ chapter does not have is `null`.
 `text` is `raw` cleaned the way the game's writer reads it: `&` is a line break, `` ` `` keeps the next character,
 `/`, `%` and `|` are dropped, `^` goes with the one character after it and `\` with the two after it (`\E2`,
 `\cR`, `\M1`, ...).
+
+`interact`, `menuno` and `submenu` are the game's own numbers, handed over as they are. The values named above
+were seen in chapter 5; another chapter may use others.
+
+**Not in the state: a save point's menu** (Save, Return). While it is open the state shows only `interact` 1 and
+`choice` `null`, so an agent knows it from the save point's dialogue just before and has to press without seeing
+the cursor.
 
 ## Security
 
