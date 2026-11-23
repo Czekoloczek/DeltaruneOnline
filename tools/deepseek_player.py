@@ -36,7 +36,8 @@ Limits (each ends the run with exit code 3):
 Other options:
   --until <cond>      end the run (exit 0) as soon as the state meets this, without asking the model: a key that is
                       present and not null or false (--until save_menu: the save point menu is open), or key=value
-                      (--until room=room_town_school, --until interact=5). The model is told about it
+                      with the value as JSON (--until interact=5, --until save_menu=null; a value that is not JSON
+                      is a string: --until room=room_town_school). The model is told about it
   --allow-save        let the model save to a file (the guard above is off)
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
@@ -275,14 +276,21 @@ def pieces(frames):
     return out
 
 
+PRESENT = object()      # the value of an --until without '=': the key is there and not null or false
+
+
+def until_text(until):
+    return until[0] if until[1] is PRESENT else "%s=%s" % (until[0], json.dumps(until[1]))
+
+
 def parse_until(text):
-    """--until "key" or "key=value" -> (key, value or None)."""
+    """--until "key" or "key=value" -> (key, PRESENT or the value; "null" is None)."""
     key, eq, value = (text or "").partition("=")
     key = key.strip()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
         raise ValueError("--until takes a key of the state or key=value, not %r" % text)
     if not eq:
-        return key, None
+        return key, PRESENT
     try:
         return key, json.loads(value)
     except ValueError:
@@ -294,7 +302,7 @@ def met(state, until):
         return False
     key, value = until
     have = (state or {}).get(key)
-    if value is None:
+    if value is PRESENT:
         return have is not None and have is not False
     return have == value or (isinstance(value, str) and str(have) == value)
 
@@ -310,7 +318,7 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
     until_rule = ""
     if until:
         until_rule = "\nThe program ends the run by itself as soon as the state has %s." % (
-            until[0] if until[1] is None else "%s=%s" % (until[0], json.dumps(until[1])))
+            until_text(until))
     system = SYSTEM.format(goal=goal, max_frames=max_frames, until_rule=until_rule,
                            save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -587,7 +595,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
     turn = 0
     while True:
         if met(state, until):
-            return 0, "--until %s is met" % until[0]
+            return 0, "--until %s is met" % until_text(until)
         if clock() - start > max_minutes * 60:
             raise Stop(3, "time limit (%g min)" % max_minutes)
         turn += 1
@@ -744,8 +752,7 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
             return 0
         print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; log %s" % (
             "fake" if args.fake else args.model, args.reasoning, args.max_steps, args.max_usd, args.max_minutes,
-            "allowed" if args.allow_save else "refused", "; until " + "=".join(
-                [args.until[0]] + ([] if args.until[1] is None else [json.dumps(args.until[1])])) if args.until else "",
+            "allowed" if args.allow_save else "refused", "; until " + until_text(args.until) if args.until else "",
             path), file=out)
         code, why = play(game, model, goal, max_steps=args.max_steps, max_usd=args.max_usd,
                          max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,

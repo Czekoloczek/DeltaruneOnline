@@ -372,12 +372,16 @@ class Loop(unittest.TestCase):
                       http.requests[0][3]["messages"][0]["content"])
 
     def test_until_forms(self):
-        self.assertEqual(p.parse_until("save_menu"), ("save_menu", None))
+        self.assertEqual(p.parse_until("save_menu"), ("save_menu", p.PRESENT))
+        self.assertEqual(p.parse_until("save_menu=null"), ("save_menu", None))
+        self.assertTrue(p.met({"save_menu": {"stage": 0}}, p.parse_until("save_menu")))
+        self.assertFalse(p.met({"save_menu": {"stage": 0}}, p.parse_until("save_menu=null")))
+        self.assertTrue(p.met({"save_menu": None}, p.parse_until("save_menu=null")))
         self.assertEqual(p.parse_until("interact=5"), ("interact", 5))
         self.assertEqual(p.parse_until("room=room_town"), ("room", "room_town"))
         self.assertTrue(p.met({"interact": 5.0}, ("interact", 5)))
-        self.assertFalse(p.met({"save_menu": None}, ("save_menu", None)))
-        self.assertTrue(p.met({"can_move": True}, ("can_move", None)))
+        self.assertFalse(p.met({"save_menu": None}, ("save_menu", p.PRESENT)))
+        self.assertTrue(p.met({"can_move": True}, ("can_move", p.PRESENT)))
         with self.assertRaises(ValueError):
             p.parse_until("=5")
 
