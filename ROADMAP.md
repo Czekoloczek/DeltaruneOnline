@@ -101,6 +101,9 @@ game and the mod will "just work" without changes.
 - **Verified:** UndertaleModTool's command-line tool can compile new networking code into the modded Chapter 1 and
   Chapter 5 files (7 seconds for Chapter 5), and the result decompiles back cleanly with nothing else changed.
   It has **not yet been run** in the real game on Windows; that is the first task of Phase 1.
+- **Launch parameters are not passed on by the chapter select.** The launcher starts a chapter with its own fixed
+  parameters (`launcher`, `switch_...`, `returning_...`), so options given to `DELTARUNE.exe` never reach the chapter.
+  The Phase 1 test build therefore uses hotkeys and an `.ini` file in the save folder instead.
 
 ---
 
@@ -185,12 +188,12 @@ Goal: anyone can rebuild the modded game from their own files with one command, 
 - [x] Prove that UndertaleModTool's command-line tool can add networking code to Chapter 5.
 - [ ] **S** Install the tools on the Windows PC: UndertaleModTool (GUI, for reading code), the .NET 10 SDK
   (for the command-line tool), Python 3, xdelta3, git.
-- [ ] **M** Write the build script (`patcher/build.py`):
+- [x] **M** Write the build script (`patcher/build.py`), first version for Chapter 5:
   1. check the SHA-256 of the player's own `data.win`,
   2. apply the player's own copy of Yomsman's `.xdelta`,
   3. run our UndertaleModTool scripts (`patcher/ch5/*.csx`) that add new code and make small, anchored edits,
   4. write the result into a **separate copy** of the game folder.
-- [ ] **S** Rule for every edit: find a short, unique anchor in the existing code and change only around it. If the
+- [x] **S** Rule for every edit: find a short, unique anchor in the existing code and change only around it. If the
   anchor is missing (the game or mod was updated), the build stops with a clear message instead of producing a broken
   game.
 - [ ] **S** A local, git-ignored `decompiled/` folder for reading code, produced by the same script.
@@ -204,6 +207,10 @@ starts.
 
 Goal: learn the few things that decide the design before writing much code. Each spike is a throw-away build.
 
+**Status (2026-11-23):** one test build covers spikes 1, 2, 3 and 5 (`patcher/ch5/net_test.csx`). It compiles into
+Chapter 5 and changes nothing else; it now needs a test on Windows. Test steps and result tables:
+[docs/spikes.md](docs/spikes.md).
+
 - [ ] **S** *Network hello:* the test build already compiles. Run two copies on one PC and check that a message sent
   by one arrives in the other's async networking event.
 - [ ] **S** *Event timing:* log the frame on which async networking events arrive compared with `obj_time`'s Begin Step.
@@ -214,7 +221,7 @@ Goal: learn the few things that decide the design before writing much code. Each
   network message (Chapter 5 already ships with two DLL extensions, so the game supports them).
 - [ ] **M** *Replay test:* record P1's and P2's inputs to a file during a short play session, then replay the file twice
   in fresh games and compare a state hash every second. This tells us how deterministic Chapter 5 is **before** any
-  networking.
+  networking. **Moved to Phase 2**: it needs the input layer to write recorded buttons into the input slots.
 - [ ] **S** *Chapter change:* check that a network socket does not survive `game_change()` (expected), so we plan to
   reconnect.
 
@@ -242,7 +249,8 @@ replay file, or from the network.
   Each changed file is listed in `docs/input-audit.md`.
 - [ ] **S** Keep **local-only** keys local and make sure they never change the game: quit (`Esc`), fullscreen (`F4`),
   window and volume.
-- [ ] **M** Input recording and replay to a file, using the same layer (needed for Phase 1 and Phase 5 testing).
+- [ ] **M** Input recording and replay to a file, using the same layer (needed for Phase 5 testing). Then run the
+  replay test that was moved here from Phase 1.
 
 Done when: the game plays normally offline through the new layer (no change for the player), and a recorded session
 replays to the same result.
@@ -252,7 +260,8 @@ replays to the same result.
 Goal: both games start from exactly the same state.
 
 - [ ] **S** Start online mode through launch parameters, for example `DELTARUNE.exe -dro_host 7777` and
-  `-dro_join 100.64.0.5:7777`. An in-game menu inside the mod's config screen can come later.
+  `-dro_join 100.64.0.5:7777`. The chapter select does not pass these on (see section 2), so either patch the
+  launcher lightly or keep the Phase 1 approach (hotkeys + `deltarune_online.ini`). An in-game menu inside the mod's config screen can come later.
 - [ ] **S** Handshake: both sides send the game version, mod version and a hash of the patched `data.win`. Any
   difference stops the session with a clear message.
 - [ ] **M** The host sends everything that affects the game:

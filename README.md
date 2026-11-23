@@ -3,7 +3,8 @@
 Online multiplayer for DELTARUNE, built on top of the [Local Multiplayer mod](https://gamebanana.com/mods/601376) by Yomsman.
 Every player runs the game on their own PC, and the games stay in sync by exchanging only controller input each frame.
 
-> **Status:** early planning. Nothing is playable yet.
+> **Status:** Phase 1. A first network test build for Chapter 5 connects two games and exchanges a message every
+> frame (see [docs/spikes.md](docs/spikes.md)). Nothing is playable online yet.
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
