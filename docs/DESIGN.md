@@ -63,6 +63,14 @@ a bullet hits, so the design avoids both:
 (Rollback, the textbook answer, would need saving and restoring the complete GameMaker state every frame:
 instance ids cannot be recreated and data structure ids are plain numbers, so DELTARUNE gives no way to do it.)
 
+**Goodbye.** A game that closes (window closed, Esc held, chapter change) sends a BYE packet with its last
+inputs, from `drnet_stop` or, when the game simply exits, from the DLL's `DllMain`. The others stop waiting for
+it as soon as they run out of its input, then show "the other player left the game" and close, instead of
+freezing for the 10 s timeout. The last inputs inside the BYE let a partner that is a frame behind still reach
+the same last frame. Every machine changes chapter in the same frame, so the patcher rewrites `game_change` to
+`dro_game_change`, which marks the game as leaving: a goodbye that arrives then shows no message. A crash or a
+killed process sends nothing, so the 10 s timeout remains for those.
+
 `delay=<frames>` in `dronline.ini` fixes *D* instead; with a fixed 0 the game waits out the network every
 frame and slows down above roughly 30 ms ping.
 

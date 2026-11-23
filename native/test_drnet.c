@@ -2,6 +2,8 @@
  * Standalone test for drnet.dll (no game needed).
  *   test_drnet host 2 1 <frames> [lag_ms] [delay]           (host, 2 players, player 1)
  *   test_drnet client 2 2 <frames> [lag_ms] [delay] [ip]    (client, player 2)
+ *   ... [ip] [quit_at]: exit the process at that frame without drnet_stop, like closing the game window;
+ *   the other side must then report "left" within a frame or two instead of the 10 s timeout.
  * delay -1 (default) = automatic. lag_ms adds test latency to every packet this side sends.
  *
  * Each side feeds pseudo-random bits and events, folds every frame's result (all players' bits and
@@ -25,10 +27,11 @@ static unsigned bits_for(int player, int frame) { return (unsigned)((frame * 265
 
 int main(int argc, char **argv)
 {
-    if (argc < 5) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip]\n", argv[0]); return 2; }
+    if (argc < 5) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip] [quit_at]\n", argv[0]); return 2; }
     const char *role = argv[1]; int players = atoi(argv[2]), me = atoi(argv[3]), frames = atoi(argv[4]);
     double lag = argc > 5 ? atof(argv[5]) : 0, dly = argc > 6 ? atof(argv[6]) : -1;
     const char *ip = argc > 7 ? argv[7] : "127.0.0.1";
+    int quit_at = argc > 8 ? atoi(argv[8]) : -1;
     int f, p;
     unsigned long long sum = 1469598103934665603ull;
     HMODULE h = LoadLibraryA("drnet.dll");
@@ -56,8 +59,10 @@ int main(int argc, char **argv)
     DWORD t0 = GetTickCount(), tblock = t0;
     for (f = 0; f < frames; f++) {
         DWORD tf = GetTickCount();
+        if (f == quit_at) { printf("%s quits at frame %d without drnet_stop\n", role, f); fflush(stdout); ExitProcess(0); }
         set_aux(f % 37 == 0 ? 100000 + f * 3 + me : 0);
         double all = exchange(f, bits_for(me, f));
+        if (all == -2) { printf("%s: %s at frame %d, noticed after %lu ms\n", role, status(), f, GetTickCount() - tf); return 0; }
         if (all < 0) { printf("exchange timeout at frame %d\n", f); return 1; }
         unsigned long long v = (unsigned long long)all;
         for (p = 1; p <= players; p++) v = v * 1099511628211ull + (unsigned long long)aux(p);

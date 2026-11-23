@@ -67,6 +67,7 @@ function dronline_init()
     global.dro_hashlog = -1;
     global.dro_net = false;
     global.dro_connecting = false;
+    global.dro_leaving = false;
     global.dro_netframe = 0;
     global.dro_desync = -1;
     global.dro_msg = "";
@@ -292,9 +293,20 @@ function dronline_step()
         global.dro_netframe++;
         if (_all < 0)
         {
+            // -2: another player said goodbye (closed the game) and their input ran out; -1: no answer for 10 s
+            var why = drnet_status();
             drnet_stop();
             global.dro_net = false;
-            show_message("DeltaruneOnline: connection lost at frame " + string(global.dro_frame) + ".");
+            if (global.dro_leaving)
+            {
+                // this game is changing chapter too (dro_game_change), so the others leaving is expected
+                drnet_log("network closed while changing chapter at frame " + string(global.dro_frame));
+                return;
+            }
+            if (_all == -2)
+                show_message("DeltaruneOnline: " + why + " (frame " + string(global.dro_frame) + "). Closing the game.");
+            else
+                show_message("DeltaruneOnline: connection lost at frame " + string(global.dro_frame) + ".");
             game_end();
             return;
         }
@@ -515,6 +527,18 @@ function dro_gp_axis(d, a)
     if (!dronline_ready())
         return gamepad_axis_value(d, a);
     return 0;
+}
+
+// Replaces game_change (patcher): the chapter select starts a new game process and this one exits. Every
+// machine does that in the same frame, so goodbyes that arrive meanwhile must not show "player left".
+function dro_game_change(_dir, _params)
+{
+    if (variable_global_exists("dro_net") && global.dro_net)
+    {
+        global.dro_leaving = true;
+        drnet_log("game_change at frame " + string(global.dro_frame));
+    }
+    return game_change(_dir, _params);
 }
 
 function dro_randomize()
