@@ -112,7 +112,8 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
   help), and list the wiki pages that need an update in its description. The rules for AI agents and reviewers,
   this one included, are in [CLAUDE.md](CLAUDE.md).
 - Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build and the lockstep test,
-  all without game files. `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
+  all without game files. The lockstep test needs Wine on Linux; without it `verify.sh` skips that test and says so.
+  `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
 
 ## Credits

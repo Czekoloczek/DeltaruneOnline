@@ -44,8 +44,10 @@ jobs:
 
       # Wiki to osobne repo, którego PR nie zmienia; przegląd czyta je, żeby wskazać strony
       # nieaktualne po tej zmianie. Wiki jest publiczne, więc wystarcza token przebiegu.
-      # Gdy klonowanie się nie uda, przegląd i tak rusza i pisze, że wiki nie sprawdził.
+      # Gdy klonowanie się nie uda, przegląd i tak rusza, a wynik kroku (outcome) trafia do promptu:
+      # sam katalog _wiki/ może zostać po nieudanym checkoucie, więc nie świadczy o sukcesie.
       - name: Wiki do porównania z PR-em
+        id: wiki
         continue-on-error: true
         uses: actions/checkout@v7
         with:
@@ -252,8 +254,10 @@ jobs:
             nie zostały nieaktualne README.md, docs/DESIGN.md, config/dronline.ini.example,
             komentarz z ustawieniami na górze gml/scr_dronline.gml ani opisy i pomoc skryptów
             w tools/, patcher/ i native/ (zasada w CLAUDE.md). Kopia wiki leży w katalogu _wiki/:
-            to osobne repo, nie część PR-a. Wymień strony wiki do poprawienia po scaleniu, a jeśli
-            katalogu brak, napisz, że wiki nie sprawdziłeś. Dla każdej nieaktualnej rzeczy podaj
+            to osobne repo, nie część PR-a. Wymień strony wiki do poprawienia po scaleniu.
+            Wynik pobrania wiki: "${{ steps.wiki.outcome }}". Jeśli to nie "success", wiki nie
+            sprawdzaj (katalog może być pusty albo niepełny) i napisz w podsumowaniu, że kontrola
+            wiki została pominięta, bo pobranie się nie udało. Dla każdej nieaktualnej rzeczy podaj
             plik albo stronę, fragment i to, co powinien teraz mówić. Zbierz to w podsumowaniu
             w osobnej sekcji „Dokumentacja” (dla plików z diffu także inline) i NIE zakładaj
             dla tego issues: to poprawki do tego PR-a albo do wiki, a nie błędy.
