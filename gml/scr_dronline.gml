@@ -234,9 +234,16 @@ function dronline_script_init()
         var f = global.dro_srec_file;
         for (var n = 2; file_exists(f) && n < 100; n++)
             f = global.dro_srec_file + "." + string(n);
-        global.dro_srec_file = f;
-        global.dro_srec = buffer_create(4096, buffer_grow, 1);
-        drnet_log("recording the local input to " + f);
+        if (file_exists(f))
+        {
+            drnet_log("not recording: " + global.dro_srec_file + " and .2 to .99 all exist, and recordings are never overwritten");
+        }
+        else
+        {
+            global.dro_srec_file = f;
+            global.dro_srec = buffer_create(4096, buffer_grow, 1);
+            drnet_log("recording the local input to " + f);
+        }
     }
     if ((global.dro_script != -1 || global.dro_srec != -1) && (global.dro_mode == "host" || global.dro_mode == "client") && global.dro_delay < 0)
         drnet_log("delay=auto: a script replays a recording frame for frame only with the same delay, so set delay=<frames> on every machine");
