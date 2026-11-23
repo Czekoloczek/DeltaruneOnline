@@ -6,7 +6,8 @@ tools/agent_client.py and through plain sockets.
   python3 native/test_agent.py [solo] [long] [online]      default: all three
 
   solo    one game: state, input and its exact effect, ids, every kind of refused command, the limits, clear,
-          a second connection, input that ends with its connection, a browser's HTTP request, the command line
+          a second connection, input that ends with its connection, a browser's HTTP request, the command line,
+          the port closed and opened again as at a chapter change
   long    a game whose state is 300 KB: long replies arrive whole, and an agent that stops reading is dropped
   online  host and client in lockstep, an agent on each: "done" comes only when the delayed input was applied,
           and both sides see the same; once with a fixed delay, once with an automatic delay that grows and
@@ -203,11 +204,11 @@ def test_ids_and_order(port):
     check(replies[0]["frames"] == 10 and replies[1]["frames"] == 15, "'queued' tells the frames", replies[:2])
     check(pos(replies[3]["state"]) == dict(at, x=at["x"] + 10), "'done' of the first input", pos(replies[3]["state"]))
     check(pos(replies[4]["state"]) == dict(at, y=at["y"] - 5), "'done' of the second input", pos(replies[4]["state"]))
-    forms = (b"3e1", b"30.0", b"30", b"0.3E2")
+    forms = (b"3e1", b"30.0", b"30", b"0.3E2", b"30.0000000000000000000000", b"0.000000000000000000003e22")
     r.send(*[b'{"cmd":"input","steps":[{"frames":' + frames + b',"buttons":[]}]}' for frames in forms])
-    replies = [r.read() for _ in range(8)]
-    check([m["type"] for m in replies] == ["queued"] * 4 + ["done"] * 4 and all(m["frames"] == 30 for m in replies[:4]),
-          "30 frames written as 3e1, 30.0, 30 and 0.3E2", replies[:4])
+    replies = [r.read() for _ in range(2 * len(forms))]
+    check([m["type"] for m in replies] == ["queued"] * len(forms) + ["done"] * len(forms)
+          and all(m["frames"] == 30 for m in replies[:len(forms)]), "30 frames written in six ways", replies[:len(forms)])
     r.close()
     print("  ok: ids, reply order, two inputs in a row")
 
@@ -229,6 +230,8 @@ def test_refused(port):
         (one % b'{"buttons":["right"],"frames":0}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":3601}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":1.5}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":1.0000000000000001}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":3599.99999999999999999999}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":-3}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":1e99}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":"30"}', 5, "frames must be"),
@@ -357,6 +360,26 @@ def test_command_line(port):
     print("  ok: the command line, and a script of 800 steps")
 
 
+def test_chapter_change(port, game):
+    # Before a chapter change the game closes the port, and the next game process opens it again. The stand-in game
+    # does both itself. The agent still holds its old connection meanwhile: that must not keep the port busy.
+    old = Raw(port)
+    at = pos(old.state())
+    check(old.state()["restarts"] == 0, "no restart yet")
+    old.send({"cmd": "input", "steps": [hold(1, "down", "right", "up", "left")]})
+    reply = old.read()
+    check(isinstance(reply, dict) and reply.get("type") == "queued", "the last input before the change", reply)
+    check(old.read(10) is None, "the game closes the connection when it closes the port")
+    client = connect(game, port, seconds=20)        # the old socket is still open on this side
+    s = client.state()
+    check(s["restarts"] == 1 and s["start_tries"] == 1, "the port must be free for the first try to listen again", s["restarts"], s["start_tries"])
+    check(pos(still(client)) == at, "nothing is played after the change")
+    old.close()
+    check(pos(client.do("3 right")) == dict(at, x=at["x"] + 3), "the new connection plays")
+    client.close()
+    print("  ok: the port is closed and opened again as at a chapter change, with the old connection still held")
+
+
 def quit_game(port, game):
     r = Raw(port)
     r.send({"cmd": "input", "steps": [hold(1, *ALL)]})
@@ -375,6 +398,7 @@ def solo(tmp):
     test_limits_and_clear(port)
     test_connections(port)
     test_command_line(port)
+    test_chapter_change(port, game)
     quit_game(port, game)
 
 
@@ -439,28 +463,29 @@ def online(tmp, delay, lag):
     check(s["mode"] == "host" and a2.state()["mode"] == "client", "both sides run", s)
 
     # With a fixed delay every frame of an input is applied exactly once. With an automatic one a step may last
-    # longer when the delay grows in its last frames, never shorter; presses are exact either way.
-    def reached(got, want, what):
-        ok = got == want if not auto else all(want[k] <= got[k] <= want[k] + 4 if k in "xy" and want[k] > 0 else
-                                              want[k] - 4 <= got[k] <= want[k] if k in "xy" else got[k] == want[k] for k in want)
-        check(ok, what, got, want)
+    # longer when the delay grows in its last frames, never shorter; presses are exact either way. `moved` names
+    # what the input moves and which way: only there, and only that way, may the result go beyond `want`.
+    def reached(got, want, moved, what):
+        for k in want:
+            beyond = (got[k] - want[k]) * moved.get(k, 0)
+            check(got[k] == want[k] or (auto and 0 < beyond <= 6), what + " (%s)" % k, got, want)
 
     s = a1.do("30 right")
-    reached(pos(s, 1), {"player": 1, "x": 30, "y": 0, "confirm": 0, "cancel": 0, "menu": 0},
+    reached(pos(s, 1), {"player": 1, "x": 30, "y": 0, "confirm": 0, "cancel": 0, "menu": 0}, {"x": 1},
             "the host's 'done' must show all 30 frames applied, also the ones still delayed when the last was sent")
     check(pos(still(a1), 1) == pos(s, 1), "nothing of an input is applied after its 'done'")
-    x1 = pos(s, 1)["x"]
+    p1 = pos(s, 1)
     s = a2.do("20 up; 5 left; tap confirm 2")
-    reached(pos(s, 2), {"player": 2, "x": -5, "y": -20, "confirm": 2, "cancel": 0, "menu": 0}, "the client's 'done'")
-    check(pos(s, 1)["x"] == x1, "the client saw the host's input", pos(s, 1))
-    x2 = pos(s, 2)["x"]
+    reached(pos(s, 2), {"player": 2, "x": -5, "y": -20, "confirm": 2, "cancel": 0, "menu": 0}, {"x": -1, "y": -1}, "the client's 'done'")
+    check(pos(s, 1) == p1, "the client saw the host's input", pos(s, 1), p1)
+    p2 = pos(s, 2)
 
     # both agents at once
     ids = [a._send({"cmd": "input", "steps": steps}) for a, steps in ((a1, [hold(40, "down")]), (a2, [hold(25, "right"), hold(1, "menu")]))]
     d1 = a1._wait("done", ids[0], 30)["state"]
     d2 = a2._wait("done", ids[1], 30)["state"]
-    reached(pos(d1, 1), dict(pos(s, 1), y=40), "both agents at once, the host")
-    reached(pos(d2, 2), dict(pos(s, 2), x=x2 + 25, menu=1), "both agents at once, the client")
+    reached(pos(d1, 1), dict(p1, y=40), {"y": 1}, "both agents at once, the host")
+    reached(pos(d2, 2), dict(p2, x=p2["x"] + 25, menu=1), {"x": 1}, "both agents at once, the client")
     e1, e2 = still(a1, 0.5), still(a2, 0.5)
     check(e1["players_pos"] == e2["players_pos"], "both sides end with the same positions", e1["players_pos"], e2["players_pos"])
     used = e1["delay"]
@@ -470,15 +495,17 @@ def online(tmp, delay, lag):
         # under the input, and still every press arrives as one press.
         before = e1
         after = a1.do("; ".join(["tap confirm 1 1", "8 left"] * 36))
-        changes = after["delay_changes"] - before["delay_changes"]
-        check(changes >= 2, "the delay must have changed while the input was played, or this tests nothing", changes)
-        check(pos(after, 1)["confirm"] == pos(before, 1)["confirm"] + 36, "36 taps must be 36 presses, whatever the delay does",
-              pos(before, 1), pos(after, 1), changes)
+        grown = after["delay_grown"] - before["delay_grown"]
+        shrunk = after["delay_shrunk"] - before["delay_shrunk"]
+        check(grown > 0 and shrunk > 0, "the delay must have grown and shrunk while the input was played, or this tests nothing",
+              grown, shrunk)
+        check(pos(after, 1) == dict(pos(before, 1), x=pos(after, 1)["x"], confirm=pos(before, 1)["confirm"] + 36),
+              "36 taps must be 36 presses, whatever the delay does, and nothing else may move", pos(before, 1), pos(after, 1), grown, shrunk)
         walked = pos(before, 1)["x"] - pos(after, 1)["x"]
-        check(288 <= walked <= 288 + 2 * changes, "36 walks of 8 frames: no frame lost, few added", walked, changes)
+        check(288 <= walked <= 288 + grown, "36 walks of 8 frames: no frame lost, and no more added than the delay grew", walked, grown)
         e1, e2 = still(a1, 0.5), still(a2, 0.5)
         check(pos(e1, 1) == pos(after, 1) and e1["players_pos"] == e2["players_pos"], "both sides agree after it", e1["players_pos"], e2["players_pos"])
-        used = "%g to %g, changed %d times under the input" % (min(before["delay"], after["delay"]), max(before["delay"], after["delay"]), changes)
+        used = "automatic: it grew by %d and shrank by %d frames under the input" % (grown, shrunk)
     else:
         check(used == delay, "the test must run with the delay it asked for", used)
 

@@ -231,7 +231,7 @@ notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client f
   connection, reads the JSON lines and parses them; the input queue, the limits and the replies live in the DLL
   too. The thread never touches the game. Keeping all of that out of the GML means it can be tested without the
   game, and the GML that cannot be tested here stays small.
-- **The game side is three calls.** `dronline_step` starts with `drnet_agent_frame()`: the DLL runs the commands
+- **The game side is three calls per frame.** `dronline_step` starts with `drnet_agent_frame()`: the DLL runs the commands
   that came in. When a reply needs the game state (a `state` command, or an input that is done), it returns 1 and
   the GML hands the state over with `drnet_agent_state(json)`. `dronline_script_frame` adds
   `drnet_agent_bits()`, the agent's buttons for this input frame, to the local player's own, before
@@ -250,7 +250,12 @@ notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client f
   with the next one) and repeats it when the delay grows. Two taps one frame apart could become one press that
   way. `assign()` notes in `sample_put` how many frames the last sample went into, and `drnet_agent_bits()` gives
   the same buttons again after a held sample and leaves out the repeated frames of the step being played. So no
-  press is lost or merged; a step can only get a frame or two longer.
+  press is lost or merged; a step can only get longer, by the frames the delay grew, when it grows during the
+  step's last frames. A held sample has no frame yet, so its `done` waits until `assign()` has written it.
+- **Chapter change.** The new game process listens on the same port. The listener is exclusive
+  (`SO_EXCLUSIVEADDRUSE`), and Windows keeps such a port busy while a connection accepted on it still lives. So
+  `dro_game_change` calls `drnet_agent_stop()`, which closes the connection with a reset and the port, and a
+  game that finds the port busy at its start tries again every second (`dronline_agent_poll`).
 - **Who may connect.** Any program on the PC: there is no password, which is why the key is off by default. A
   browser is kept out by the first line: a connection that does not start with a JSON object, as every HTTP
   request does not, gets one error and is closed. The socket is not inheritable (see "The socket must not be
@@ -259,9 +264,9 @@ notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client f
 `native/test_agent.py` tests the DLL side without the game, on Linux under Wine and on Windows: `test_agent.exe`
 stands in for the game, calls the DLL in the order the GML does and moves a point with the input it gets. The
 script checks the replies and their order, about 40 kinds of refused command, the limits, `clear`, a second
-connection, input that ends with its connection, an HTTP request, replies of 300 KB, and, with a host and a
-client in lockstep, that `done` shows exactly the frames of the input, also while the automatic delay grows and
-shrinks.
+connection, input that ends with its connection, an HTTP request, the port closed and opened again while the
+agent still holds its old connection, replies of 300 KB, and, with a host and a client in lockstep, that `done`
+shows exactly the frames of the input, also while the automatic delay grows and shrinks.
 
 ## Determinism hazards
 

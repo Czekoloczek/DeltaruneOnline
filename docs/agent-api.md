@@ -16,8 +16,11 @@ key, or `agent=0`: nothing is opened, and the game behaves as before.
 
 `drnet.dll` then listens for TCP connections on **127.0.0.1:\<port\>**, this computer only. The agent is a program
 on the same PC; under Proton it can be a Linux program, because Wine's sockets are the host's. One agent at a time:
-while one is connected, another connection is answered with `another agent is connected` and closed. After a
-chapter change (a new game process) the agent connects again.
+while one is connected, another connection is answered with `another agent is connected` and closed.
+
+A chapter change starts a new game process. The game closes the agent's connection and the port just before it,
+and the new process opens the port again, so the agent connects again and may have to try for a few seconds. If
+the port is still busy when the game starts, the game tries again every second.
 
 ```
 python3 tools/agent_client.py state
@@ -33,13 +36,15 @@ queue filled.
 
 Messages are JSON objects, one per line (`\n`, a `\r` before it is ignored), UTF-8, in both directions. Every
 command may carry an `"id"` (a string or a number); the replies to it carry the same id, `null` without one. The
-game answers the lines of a connection in the order they came.
+game takes the lines of a connection in the order they came and answers each in that order (`state`, `queued`,
+`cleared`, `error`). Only `done` comes later, when its input has been played, so it can follow the answers to
+commands sent after that input: match replies by `type` and `id`.
 
 | Command | Replies |
 |---|---|
 | `{"cmd":"state"}` | `{"type":"state","id":…,"state":{…}}` with the state at the start of the next game frame |
 | `{"cmd":"input","steps":[{"buttons":["right"],"frames":30},{"buttons":[],"frames":2}]}` | `{"type":"queued","id":…,"frames":32}` in the next frame, and `{"type":"done","id":…,"state":{…}}` when the game has applied the last frame |
-| `{"cmd":"clear"}` | `{"type":"cleared","id":…}`: all queued input is dropped; inputs sent before it get no `done` any more |
+| `{"cmd":"clear"}` | `{"type":"cleared","id":…}`: all queued input is dropped; inputs sent before it get no `done` any more. Online, the frames the lockstep has already taken (up to `delay` of them) are still applied |
 | anything else | `{"type":"error","id":…,"error":"<what is wrong>"}` |
 
 **Input.** Each step holds its buttons for that many input frames (30 per second); `[]` holds nothing. The
@@ -52,8 +57,8 @@ command over a limit is answered with an error and nothing of it is queued. A ga
 more than that at once are refused with `too many commands are waiting for the game`. The game keeps at most 4 MB
 of replies for an agent that does not read them, then closes the connection.
 
-**When a connection ends,** its queued input ends with it: the buttons are released, and the next connection
-starts with an empty queue.
+**When a connection ends,** its queued input ends with it as after a `clear`: the buttons are released, and the
+next connection starts with an empty queue.
 
 **`done`.** It is sent at the start of the first frame after the one in which the input's last frame was
 applied, so its state shows what the input did. Offline that is the next frame. Online the input travels through
@@ -61,8 +66,9 @@ the lockstep like key presses, so it is applied `delay` frames after it was take
 
 **Online with `delay=auto`** the lockstep moves the delay with the ping. A key press survives that by being
 merged into the next frame or repeated; for a queued input the DLL corrects it (`drnet_agent_bits`): no press is
-lost or merged with the next one, and no step gets shorter. A step can last a frame or two longer when the delay
-grows during its last frames. With a fixed `delay=<frames>` on every machine every frame is applied exactly once.
+lost or merged with the next one, and no step gets shorter. A step can last longer, by as many frames as the delay
+grew (usually one), when the delay grows during the step's last frames. With a fixed `delay=<frames>` on every
+machine every frame is applied exactly once.
 
 **Errors.** A line that is not one JSON object, an unknown `cmd`, steps that are missing or wrong (`frames` must
 be a whole number, `30.0` and `3e1` count), an unknown button, an `id` that is neither a string nor a number or
@@ -77,7 +83,7 @@ chapter does not have is `null`.
 |---|---|
 | `frame` | frames since the game started (`global.dro_frame`) |
 | `chapter`, `room` | `global.chapter`, and the room's name |
-| `mode`, `player`, `players`, `online` | the `dronline.ini` mode, the local player (1 to 3), the number of players, whether the network is on |
+| `mode`, `player`, `players`, `online` | the `dronline.ini` mode, the local player (1 to 3), the number of players in the game (the mod's `global.playeramount`; online it starts as `players` of `dronline.ini`), whether the network is on |
 | `desync` | the frame of the first desync, -1 for none |
 | `interact` | `global.interact`: 0 free to move, 1 dialogue or cutscene, 6 the dark world menu, other values as they are |
 | `menuno`, `submenu` | `global.menuno` (-1: no menu), `global.submenu` |
@@ -100,16 +106,17 @@ chapter does not have is `null`.
   request starts with `POST / HTTP/1.1`) gets one error and is closed before anything else is read.
 - The agent can press only what the local player can. Online its input goes through the lockstep like key
   presses, so the other players' games stay in sync and desync detection is unchanged.
-- The listener is not inherited by the process a chapter change starts, so the new process can listen on the same
-  port.
+- The listener is not inherited by the process a chapter change starts, and the game closes it before the change,
+  so the new process can listen on the same port.
 
 ## How it is built
 
 `native/drnet.c` ("Agent API") holds the protocol: a thread accepts the connection, reads lines and parses them
 with a small JSON reader; the input queue, the limits and the replies live there too. That part needs no game, so
 it is tested in CI. `gml/scr_dronline.gml` only calls `drnet_agent_frame` at the start of a frame and hands over
-the state as JSON when asked (`drnet_agent_state`), and takes the agent's buttons for every input frame
-(`drnet_agent_bits`) where scripted input comes in, before `script_record` writes the frame.
+the state as JSON when asked (`drnet_agent_state`), takes the agent's buttons for every input frame
+(`drnet_agent_bits`) where scripted input comes in, before `script_record` writes the frame, and closes the port
+before a chapter change (`drnet_agent_stop`).
 
 The agent runs on one machine only. Anything its code changed in the game there, the other machines would not do,
 and that is a desync. So the state code only reads: no random calls, no instances, data structures, buffers or

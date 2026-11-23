@@ -10,9 +10,12 @@
  * drnet_agent_state with the state when asked; drnet_agent_bits for the local input; online, drnet_exchange. Then
  * it applies the input of every player: right/left move x, down/up move y, and the presses of confirm, cancel and
  * menu are counted (a button held for several frames is one press). The state says where that got every player:
- *   {"frame":120,"mode":"solo","player":1,"delay":0,"delay_changes":0,
+ *   {"frame":120,"mode":"solo","player":1,"delay":0,"delay_grown":0,"delay_shrunk":0,"restarts":0,"start_tries":0,
  *    "players_pos":[{"player":1,"x":30,"y":0,"confirm":2,"cancel":0,"menu":0}],"pad":""}
  * It ends when a player holds all seven buttons in one frame, when the other side leaves, or after 5 minutes.
+ * When the local player holds all four directions in one frame, it does what a chapter change does to the Agent
+ * API: drnet_agent_stop, and then drnet_agent_start on the same port, tried every second like dronline_agent_poll
+ * ("restarts" and "start_tries" in the state count them).
  */
 #include <windows.h>
 #include <stdio.h>
@@ -38,14 +41,15 @@ static double now_ms(void)
 
 int main(int argc, char **argv)
 {
-    const char *mode; int agent_port, fps, pad, online, players, me, f, p, n, wave, quit = 0, changes = 0;
+    const char *mode; int agent_port, fps, pad, online, players, me, f, p, n, wave, quit = 0, grown = 0, shrunk = 0;
+    int agent_on = 0, restarts = 0, tries = 0;
     double dly, lag, t0, last_delay = -1;
     long x[3] = { 0, 0, 0 }, y[3] = { 0, 0, 0 }, confirm[3] = { 0, 0, 0 }, cancel[3] = { 0, 0, 0 }, menu[3] = { 0, 0, 0 };
     unsigned before[3] = { 0, 0, 0 };
     char *state;
     HMODULE mm, h;
     f_start start; f_str set_host, agent_state; f_sd option; f_d connect, agent_start; f_dd exchange;
-    f_v delay, stop, agent_frame, agent_bits; f_s status;
+    f_v delay, stop, agent_frame, agent_bits, agent_stop; f_s status;
 
     if (argc < 3) { printf("usage: %s solo|host|client agent_port [fps] [pad] [delay] [lag_ms] [wave]\n", argv[0]); return 2; }
     mode = argv[1]; agent_port = atoi(argv[2]);
@@ -74,10 +78,12 @@ int main(int argc, char **argv)
     agent_frame = (f_v)GetProcAddress(h, "drnet_agent_frame");
     agent_state = (f_str)GetProcAddress(h, "drnet_agent_state");
     agent_bits = (f_v)GetProcAddress(h, "drnet_agent_bits");
-    if (!agent_start || !agent_frame || !agent_state || !agent_bits) { printf("drnet.dll has no Agent API\n"); return 1; }
+    agent_stop = (f_v)GetProcAddress(h, "drnet_agent_stop");
+    if (!agent_start || !agent_frame || !agent_state || !agent_bits || !agent_stop) { printf("drnet.dll has no Agent API\n"); return 1; }
 
     /* the order of dronline_init: the agent's listener first, then the network */
     if (agent_port > 0 && !agent_start(agent_port)) { printf("agent start failed on port %d\n", agent_port); return 1; }
+    agent_on = agent_port > 0;
     if (online) {
         set_host("127.0.0.1");
         if (lag > 0) option("lag", lag);
@@ -93,10 +99,15 @@ int main(int argc, char **argv)
         unsigned bits[3] = { 0, 0, 0 };
         if (online && wave && f % (10 * fps) == 0) option("lag", lag);
         if (online && wave && f % (10 * fps) == 3 * fps) option("lag", 0);
-        if (online && delay() != last_delay) { if (last_delay >= 0) changes++; last_delay = delay(); }
+        if (online && delay() != last_delay) {
+            if (last_delay >= 0) { if (delay() > last_delay) grown += (int)(delay() - last_delay); else shrunk += (int)(last_delay - delay()); }
+            last_delay = delay();
+        }
+        if (!agent_on && agent_port > 0 && f % 30 == 15) { tries++; agent_on = agent_start(agent_port) != 0; }
         if (agent_frame()) {
-            n = sprintf(state, "{\"frame\":%d,\"mode\":\"%s\",\"player\":%d,\"delay\":%g,\"delay_changes\":%d,\"players_pos\":[",
-                        f, mode, me, online ? delay() : 0.0, changes);
+            n = sprintf(state, "{\"frame\":%d,\"mode\":\"%s\",\"player\":%d,\"delay\":%g,\"delay_grown\":%d,\"delay_shrunk\":%d,"
+                        "\"restarts\":%d,\"start_tries\":%d,\"players_pos\":[",
+                        f, mode, me, online ? delay() : 0.0, grown, shrunk, restarts, tries);
             for (p = 1; p <= players; p++)
                 n += sprintf(state + n, "%s{\"player\":%d,\"x\":%ld,\"y\":%ld,\"confirm\":%ld,\"cancel\":%ld,\"menu\":%ld}",
                              p > 1 ? "," : "", p, x[p], y[p], confirm[p], cancel[p], menu[p]);
@@ -118,6 +129,7 @@ int main(int argc, char **argv)
             before[p] = bits[p];
             if (bits[p] == 127) quit = 1;
         }
+        if (bits[me] == 15 && agent_on) { agent_stop(); agent_on = 0; restarts++; }
         used = now_ms() - tf;
         if (used < 1000.0 / fps) Sleep((DWORD)(1000.0 / fps - used + 0.5));
     }

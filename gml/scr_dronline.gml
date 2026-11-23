@@ -53,6 +53,7 @@ function dronline_init()
     global.dro_srec_file = "";
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
+    global.dro_agent_tries = 0;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -160,6 +161,8 @@ function dronline_init()
     }
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_agent_init();
+    else
+        global.dro_agent_port = 0;
     random_set_seed(global.dro_seed);
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_script_init();
@@ -681,6 +684,14 @@ function dro_game_change(_dir, _params)
     {
         global.dro_leaving = true;
         drnet_bye("chapter change at frame " + string(global.dro_frame));
+    }
+    // The Agent API's port must be free for the new process, which listens on it again. Port 0: this process
+    // does not open it once more while it is on its way out.
+    if (variable_global_exists("dro_agent_port") && global.dro_agent_port > 0)
+    {
+        global.dro_agent_port = 0;
+        global.dro_agent_on = false;
+        drnet_agent_stop();
     }
     return game_change(_dir, _params);
 }
@@ -1216,7 +1227,8 @@ function dronline_heart_unswap()
 // keeps the input the agent queued and writes the replies (drnet.c, "Agent API"). The game side is two calls:
 //   dronline_agent_poll   first thing in dronline_step: the DLL runs the commands that came in. When a reply needs
 //                         the game state (a "state" command, or an input that is done), the state is built here,
-//                         before this frame changes anything.
+//                         before this frame changes anything. While the port could not be opened yet (it can be
+//                         busy for a moment after a chapter change), this tries again every second.
 //   dronline_agent_bits   in dronline_script_frame: the agent's buttons for this input frame, added to the local
 //                         player's own, so they travel like key presses (through drnet_exchange when online).
 // The state is only read. The agent runs on one machine, and anything it changed in the game there would be a
@@ -1228,9 +1240,13 @@ function dronline_agent_init()
     var port = floor(global.dro_agent_port);
     if (port <= 0)
         return;
+    global.dro_agent_tries++;
     if (!drnet_agent_start(port))
     {
-        drnet_log("agent API off: could not listen on 127.0.0.1:" + string(port));
+        // Right after a chapter change the port can still belong to the last game process, or to the connection
+        // the agent had with it. dronline_agent_poll tries again every second.
+        if (global.dro_agent_tries == 1)
+            drnet_log("agent API not on yet: could not listen on 127.0.0.1:" + string(port) + ", trying again every second");
         return;
     }
     // control characters and what JSON writes for them, for dronline_agent_str
@@ -1243,12 +1259,18 @@ function dronline_agent_init()
         global.dro_agent_esc[i] = "\\u00" + string_char_at(hex, (i div 16) + 1) + string_char_at(hex, (i mod 16) + 1);
     }
     global.dro_agent_on = true;
-    drnet_log("agent API on 127.0.0.1:" + string(port));
+    drnet_log("agent API on 127.0.0.1:" + string(port) + ((global.dro_agent_tries > 1) ? " (try " + string(global.dro_agent_tries) + ")" : ""));
 }
 
 function dronline_agent_poll()
 {
-    if (global.dro_agent_on && drnet_agent_frame())
+    if (!global.dro_agent_on)
+    {
+        if (global.dro_agent_port > 0 && (global.dro_frame % 30) == 15)
+            dronline_agent_init();
+        return;
+    }
+    if (drnet_agent_frame())
         drnet_agent_state(dronline_agent_state());
 }
 
@@ -1315,7 +1337,7 @@ function dronline_agent_state()
         + ",\"room\":" + dronline_agent_str(room_get_name(room))
         + ",\"mode\":" + dronline_agent_str(global.dro_mode)
         + ",\"player\":" + dronline_agent_num(global.dro_player)
-        + ",\"players\":" + dronline_agent_num(global.dro_players)
+        + ",\"players\":" + (variable_global_exists("playeramount") ? dronline_agent_global("playeramount") : dronline_agent_num(global.dro_players))
         + ",\"online\":" + (global.dro_net ? "true" : "false")
         + ",\"desync\":" + dronline_agent_num(global.dro_desync)
         + ",\"interact\":" + dronline_agent_global("interact")

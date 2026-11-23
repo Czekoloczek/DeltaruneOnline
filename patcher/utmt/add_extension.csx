@@ -61,6 +61,7 @@ Fn("drnet_agent_start", D, D);
 Fn("drnet_agent_frame", D);
 Fn("drnet_agent_state", D, S);
 Fn("drnet_agent_bits", D);
+Fn("drnet_agent_stop", D);
 var ext = new UndertaleExtension
 {
     Name = Data.Strings.MakeString("drnet"),

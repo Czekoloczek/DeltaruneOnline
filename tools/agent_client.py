@@ -51,6 +51,7 @@ AGENT_BUTTONS = input_script.BUTTONS[:7]    # action bits 0 to 6; the higher bit
 MAX_STEPS = 60          # steps in one input command
 MAX_FRAMES = 3600       # frames in one step
 MAX_QUEUED = 10         # input commands in the game's queue
+MAX_DELAY = 30          # frames the lockstep can hold input back before the game applies it
 DEFAULT_PORT = 8765
 
 
@@ -263,8 +264,9 @@ class AgentClient:
         waiting = []                                # ids of the commands in the game's queue, oldest first
         sent = 0
         state = None
-        # A frame is 1/30 s; online the game also waits for the other players, so allow twice the time.
-        patience = self.timeout + total / input_script.FPS * 2
+        # A frame is 1/30 s, and online the input is applied up to MAX_DELAY frames after it was taken. The game
+        # may also wait for the other players, so allow twice that time, and the timeout on top.
+        patience = self.timeout + (total + MAX_DELAY) / input_script.FPS * 2
         while sent < len(chunks) or waiting:
             while sent < len(chunks) and len(waiting) < MAX_QUEUED:
                 rid = self._send({"cmd": "input", "steps": chunks[sent]})

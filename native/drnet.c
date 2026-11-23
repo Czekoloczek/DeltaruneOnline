@@ -54,6 +54,8 @@
  *   drnet_agent_state(json)                                       -> 1 (the game state for those replies)
  *   drnet_agent_bits()                                            -> once per input frame: the agent's action bits
  *                                                                    for it (0 when it has queued none)
+ *   drnet_agent_stop()                                            -> 1 (closes the connection and the port: before
+ *                                                                    a chapter change, for the next game process)
  *
  * Options: lag = extra one-way latency in ms added to every sent packet (testing), jitter = random extra
  * 0..jitter ms (testing), maxdelay = upper limit of the automatic delay (default 6), slack = ms of one-way
@@ -723,7 +725,8 @@ EXPORT double drnet_stop(void)
  *
  * A TCP listener on 127.0.0.1 only, apart from the lockstep socket, speaking JSON lines with one agent at a time.
  * Its thread accepts the connection, reads lines and turns them into commands; it never touches the game.
- * The game thread does the rest through three calls from scr_dronline.gml:
+ * The game thread does the rest through three calls from scr_dronline.gml (and drnet_agent_stop before a chapter
+ * change, which closes the connection and the port for the game process that follows):
  *
  *   drnet_agent_frame()   first thing in a game frame. Runs the waiting commands in the order they came: `input`
  *                         joins the input queue ("queued"), `clear` empties it ("cleared"). A `state` command and
@@ -768,6 +771,8 @@ static SOCKET agent_listen = INVALID_SOCKET, agent_conn = INVALID_SOCKET;
 static CRITICAL_SECTION agent_cs;
 static int agent_cs_ready;
 static HANDLE agent_thr;
+static int agent_quit;                      /* drnet_agent_stop asks the agent thread to close everything and end */
+static int agent_busy_logged;               /* the port was busy: logged once, the game tries again every second */
 static int agent_first;                     /* this connection has not sent a line of valid JSON yet */
 static const char *agent_drop;              /* why the agent thread should close the connection, NULL = keep it */
 static char agent_line[AGENT_MAX_LINE + 1]; /* the line being received */
@@ -1012,7 +1017,10 @@ static int aj_whole(const char *s, int max)
     double v = 0; int scale = 0, e = 0, neg = 0;
     if (*s == '-') return 0;
     for (; *s >= '0' && *s <= '9'; s++) { if (v < 1e15) v = v * 10 + (*s - '0'); else scale++; }
-    if (*s == '.') for (s++; *s >= '0' && *s <= '9'; s++) { if (v < 1e15) { v = v * 10 + (*s - '0'); scale--; } }
+    if (*s == '.') for (s++; *s >= '0' && *s <= '9'; s++) {
+        if (v < 1e15) { v = v * 10 + (*s - '0'); scale--; }
+        else if (*s != '0') return 0;       /* a digit beyond what v holds: not a whole number in range */
+    }
     if (*s == 'e' || *s == 'E') {
         s++;
         if (*s == '+' || *s == '-') neg = *s++ == '-';
@@ -1335,6 +1343,26 @@ static DWORD WINAPI agent_thread(LPVOID unused)
     for (;;) {
         fd_set rs, ws; struct timeval tv; SOCKET c; int n, i;
         agent_lock();
+        if (agent_quit) {
+            /* Closed hard, with a reset: nothing of the connection may stay behind. Windows does not let the next
+               game process listen on this port (SO_EXCLUSIVEADDRUSE) while a connection accepted here still lives,
+               and a politely closed one lives until the agent closes its side too. */
+            struct linger hard; hard.l_onoff = 1; hard.l_linger = 0;
+            if (agent_conn != INVALID_SOCKET) {
+                setsockopt(agent_conn, SOL_SOCKET, SO_LINGER, (const char *)&hard, sizeof(hard));
+                closesocket(agent_conn); agent_conn = INVALID_SOCKET;
+            }
+            for (i = 0; i < agent_nbye; i++) {
+                setsockopt(agent_bye[i], SOL_SOCKET, SO_LINGER, (const char *)&hard, sizeof(hard));
+                closesocket(agent_bye[i]);
+            }
+            agent_nbye = 0;
+            closesocket(agent_listen); agent_listen = INVALID_SOCKET;
+            agent_reset();
+            agent_quit = 0;
+            agent_unlock();
+            return 0;
+        }
         if (agent_drop) agent_close(agent_drop);
         c = agent_conn;
         FD_ZERO(&rs); FD_ZERO(&ws);
@@ -1435,18 +1463,35 @@ EXPORT double drnet_agent_start(double port)
     a.sin_port = htons((u_short)port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);     /* this computer only, never the network */
     if (bind(agent_listen, (struct sockaddr *)&a, sizeof(a)) != 0 || listen(agent_listen, 4) != 0) {
-        logm("agent: cannot listen on 127.0.0.1:%d (WSA %d)", (int)port, WSAGetLastError());
+        if (!agent_busy_logged) logm("agent: cannot listen on 127.0.0.1:%d (WSA %d)", (int)port, WSAGetLastError());
+        agent_busy_logged = 1;
         closesocket(agent_listen); agent_listen = INVALID_SOCKET;
+        WSACleanup();
         return 0;
     }
+    agent_busy_logged = 0;
     agent_reset();
     agent_thr = CreateThread(NULL, 0, agent_thread, NULL, 0, NULL);
     if (!agent_thr) {
         logm("agent: CreateThread failed (%lu)", GetLastError());
         closesocket(agent_listen); agent_listen = INVALID_SOCKET;
+        WSACleanup();
         return 0;
     }
     logm("agent: listening on 127.0.0.1:%d", (int)port);
+    return 1;
+}
+
+/* Before a chapter change: the game process that follows listens on the same port. */
+EXPORT double drnet_agent_stop(void)
+{
+    if (agent_listen == INVALID_SOCKET) return 1;
+    agent_lock(); agent_quit = 1; agent_unlock();
+    if (agent_thr) {                        /* it looks at agent_quit at least every 20 ms */
+        WaitForSingleObject(agent_thr, 2000);
+        CloseHandle(agent_thr); agent_thr = NULL;
+    }
+    logm("agent: stopped");
     return 1;
 }
 
@@ -1457,9 +1502,13 @@ EXPORT double drnet_agent_frame(void)
     agent_lock();
     for (i = 0; i < agent_nfins; i++) {
         /* Its last frame went out with the previous frame's input. Offline the game applied it there and then
-           (-1: any frame is later); online the lockstep gave it the frame it is applied in. */
-        if (!agent_fins[i].known) { agent_fins[i].frame = online ? sample_frame : -1; agent_fins[i].known = 1; }
-        if (agent_fins[i].frame <= last_frame) need = 1;
+           (-1: any frame is later); online the lockstep gave it the frame it is applied in. A sample the lockstep
+           held back (sample_put 0) has no frame yet: it goes out with the next one, perhaps into several frames,
+           and only then is the last of them known. */
+        if (!agent_fins[i].known && (!online || sample_put > 0)) {
+            agent_fins[i].frame = online ? sample_frame : -1; agent_fins[i].known = 1;
+        }
+        if (agent_fins[i].known && agent_fins[i].frame <= last_frame) need = 1;
     }
     for (i = 0; i < agent_ncmds && !need; i++) if (agent_cmds[i].type == A_STATE) need = 1;
     if (!need) agent_run(NULL);
@@ -1482,7 +1531,7 @@ EXPORT double drnet_agent_state(const char *json)
  * case (two taps one frame apart became one press) and gain frames in the second. So after a held sample the same
  * buttons are given once more instead of the next frame's, and after a repeated one that many frames of the step
  * being played are left out, as long as one frame of it stays. Presses are never lost or merged; a step can still
- * last a frame or two longer when the delay grows in its last frames. */
+ * last longer, by as many frames as the delay grew (usually one), when it grows during the step's last frames. */
 EXPORT double drnet_agent_bits(void)
 {
     unsigned bits = 0; int skip, online = sock != INVALID_SOCKET && connected;
