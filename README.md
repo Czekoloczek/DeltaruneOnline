@@ -9,7 +9,7 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
 > input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, in the game it is
 > not tested yet. `tools/deepseek_player.py` lets a DeepSeek model play through it toward a goal given in words
-> (with your own API key; tested only without the game and without the real API).
+> (with your own API key; tried once in the game).
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 

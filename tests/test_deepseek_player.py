@@ -20,11 +20,14 @@ KEY = "sk-test0123456789abcdef"
 
 
 class FakeGame:
-    """The Agent API on 127.0.0.1, one connection at a time, with a tiny world: right/left move the player 3 px a
-    frame; confirm next to the save point at x=90 opens a dialogue, confirm again a choice (Save / Return), left
-    picks Save, then confirm saves and shows a last box."""
+    """The Agent API on 127.0.0.1, one connection at a time, with a tiny world shaped like the real save point:
+    right/left move the player 3 px a frame. Confirm next to the save point at x=90 opens a box whose text types
+    for 20 frames (confirm does nothing meanwhile) and then waits for confirm; confirm opens the save menu (stage 0,
+    cursor on Save). Confirm on Save goes to the file slots (stage 1); confirm on slot 0 to 2 saves there (stage 2),
+    confirm on slot 3 (Return) goes back; cancel closes the menu, confirm in stage 2 closes it."""
 
     SAVE_X = 90
+    TYPING = 20
 
     def __init__(self):
         self.srv = socket.socket()
@@ -32,22 +35,25 @@ class FakeGame:
         self.srv.listen(1)
         self.port = self.srv.getsockname()[1]
         self.x, self.y, self.frame = 0, 0, 0
-        self.dialogue = None        # text of the box that waits for confirm
-        self.choice = None          # selected option, -1 none
-        self.saved = False
+        self.dialogue = None        # [text, frames of typing left]
+        self.menu = None            # the save_menu dict while the menu is open
+        self.saved = None           # the slot saved to
+        self.choice = None          # unused by the world; a test may set it
         self.last = 0
         self.inputs = []            # every input command's steps, as the game got them
         self.cleared = 0
         threading.Thread(target=self.serve, daemon=True).start()
 
     def state(self):
+        d = self.dialogue
         s = {"frame": self.frame, "chapter": 1, "room": "room_test", "player": 1, "battle": False, "menuno": -1,
-             "interact": 0 if self.dialogue is None and self.choice is None else 1,
+             "interact": 0 if d is None and self.menu is None else 1,
              "players_pos": [{"player": 1, "object": "obj_mainchara", "name": "kris", "x": self.x, "y": self.y,
                               "facing": 1}],
-             "dialogue": [] if self.dialogue is None else [{"text": self.dialogue, "waiting": True}],
-             "choice": None if self.choice is None else {"options": ["Save", "Return"], "selected": self.choice,
-                                                         "can_choose": True},
+             "dialogue": [] if d is None else [{"text": d[0], "shown": len(d[0]) * (self.TYPING - d[1]) // self.TYPING,
+                                                "length": len(d[0]), "waiting": d[1] == 0}],
+             "choice": self.choice,
+             "save_menu": None if self.menu is None else dict(self.menu),
              "nearby": [{"object": "obj_savepoint", "x": self.SAVE_X, "y": -10, "solid": True, "visible": True}]}
         s["can_move"] = s["interact"] == 0
         return s
@@ -56,22 +62,40 @@ class FakeGame:
         pressed = bits & ~self.last
         self.last = bits
         self.frame += 1
-        confirm = pressed & 16
-        if self.choice is not None:
-            if bits & 8:
-                self.choice = 0
-            if confirm and self.choice == 0:
-                self.choice, self.saved, self.dialogue = None, True, "The game was saved."
-            return
-        if self.dialogue is not None:
-            if confirm:
+        d, m = self.dialogue, self.menu
+        if d is not None:
+            if d[1] > 0:
+                d[1] -= 1
+            elif pressed & 16:
                 self.dialogue = None
-                if not self.saved:
-                    self.choice = -1
+                self.menu = {"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0, "overwrite_x": 0}
+            return
+        if m is not None:
+            if pressed & 32 and m["stage"] < 2:
+                self.menu = None
+            elif m["stage"] == 0:
+                m["x"] = 1 if pressed & 2 else 0 if pressed & 8 else m["x"]
+                if pressed & 16:
+                    if m["x"] == 0:
+                        m["stage"] = 1
+                    else:
+                        self.menu = None
+            elif m["stage"] == 1:
+                if pressed & 1:
+                    m["slot"] = min(3, m["slot"] + 1)
+                elif pressed & 4:
+                    m["slot"] = max(0, m["slot"] - 1)
+                if pressed & 16:
+                    if m["slot"] == 3:
+                        m["stage"], m["slot"] = 0, 0
+                    else:
+                        self.saved, m["stage"] = m["slot"], 2
+            elif pressed & 16:
+                self.menu = None
             return
         self.x += 3 * bool(bits & 2) - 3 * bool(bits & 8)
-        if confirm and abs(self.x - self.SAVE_X) <= 20:
-            self.dialogue = "* A save point. & * Determination."
+        if pressed & 16 and abs(self.x - self.SAVE_X) <= 20:
+            self.dialogue = ["* A save point. & * Determination.", self.TYPING]
 
     def serve(self):
         while True:
@@ -112,6 +136,10 @@ class FakeGame:
         self.srv.close()
 
 
+def a_frames(text):
+    return agent_client.text_to_frames(text)
+
+
 def answer(do="", why="", done=False):
     return json.dumps({"why": why, "do": do, "done": done})
 
@@ -120,7 +148,7 @@ class Prompt(unittest.TestCase):
     def test_summary_of_a_full_state(self):
         g = FakeGame()
         self.addCleanup(g.close)
-        g.x, g.dialogue = 70, "* Hello &  there."
+        g.x, g.dialogue = 70, ["* Hello &  there.", 0]
         text = p.summarize(g.state())
         self.assertIn("room=room_test", text)
         self.assertIn("can_move=false", text)
@@ -137,7 +165,7 @@ class Prompt(unittest.TestCase):
 
     def test_save_menu(self):
         s = {"save_menu": {"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0, "overwrite_x": 0}}
-        self.assertIn('save point menu: {"stage":0,"x":0,"y":0,', p.summarize(s))
+        self.assertIn('save point menu (open): {"stage":0,"x":0,"y":0,', p.summarize(s))
         self.assertNotIn("save point menu", p.summarize({"save_menu": None, "room": "r"}))
 
     def test_long_dialogue_and_many_objects_are_cut(self):
@@ -243,25 +271,95 @@ class Loop(unittest.TestCase):
         self.game = FakeGame()
         self.addCleanup(self.game.close)
 
-    def test_save_with_the_fake_model(self):
-        answers = [answer("30 right", "walk to the save point"), answer("tap confirm", "use it"),
-                   answer("tap left; tap confirm", "pick Save"), answer("", "saved", True)]
+    def fake(self, answers, *args):
         with tempfile.TemporaryDirectory() as tmp:
-            fake = os.path.join(tmp, "answers.txt")
-            with open(fake, "w") as f:
+            path = os.path.join(tmp, "answers.txt")
+            with open(path, "w") as f:
                 f.write("\n".join(answers) + "\n")
-            code, out, records = run_main(self.game, ["walk to the save point and save", "--fake", fake])
+            return run_main(self.game, ["walk to the save point"] + list(args) + ["--fake", path])
+
+    def test_save_with_the_fake_model(self):
+        code, out, records = self.fake([answer("30 right", "walk to the save point"), answer("tap confirm", "use it"),
+                                        answer("tap confirm", "Save"), answer("tap confirm", "slot 0"),
+                                        answer("tap confirm", "close"), answer("", "saved", True)], "--allow-save")
         self.assertEqual(code, 0, out)
-        self.assertTrue(self.game.saved)
+        self.assertEqual(self.game.saved, 0)
         self.assertEqual(self.game.x, 90)
+        self.assertIsNone(self.game.menu)
         turns = [r for r in records if r["event"] == "turn"]
-        self.assertEqual([r.get("auto", False) for r in turns], [False, False, True, False, True, False])
-        self.assertEqual(turns[0]["do"], "30 right")
+        self.assertEqual([r["do"] for r in turns],
+                         ["30 right", "tap confirm", "wait 15", "wait 15", "tap confirm; wait 4", "tap confirm",
+                          "tap confirm", "tap confirm", ""])
         self.assertEqual(turns[0]["result"], "moved (+90,+0)")
-        self.assertIn("choice appeared", turns[2]["result"])
+        self.assertIn("save point menu appeared", turns[4]["result"])
         self.assertEqual(records[-1]["event"], "end")
         self.assertIn("goal is reached: saved", out)
         self.assertEqual(self.game.cleared, 1)          # the queued input is dropped at the end
+
+    def test_a_turn_stops_when_the_screen_changes(self):
+        # The first run in the game: four confirms in one turn ran through the dialogue, the menu and a save.
+        self.game.x = 90
+        code, out, records = self.fake([answer("tap confirm 3 10; tap confirm 3 10; tap confirm 3 10")],
+                                       "--allow-save", "--no-auto-confirm")
+        self.assertEqual(code, 0, out)
+        turn = [r for r in records if r["event"] == "turn"][0]
+        self.assertEqual(turn["played"], 11)
+        self.assertIn("dropped: the screen changed", turn["note"])
+        self.assertIsNotNone(self.game.dialogue)
+        self.assertIsNone(self.game.saved)
+
+    def test_saving_is_refused_without_allow_save(self):
+        http = Http([answer("30 right"), answer("tap confirm"), answer("tap confirm", "Save"),
+                     answer("tap confirm", "slot 0"), answer("tap cancel"), answer("", "menu seen", True)])
+        code, out, records = run_main(self.game, ["open the save menu"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        self.assertIsNone(self.game.saved)
+        self.assertIsNone(self.game.menu)
+        refused = [r for r in records if "refused" in r.get("note", "")]
+        self.assertEqual(len(refused), 1)
+        self.assertIn("saves to file slot 0", refused[0]["note"])
+        self.assertIn("refused: confirm here saves to file slot 0", http.requests[4][3]["messages"][1]["content"])
+        self.assertIn("Saving to a file is not allowed", http.requests[0][3]["messages"][0]["content"])
+
+    def test_overwrite_question_is_guarded_too(self):
+        self.assertIn("overwrite", p.save_risk({"save_menu": {"stage": 1, "slot": 3, "overwrite": 1,
+                                                              "overwrite_x": 0}}))
+        self.assertIsNone(p.save_risk({"save_menu": {"stage": 1, "slot": 3, "overwrite": 1, "overwrite_x": 1}}))
+        self.assertIsNone(p.save_risk({"save_menu": {"stage": 0, "x": 0, "y": 0, "slot": 0}}))
+        self.assertIsNone(p.save_risk({"save_menu": None}))
+
+    def test_until_ends_the_run_without_the_model(self):
+        http = Http([answer("30 right"), answer("tap confirm 3 10")])
+        code, out, records = run_main(self.game, ["open the save menu", "--until", "save_menu"],
+                                      {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        self.assertIn("--until save_menu is met", out)
+        self.assertEqual(len(http.requests), 2)
+        self.assertEqual(self.game.menu["stage"], 0)
+        self.assertIn("ends the run by itself as soon as the state has save_menu",
+                      http.requests[0][3]["messages"][0]["content"])
+
+    def test_until_forms(self):
+        self.assertEqual(p.parse_until("save_menu"), ("save_menu", None))
+        self.assertEqual(p.parse_until("interact=5"), ("interact", 5))
+        self.assertEqual(p.parse_until("room=room_town"), ("room", "room_town"))
+        self.assertTrue(p.met({"interact": 5.0}, ("interact", 5)))
+        self.assertFalse(p.met({"save_menu": None}, ("save_menu", None)))
+        self.assertTrue(p.met({"can_move": True}, ("can_move", None)))
+        with self.assertRaises(ValueError):
+            p.parse_until("=5")
+
+    def test_measured_speed_goes_into_the_prompt(self):
+        http = Http([answer("20 right"), answer("", "ok", True)])
+        code, _, _ = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0)
+        self.assertNotIn("speed measured", http.requests[0][3]["messages"][1]["content"])
+        self.assertIn("speed measured in this run: about 3.0 px", http.requests[1][3]["messages"][1]["content"])
+
+    def test_pieces(self):
+        frames = a_frames("10 right; tap confirm 3 2; 5 right+cancel")
+        self.assertEqual([len(x) for x in p.pieces(frames)], [10, 3, 3, 3, 5])
+        self.assertEqual(p.pieces([]), [])
 
     def test_deepseek_request_and_the_key_stays_out_of_the_log(self):
         http = Http([answer("30 right", "walk"), answer("", "there", True)])
@@ -332,15 +430,24 @@ class Loop(unittest.TestCase):
         self.assertEqual(records[1]["frames"], 10)
 
     def test_dialogue_that_does_not_go_away_goes_to_the_model(self):
-        self.game.SAVE_X = 0
-        self.game.apply(16)         # opens the box at x=0
-        self.game.apply(0)
-        self.game.apply = lambda bits: None     # from now on confirm changes nothing
+        self.game.dialogue = ["* Stuck.", 0]
+        self.game.apply = lambda bits: None     # confirm changes nothing
         http = Http([answer("", "stuck in a box", True)])
         code, _, records = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 0)
         turns = [r for r in records if r["event"] == "turn"]
-        self.assertEqual([r.get("auto", False) for r in turns], [True, False])
+        self.assertEqual([r.get("auto", False) for r in turns], [True, True, False])
+
+    def test_typing_box_is_waited_for(self):
+        self.game.x = 90
+        self.game.apply(16)
+        self.game.apply(0)
+        http = Http([answer("", "menu open", True)])
+        code, _, records = run_main(self.game, ["go", "--until", "interact=7"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0)
+        self.assertEqual([r["do"] for r in records if r["event"] == "turn"],
+                         ["wait 15", "wait 15", "tap confirm; wait 4", ""])
+        self.assertEqual(self.game.menu["stage"], 0)
 
     def test_prompt_only(self):
         out = io.StringIO()

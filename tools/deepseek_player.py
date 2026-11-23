@@ -5,8 +5,18 @@
 
 The game must run with agent=<port> in dronline.ini (docs/agent-api.md). Every turn the player reads the state,
 sends DeepSeek a short summary of it with the goal and the last few turns, and plays the buttons the model chose
-(at most --max-frames frames a turn), until the model says the goal is reached or a limit ends the run. Version 1
-of the Agent API covers the overworld and dialogue; in a battle the model sees only "battle".
+(at most --max-frames frames a turn), until the model says the goal is reached, --until is met, or a limit ends the
+run. Version 1 of the Agent API covers the overworld and dialogue; in a battle the model sees only "battle".
+
+A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece), and the
+rest is dropped as soon as the screen changes: a dialogue, choice, menu or room appears, changes or closes. So a
+model that sends "tap confirm 4 10" sees each new screen instead of running through it. A dialogue box that is
+still typing is waited for, and one that waits for confirm is confirmed, without asking the model
+(--no-auto-confirm turns both off).
+
+Saving is guarded: unless --allow-save is given, confirm is refused while the save point menu's cursor is on a
+file slot or on "Save" in the overwrite question, so the model cannot save over a file. The guard needs the
+save_menu key of the state; a game build without it shows no save menu, and then nothing stops a save.
 
 The key comes from the environment variable DEEPSEEK_API_KEY, or else from a file (--key-file, default
 ~/.config/deltarune-online/deepseek.env) holding the line DEEPSEEK_API_KEY=<key> (a line with only the key works
@@ -14,14 +24,18 @@ too). Keep that file outside the repository, readable only by you (chmod 600). T
 Authorization header of the requests to api.deepseek.com: it is never printed or logged.
 
 Limits (each ends the run with exit code 3):
-  --max-steps <n>     turns, default 40. A dialogue box that only waits for confirm is answered without asking the
-                      model (--no-auto-confirm turns that off); such a turn counts too
+  --max-steps <n>     calls to the model, default 40. Turns the player handles itself (waiting for a typing box,
+                      confirming one that waits) do not count, but at most 5 times as many of them
   --max-usd <usd>     spending on DeepSeek, default 0.05. Counted from the tokens the API reports, at the peak
                       prices, so the real cost is the same or lower. The run stops before a call that could pass it
   --max-minutes <m>   wall time, default 20
   --max-frames <n>    input frames a turn, default 150 (5 s); a longer answer is cut there
 
 Other options:
+  --until <cond>      end the run (exit 0) as soon as the state meets this, without asking the model: a key that is
+                      present and not null or false (--until save_menu: the save point menu is open), or key=value
+                      (--until room=room_town_school, --until interact=5). The model is told about it
+  --allow-save        let the model save to a file (the guard above is off)
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
   --reasoning <r>     none (default: fast and cheap), low, high, max. Thinking costs many more output tokens, and
@@ -37,15 +51,16 @@ Other options:
 Steps are written as in tools/agent_client.py ("20 right; tap confirm 2 15"). Every turn prints one line: the
 turn, what the model saw in short, why it chose what it did, what was pressed, and the money spent so far.
 
-Exit code: 0 the model says the goal is reached, 1 the game or DeepSeek failed or the model gave up, 2 the command
-line or the key is wrong, 3 a limit ended the run, 130 Ctrl+C. The queued input is dropped at every exit.
+Exit code: 0 the model says the goal is reached or --until is met, 1 the game or DeepSeek failed or the model
+gave up, 2 the command line or the key is wrong, 3 a limit ended the run, 130 Ctrl+C. The queued input is dropped
+at every exit.
 
 Two players online: run one player on each PC, each against its own game, with its own goal. Online, every turn
 waits for the lockstep, so both games must be running.
 
 Tested without the game and without a key (tests/test_deepseek_player.py; native/test_agent.py solo, against
-drnet.dll); not yet
-tested in the game or against the real API.
+drnet.dll). One run in the game (2026-11-23, deepseek-flash) reached the save point but ran through its menu and
+saved; the pieces, the save guard, --until and the walking hints came from it and are not yet tried in the game.
 """
 import argparse
 import datetime
@@ -71,6 +86,8 @@ HISTORY = 6             # turns the model is reminded of
 MAX_NEARBY = 12         # objects of the state's nearby list in the prompt
 MAX_TEXT = 300          # characters of one dialogue box in the prompt
 MAX_BAD = 3             # unusable answers in a row before the run gives up
+AUTO_PER_STEP = 5       # turns without the model allowed per --max-steps
+CONFIRM, PRESSES, DIRECTIONS = 16, 16 | 32 | 64, 1 | 2 | 4 | 8      # action bits (agent_client.AGENT_BUTTONS)
 
 SYSTEM = """You play DELTARUNE through a program. Each turn you get the game state and the last turns, and you
 answer with the buttons to press next.
@@ -79,12 +96,21 @@ Buttons: down right up left confirm cancel menu (or d r u l z x c). Steps, separ
   <frames> <buttons>            hold buttons for that many frames (30 frames = 1 s), e.g. "20 right", "10 up+left"
   wait <frames>                 press nothing
   tap <buttons> [times] [gap]   press for 1 frame, then nothing for <gap> frames, e.g. "tap confirm 2 10"
-At most {max_frames} frames a turn. Then you see the new state.
+At most {max_frames} frames a turn. The program plays your steps until the screen changes (a dialogue, menu,
+choice or room appears, changes or closes), drops the rest and asks you again. So in a menu or a choice send one
+press a turn; to walk somewhere, send one long hold.
 
-The state: x grows to the right, y grows downward. Walking moves about 2 to 4 px a frame. nearby lists objects with
-their offset (dx,dy) from you. can_move=false: a dialogue, cutscene or menu holds you; confirm advances dialogue,
-cancel closes menus, a choice is picked with a direction and then confirm. To interact with something, stand next
-to it facing it and tap confirm. If your last input changed nothing, try something else.
+Moving: x grows to the right, y grows downward. Walking speeds up to about 7 px a frame within a few frames (30
+frames of right moved 218 px in one test); the speed measured in this run is shown once you have walked. nearby
+lists objects with (dx,dy), where they are from you: hold right for about dx/7 frames when dx > 0, left when dx < 0,
+down when dy > 0, up when dy < 0. To use an object, stop about 20 px (one tile) from it, facing it, and tap
+confirm once.
+
+Dialogue: "typing" means the text is still appearing; confirm does nothing then (cancel shows the rest at once).
+The program waits for typing boxes and confirms boxes that wait for it, so you are asked when something needs a
+decision. can_move=false: a dialogue, cutscene or menu holds you; cancel closes menus; a choice is picked with a
+direction and then confirm. A "save point menu" line means the save point's menu is open. {save_rule}
+If your last input changed nothing, try something else.{until_rule}
 
 Goal: {goal}
 
@@ -92,6 +118,9 @@ Answer with one JSON object and nothing else:
 {{"why": "<at most 15 words>", "do": "<steps>", "done": false}}
 "done": true only when the goal is reached (then "do" may be empty). If the goal cannot be reached, answer
 "done": true and say why in "why", starting with "give up:"."""
+SAVE_ALLOWED = "Saving to a file is allowed in this run, but only if the goal asks for it."
+SAVE_REFUSED = ("Saving to a file is not allowed in this run: the program refuses confirm on a file slot and on "
+                "Save in the overwrite question. Use Return or cancel there.")
 
 
 class Stop(Exception):
@@ -155,9 +184,9 @@ def summarize(state):
     sm = s.get("save_menu")
     if isinstance(sm, dict):
         # The key of the Agent API's save point menu (PR 37 of the game side); the numbers are the game's own.
-        out.append("save point menu: %s. stage 0: main box, cursor x,y = Save (0,0), Return (1,0), Storage (0,1), "
-                   "Recruits (1,1), x=2 a saved message waits for confirm; stage 1: file slot 0-2, 3 Return; "
-                   "overwrite=1: overwrite question, overwrite_x 0 Save 1 Return"
+        out.append("save point menu (open): %s. stage 0: main box, cursor x,y = Save (0,0), Return (1,0), "
+                   "Storage (0,1), Recruits (1,1), x=2 a saved message waits for confirm; stage 1: file slot 0-2, "
+                   "3 Return; overwrite=1: overwrite question, overwrite_x 0 Save 1 Return"
                    % json.dumps(sm, separators=(",", ":"))[:200])
     near = []
     for o in (s.get("nearby") or [])[:MAX_NEARBY]:
@@ -189,21 +218,94 @@ def change(before, after):
     for k in ("can_move", "battle", "interact", "menuno"):
         if before.get(k) != after.get(k):
             bits.append("%s %s -> %s" % (k, before.get(k), after.get(k)))
-    texts = lambda s: [d.get("text") for d in (s.get("dialogue") or []) if isinstance(d, dict)]  # noqa: E731
+    texts = lambda s: [d.get("text") for d in boxes(s)]  # noqa: E731
     if texts(before) != texts(after):
         bits.append("dialogue changed")
-    if bool(before.get("choice")) != bool(after.get("choice")):
-        bits.append("choice " + ("appeared" if after.get("choice") else "gone"))
+    for k, name in (("choice", "choice"), ("save_menu", "save point menu")):
+        if bool(before.get(k)) != bool(after.get(k)):
+            bits.append(name + (" appeared" if after.get(k) else " gone"))
+    a, b = before.get("save_menu"), after.get("save_menu")
+    if isinstance(a, dict) and isinstance(b, dict) and a != b:
+        bits.append("save point menu %s" % json.dumps(b, separators=(",", ":"))[:120])
     return ", ".join(bits) or "nothing changed"
 
 
-def messages(goal, max_frames, state, history, turn, max_steps):
+def boxes(state):
+    return [d for d in (state or {}).get("dialogue") or [] if isinstance(d, dict)]
+
+
+def screen(state):
+    """What the player sees, without positions and cursors: when this changes, the rest of a turn is dropped."""
+    s = state or {}
+    c, sm = s.get("choice"), s.get("save_menu")
+    return (s.get("room"), s.get("interact"), s.get("menuno"), s.get("battle"),
+            tuple((d.get("text"), bool(d.get("waiting"))) for d in boxes(s)),
+            tuple(str(o) for o in c.get("options") or []) if isinstance(c, dict) else None,
+            (sm.get("stage"), sm.get("overwrite"), sm.get("x") == 2) if isinstance(sm, dict) else None)
+
+
+def save_risk(state):
+    """Why a confirm now would save to a file, or None."""
+    sm = (state or {}).get("save_menu")
+    if not isinstance(sm, dict):
+        return None
+    if isinstance(sm.get("overwrite"), (int, float)) and sm["overwrite"] > 0 and sm.get("overwrite_x") == 0:
+        return "confirm here answers Save to the overwrite question"
+    if sm.get("stage") == 1 and sm.get("slot") in (0, 1, 2):
+        return "confirm here saves to file slot %d" % sm["slot"]
+    return None
+
+
+def pieces(frames):
+    """A turn's frames cut before every new press of confirm, cancel or menu."""
+    out, prev = [], 0
+    for bits in frames:
+        if not out or bits & PRESSES & ~prev:
+            out.append([])
+        out[-1].append(bits)
+        prev = bits
+    return out
+
+
+def parse_until(text):
+    """--until "key" or "key=value" -> (key, value or None)."""
+    key, eq, value = (text or "").partition("=")
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+        raise ValueError("--until takes a key of the state or key=value, not %r" % text)
+    if not eq:
+        return key, None
+    try:
+        return key, json.loads(value)
+    except ValueError:
+        return key, value.strip()
+
+
+def met(state, until):
+    if not until:
+        return False
+    key, value = until
+    have = (state or {}).get(key)
+    if value is None:
+        return have is not None and have is not False
+    return have == value or (isinstance(value, str) and str(have) == value)
+
+
+def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False, until=None, speed=None):
     """The system prompt stays the same for the whole run, so DeepSeek's context cache bills it at the cache-hit
     price from the second call on; only the short user message changes."""
     recent = "\n".join(history[-HISTORY:]) or "(first turn)"
-    user = "Turn %d of %d.\nLast turns:\n%s\nState now:\n%s" % (turn, max_steps, recent, summarize(state))
-    return [{"role": "system", "content": SYSTEM.format(goal=goal, max_frames=max_frames)},
-            {"role": "user", "content": user}]
+    user = "Turn %d of %d.\nLast turns:\n%s\n" % (turn, max_steps, recent)
+    if speed:
+        user += "Walking speed measured in this run: about %.1f px a frame.\n" % speed
+    user += "State now:\n%s" % summarize(state)
+    until_rule = ""
+    if until:
+        until_rule = "\nThe program ends the run by itself as soon as the state has %s." % (
+            until[0] if until[1] is None else "%s=%s" % (until[0], json.dumps(until[1])))
+    system = SYSTEM.format(goal=goal, max_frames=max_frames, until_rule=until_rule,
+                           save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED)
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 # ---------------------------------------------------------------------------------------------- the answer
@@ -369,48 +471,93 @@ def short(state):
     return " ".join(bits)
 
 
-def only_waiting_dialogue(state):
-    """A dialogue box waits for confirm, nothing else is to be decided: no choice, no battle."""
-    boxes = [d for d in state.get("dialogue") or [] if isinstance(d, dict)]
-    return bool(boxes) and any(d.get("waiting") for d in boxes) and not state.get("choice") and not state.get("battle")
+def auto_action(state):
+    """The steps the player plays itself, without the model: waiting for a typing box, confirming one that waits.
+    None when something needs a decision (a choice, a menu, a battle, nothing to read)."""
+    if state.get("choice") or state.get("save_menu") or state.get("battle") or not boxes(state):
+        return None
+    return "tap confirm; wait 4" if any(d.get("waiting") for d in boxes(state)) else "wait 15"
+
+
+def progress(state):
+    return screen(state), tuple(d.get("shown") for d in boxes(state))
+
+
+def walked(frames, before, after):
+    """(frames a direction was held, px moved) of a turn that stayed in its room, or None."""
+    a, b = me_of(before), me_of(after)
+    held = sum(1 for bits in frames if bits & DIRECTIONS)
+    if not a or not b or before.get("room") != after.get("room") or held < 8:
+        return None
+    try:
+        dist = max(abs(b["x"] - a["x"]), abs(b["y"] - a["y"]))
+    except (KeyError, TypeError):
+        return None
+    return (held, dist) if dist > 0 else None
+
+
+def play_turn(game, frames, state, allow_save, until):
+    """Plays a turn's frames piece by piece. Returns (state after, frames played, why the rest was dropped or "")."""
+    played = 0
+    parts = pieces(frames)
+    for i, part in enumerate(parts):
+        risk = save_risk(state)
+        if risk and part[0] & CONFIRM and not allow_save:
+            return state, played, "refused: %s, and saving is not allowed in this run (Return or cancel)" % risk
+        before = state
+        state = game.send_steps(agent_client.frames_to_steps(part))
+        played += len(part)
+        if i + 1 < len(parts) and (screen(state) != screen(before) or met(state, until)):
+            return state, played, "the rest (%d frames) dropped: the screen changed" % (len(frames) - played)
+    return state, played, ""
 
 
 def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max_frames=150, pause=0.5,
-         prices=PRICES["deepseek-flash"], auto_confirm=True, log=None, tally=None, clock=time.monotonic,
-         sleep=time.sleep):
-    """The loop. Returns (0, why it ended) when the model says the goal is reached, raises Stop otherwise.
-    tally["usd"] holds the USD spent so far, also after a Stop."""
+         prices=PRICES["deepseek-flash"], auto_confirm=True, allow_save=False, until=None, log=None, tally=None,
+         clock=time.monotonic, sleep=time.sleep):
+    """The loop. Returns (0, why it ended) when the model says the goal is reached or `until` is met, raises Stop
+    otherwise. tally["usd"] holds the USD spent so far, also after a Stop."""
     log = log or Log(None)
     tally = {} if tally is None else tally
     tally["usd"] = spent = 0.0
-    stuck_dialogue = False
     start = clock()
     last_call = None
     history = []
-    bad = 0
+    bad = calls = autos = auto_stuck = 0
+    walk = None                 # (frames a direction was held, px) of the longest walk so far
     state = game.state()
     log.write({"event": "start", "goal": goal, "state": summarize(state)},
               "goal: %s\nstart: %s" % (goal, short(state)))
-    for turn in range(1, max_steps + 1):
+    turn = 0
+    while True:
+        if met(state, until):
+            return 0, "--until %s is met" % until[0]
         if clock() - start > max_minutes * 60:
             raise Stop(3, "time limit (%g min)" % max_minutes)
-        # A box that waits for confirm is answered without the model, unless confirm changed nothing last time.
-        if auto_confirm and only_waiting_dialogue(state) and not stuck_dialogue:
+        turn += 1
+        do = auto_action(state) if auto_confirm and auto_stuck < 2 else None
+        if do:
+            autos += 1
+            if autos > AUTO_PER_STEP * max_steps:
+                raise Stop(3, "%d turns without the model" % (autos - 1))
             before = state
-            state = game.do("tap confirm; wait 4")
+            state = game.do(do)
             what = change(before, state)
-            stuck_dialogue = what == "nothing changed"
-            said = " / ".join(" ".join(str(d.get("text") or "").split())
-                              for d in before.get("dialogue") or [] if isinstance(d, dict))
-            history.append("turn %d: dialogue %s, tap confirm -> %s" % (
-                turn, json.dumps(said[:160], ensure_ascii=False), what))
-            log.write({"event": "turn", "turn": turn, "auto": True, "dialogue": said, "do": "tap confirm; wait 4",
-                       "result": what},
-                      "%3d  %-34s  %s | tap confirm -> %s" % (
-                          turn, short(before)[:34], json.dumps(said[:60], ensure_ascii=False), what))
+            auto_stuck = auto_stuck + 1 if progress(before) == progress(state) else 0
+            said = " / ".join(" ".join(str(d.get("text") or "").split()) for d in boxes(before))
+            if do.startswith("tap"):
+                history.append("turn %d: dialogue %s, the program tapped confirm -> %s" % (
+                    turn, json.dumps(said[:160], ensure_ascii=False), what))
+            log.write({"event": "turn", "turn": turn, "auto": True, "dialogue": said, "do": do, "result": what},
+                      "%3d  %-34s  (auto) %s | %s -> %s" % (
+                          turn, short(before)[:34], json.dumps(said[:50], ensure_ascii=False), do, what))
             continue
-        stuck_dialogue = False
-        msgs = messages(goal, max_frames, state, history, turn, max_steps)
+        if calls >= max_steps:
+            raise Stop(3, "step limit (%d)" % max_steps)
+        calls += 1
+        auto_stuck = 0
+        speed = walk[1] / walk[0] if walk else None
+        msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed)
         # The next call costs at most: the whole prompt at the cache-miss price (about 3 characters a token) and
         # the whole output cap.
         worst = (sum(len(m["content"]) for m in msgs) / 3 * prices[1] + model.max_tokens * prices[2]) / 1e6
@@ -424,7 +571,8 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         cost = usage_cost(usage, prices)
         spent += cost
         tally["usd"] = spent
-        record = {"event": "turn", "turn": turn, "state": msgs[1]["content"].split("State now:\n", 1)[1],
+        record = {"event": "turn", "turn": turn, "call": calls,
+                  "state": msgs[1]["content"].split("State now:\n", 1)[1],
                   "answer": content, "usage": usage, "usd": round(cost, 6), "usd_total": round(spent, 6)}
         try:
             why, do, frames, done = parse_answer(content, max_frames)
@@ -445,16 +593,19 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             return 0, "the model says the goal is reached: %s" % why
         before = state
         if frames:
-            state = game.send_steps(agent_client.frames_to_steps(frames))
+            state, played, note = play_turn(game, frames, state, allow_save, until)
         else:
-            state = game.state()
+            state, played, note = game.state(), 0, ""
+        w = walked(frames[:played], before, state)
+        if w and (walk is None or w[0] >= walk[0]):
+            walk = w
         what = change(before, state)
-        cut = " (cut to %d frames)" % max_frames if len(agent_client.text_to_frames(do)) > max_frames else ""
-        history.append("turn %d: %s -> %s%s" % (turn, do or "(nothing)", what, cut))
-        record["result"] = what
-        log.write(record, "%3d  %-34s  %s | %s%s -> %s  [%.4f USD]" % (
-            turn, short(before)[:34], why, do or "-", cut, what, spent))
-    raise Stop(3, "step limit (%d)" % max_steps)
+        if len(agent_client.text_to_frames(do)) > max_frames:
+            note = (note + "; " if note else "") + "cut to %d frames" % max_frames
+        history.append("turn %d: %s -> %s%s" % (turn, do or "(nothing)", what, " (%s)" % note if note else ""))
+        record.update(result=what, played=played, note=note)
+        log.write(record, "%3d  %-34s  %s | %s -> %s%s  [%.4f USD]" % (
+            turn, short(before)[:34], why, do or "-", what, " (%s)" % note if note else "", spent))
 
 
 def parse_args(argv):
@@ -471,6 +622,8 @@ def parse_args(argv):
     ap.add_argument("--max-frames", type=int, default=150)
     ap.add_argument("--pause", type=float, default=0.5)
     ap.add_argument("--no-auto-confirm", action="store_true")
+    ap.add_argument("--allow-save", action="store_true")
+    ap.add_argument("--until", default=None)
     ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
     ap.add_argument("--log", default=None)
     ap.add_argument("--prompt", action="store_true")
@@ -483,6 +636,10 @@ def parse_args(argv):
         ap.error("--max-steps, --max-usd and --max-minutes must be above 0, --max-frames 1 to 3600")
     if not args.goal.strip():
         ap.error("the goal is empty")
+    try:
+        args.until = parse_until(args.until) if args.until else None
+    except ValueError as e:
+        ap.error(str(e))
     return args
 
 
@@ -510,16 +667,20 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
     try:
         game.connect()
         if args.prompt:
-            for m in messages(goal, args.max_frames, game.state(), [], 1, args.max_steps):
+            for m in messages(goal, args.max_frames, game.state(), [], 1, args.max_steps, args.allow_save,
+                              args.until):
                 print("--- %s\n%s" % (m["role"], m["content"]), file=out)
             return 0
-        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; log %s" % (
+        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; log %s" % (
             "fake" if args.fake else args.model, args.reasoning, args.max_steps, args.max_usd, args.max_minutes,
+            "allowed" if args.allow_save else "refused", "; until " + "=".join(
+                [args.until[0]] + ([] if args.until[1] is None else [json.dumps(args.until[1])])) if args.until else "",
             path), file=out)
         code, why = play(game, model, goal, max_steps=args.max_steps, max_usd=args.max_usd,
-                                max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,
-                                prices=PRICES.get(args.model, PRICES["deepseek-v4-pro"]),
-                                auto_confirm=not args.no_auto_confirm, log=log, tally=tally)
+                         max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,
+                         prices=PRICES.get(args.model, PRICES["deepseek-v4-pro"]),
+                         auto_confirm=not args.no_auto_confirm, allow_save=args.allow_save,
+                         until=args.until, log=log, tally=tally)
     except Stop as e:
         code, why = e.code, e.why
     except agent_client.AgentError as e:
