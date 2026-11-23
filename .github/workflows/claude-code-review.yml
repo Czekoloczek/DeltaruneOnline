@@ -1,0 +1,228 @@
+name: Claude Code Review
+
+# Wzorowane na ISAPX, bez kroków jego środowiska Pythona (tu nie ma testów do uruchomienia).
+#
+# Sekret CLAUDE_CODE_OAUTH_TOKEN musi być w DWÓCH miejscach: w sekretach Actions (PR-y ludzi)
+# i w sekretach Dependabota (przebiegi, które wyzwala Dependabot, widzą tylko te drugie).
+
+on:
+  pull_request:
+  # BEZ `synchronize`: recenzja po każdym commicie z poprawką napędza pętlę
+  # „naprawiam uwagę -> push -> nowa uwaga”. Recenzowany jest więc PIERWSZY stan PR-a;
+  # kolejną rundę wywołujesz świadomie przejściem draft -> gotowy albo zamknięciem
+  # i ponownym otwarciem:
+  #     gh pr ready --undo && gh pr ready      # albo
+  #     gh pr close && gh pr reopen
+  # (samo `gh pr ready` na PR-ze, który nie jest draftem, nic nie wyzwala)
+    types: [opened, ready_for_review, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    # PR-y Dependabota też przechodzą: dla nich przegląd ocenia, czy podbicie można scalić.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read          # odczyt wyników CI przy recenzji (bez tego 403)
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Model i effort przeglądu wybiera podagent (krok „Podagent wybiera model i effort”).
+      # Ten krok liczy tylko ZAPASOWY wybór, użyty gdy podagent nic nie zwróci. Rdzeń
+      # (gml/, native/, patcher/) to miejsce, gdzie rodzą się rozjazdy, więc tam idzie Opus;
+      # reszta dostaje Sonneta, a effort rośnie z rozmiarem zmian:
+      #
+      #   autor / zakres                  model              effort
+      #   Dependabot                      claude-sonnet-5-5  medium
+      #   rdzeń, > 400 zmienionych linii  claude-opus-5-5    xhigh
+      #   rdzeń                           claude-opus-5-5    high
+      #   reszta, > 300 linii             claude-sonnet-5-5  medium
+      #   reszta                          claude-sonnet-5-5  low
+      - name: Zapasowy wybór modelu i effort
+        id: zapas
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          ADDED: ${{ github.event.pull_request.additions }}
+          DELETED: ${{ github.event.pull_request.deletions }}
+        run: |
+          lines=$((ADDED + DELETED))
+          files="$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)"
+          core="$(grep -cE '^(gml|native|patcher)/' <<< "$files" || true)"
+          if [ "$AUTHOR" = "dependabot[bot]" ]; then
+            model=claude-sonnet-5-5; effort=medium; why="podbicie od Dependabota"
+          elif [ "$core" -gt 0 ] && [ "$lines" -gt 400 ]; then
+            model=claude-opus-5-5; effort=xhigh; why="duża zmiana rdzenia"
+          elif [ "$core" -gt 0 ]; then
+            model=claude-opus-5-5; effort=high; why="zmiana rdzenia"
+          elif [ "$lines" -gt 300 ]; then
+            model=claude-sonnet-5-5; effort=medium; why="duża zmiana poza rdzeniem"
+          else
+            model=claude-sonnet-5-5; effort=low; why="mała zmiana poza rdzeniem"
+          fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "effort=$effort" >> "$GITHUB_OUTPUT"
+          echo "why=$why: $lines linii, plików rdzenia: $core" >> "$GITHUB_OUTPUT"
+
+      # Krótki przebieg Claude przed przeglądem: patrzy na PR i sam decyduje, jakim modelem
+      # i z jakim effort go przejrzeć. Zwraca JSON (--json-schema -> structured_output).
+      # Sam działa na Sonnecie z niskim effort i limitem tur, bo to tylko ocena. Gdy padnie
+      # albo zwróci coś spoza listy, przegląd bierze wybór zapasowy (continue-on-error).
+      - name: Podagent wybiera model i effort
+        id: podagent
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1.0.272
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: 'dependabot[bot]'
+          github_token: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.token || '' }}
+          prompt: |
+            Za chwilę inny przebieg Claude zrobi przegląd kodu PR-a
+            ${{ github.repository }}#${{ github.event.pull_request.number }}
+            (autor: ${{ github.event.pull_request.user.login }}). Twoje jedyne zadanie: wybrać
+            dla tego przeglądu model i poziom effort. Niczego nie recenzujesz i nic nie piszesz
+            na GitHubie.
+
+            Zacznij od `gh pr view ${{ github.event.pull_request.number }} --json title,body,files,additions,deletions`,
+            a diff (`gh pr diff`) czytaj tylko tyle, ile trzeba do oceny.
+
+            Projekt: lockstep sieciowy dla DELTARUNE. Najgroźniejsze są rozjazdy gier, które
+            rodzą się w gml/ (warstwa wejścia, własne SOUL, rysowanie), native/drnet.c (sieć,
+            wątki, opóźnienie) i patcher/ (przepisywanie kodu gry). Dokumentacja, README,
+            narzędzia w tools/ i workflowy są mniej ryzykowne. PR od dependabot[bot] tylko
+            podbija wersje akcji; przegląd ma wtedy ocenić informacje o wydaniach.
+
+            Do wyboru:
+            - model: claude-sonnet-5-5 (szybszy, wystarcza do dokumentacji, narzędzi,
+              prostych i mechanicznych zmian) albo claude-opus-5-5 (dokładniejszy; zmiany
+              logiki lockstepu, synchronizacji, wątków, kodu wstawianego do gry),
+            - effort: low, medium, high albo xhigh. Wyższy przy zmianach dużych, subtelnych
+              albo z ryzykiem rozjazdu; niski przy drobnych i oczywistych.
+            Wybierz najtańsze połączenie, które da rzetelny przegląd. W `reason` napisz jednym
+            zdaniem, dlaczego.
+          claude_args: |
+            --model claude-sonnet-5-5 --effort low --max-turns 8 --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)" --json-schema '{"type":"object","properties":{"model":{"type":"string","enum":["claude-sonnet-5-5","claude-opus-5-5"]},"effort":{"type":"string","enum":["low","medium","high","xhigh"]},"reason":{"type":"string"}},"required":["model","effort","reason"],"additionalProperties":false}'
+
+      # Wybór podagenta przechodzi przez listę dozwolonych wartości, zanim trafi do claude_args
+      # przeglądu (to tekst od modelu czytającego PR). Uzasadnienie idzie tylko do podsumowania.
+      - name: Wybór modelu i effort
+        id: wybor
+        env:
+          OUT: ${{ steps.podagent.outputs.structured_output }}
+          Z_MODEL: ${{ steps.zapas.outputs.model }}
+          Z_EFFORT: ${{ steps.zapas.outputs.effort }}
+          Z_WHY: ${{ steps.zapas.outputs.why }}
+        run: |
+          model="$(jq -r '.model // empty' <<< "$OUT" 2>/dev/null || true)"
+          effort="$(jq -r '.effort // empty' <<< "$OUT" 2>/dev/null || true)"
+          reason="$(jq -r '.reason // empty' <<< "$OUT" 2>/dev/null || true)"
+          case "$model" in claude-sonnet-5-5|claude-opus-5-5) ;; *) model="" ;; esac
+          case "$effort" in low|medium|high|xhigh) ;; *) effort="" ;; esac
+          if [ -n "$model" ] && [ -n "$effort" ]; then
+            src="podagent: $reason"
+          else
+            model="$Z_MODEL"; effort="$Z_EFFORT"; src="zapas, podagent nie zwrócił poprawnego wyboru ($Z_WHY)"
+          fi
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "effort=$effort" >> "$GITHUB_OUTPUT"
+          echo "Przegląd: $model, effort $effort. Źródło: $src" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@v1.0.272
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Akcja domyślnie odrzuca boty; Dependabota wpuszczamy jawnie.
+          allowed_bots: 'dependabot[bot]'
+          # PR-y Dependabota zmieniają ten plik (podbijają w nim akcje), a token aplikacji Claude
+          # wydawany jest tylko dla workflowu identycznego z tym na main — bez tego akcja by je
+          # pomijała. Dla nich używamy więc zwykłego tokena przebiegu (komentarz napisze wtedy
+          # github-actions zamiast claude). Dla pozostałych PR-ów pusta wartość = token aplikacji.
+          github_token: ${{ github.event.pull_request.user.login == 'dependabot[bot]' && github.token || '' }}
+          # Samo `actions: read` w permissions nie odsłania narzędzi mcp__github_ci__*;
+          # akcja włącza je dopiero z tym inputem.
+          additional_permissions: |
+            actions: read
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: |
+            /code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            KONTEKST PROJEKTU (ważny przy ocenie wagi znalezisk):
+            DeltaruneOnline zamienia mod Local Multiplayer do DELTARUNE w grę sieciową przez
+            lockstep wejścia: każda gra liczy wszystko sama, a między graczami idą tylko
+            przyciski. patcher/dronline_patch.py przepisuje kod gry przez UndertaleModTool,
+            gml/scr_dronline.gml to warstwa wejścia i sterownik lockstepu, native/drnet.c to
+            DLL sieciowa (UDP, wątek sieciowy, automatyczne opóźnienie z pingu). Opis całości:
+            docs/DESIGN.md.
+
+            Najgroźniejsza klasa błędu to ROZJAZD (desync): cokolwiek, przez co dwie gry
+            z tym samym wejściem policzą coś inaczej. Traktuj takie znaleziska jako krytyczne,
+            nawet gdy kod się nie wywala. Konkretnie:
+            - kod rysowania (Draw, własne SOUL, pasek stanu), który zmienia stan gry albo
+              zużywa wspólny generator losowy,
+            - odczyty zegara, stanu dźwięku, myszy, okna albo lokalnych plików w logice gry
+              z pominięciem warstwy dro_*,
+            - stan gry zależny od czegoś, co istnieje tylko na jednej maszynie: opóźnienia,
+              pingu, przewidywanej pozycji serca, chwili przyjścia pakietu,
+            - podmiana pozycji serca w Draw, której któraś ścieżka nie przywraca.
+
+            Założenia, których nie wolno łamać:
+            - żadnego stałego opóźnienia wejścia ani zwalniania gry: opóźnienie dobiera się
+              z pingu tak, żeby gra nie czekała, a własne SOUL działa bez opóźnienia,
+            - żadnych plików gry ani moda (licencja moda: CC BY-NC-ND) ani zdekompilowanego
+              kodu w repo; patcher zawiera tylko reguły.
+
+            Pułapki GameMakera (docs/DESIGN.md, „Pitfalls”): funkcja DLL z więcej niż 4
+            argumentami musi przyjmować same liczby; funkcje rozszerzenia muszą być też
+            w tabeli FUNC; w trakcie czekania nie wolno wywoływać DispatchMessage; DELTARUNE
+            odpala Game End przy restarcie na starcie rozdziału, więc Game End nie może
+            zamykać gniazda; `begin` to słowo kluczowe GML.
+
+            Testów automatycznych w repo nie ma, a gry nie da się tu uruchomić: oceniasz
+            z lektury kodu i docs/DESIGN.md.
+
+            AUTOR PR-a: ${{ github.event.pull_request.user.login }}.
+
+            Jeśli autorem jest dependabot[bot], PR podbija wersję akcji w workflowach,
+            a Twoim zadaniem jest ocenić, czy można go bezpiecznie scalić:
+            - ustal z diffu, która akcja i z jakiej wersji na jaką jest podbijana,
+            - przeczytaj informacje o wydaniach między tymi wersjami
+              (`gh release list -R <właściciel>/<repo>`, `gh release view <tag> -R ...`)
+              i wypisz zmiany łamiące zgodność: usunięte lub przemianowane inputy, zmienione
+              wartości domyślne, nowe wymagania (wersja Node, uprawnienia),
+            - porównaj to z tym, jak nasze pliki w .github/workflows używają tej akcji,
+            - ten przebieg działa już na workflowie z PR-a, więc jeśli podbijana jest akcja
+              z tego pliku (actions/checkout albo anthropics/claude-code-action), to dojście
+              do tego miejsca znaczy, że podstawowe działanie się nie zepsuło — napisz to,
+            - zakończ podsumowanie osobną linią „Werdykt: można scalić” albo
+              „Werdykt: nie scalać”, z jednym zdaniem uzasadnienia.
+            Dla PR-ów Dependabota NIE zakładaj issues; werdykt w komentarzu wystarczy.
+
+            Dla pozostałych PR-ów, po wykonaniu review (obecny event:
+            "${{ github.event.action }}") DODATKOWO — obok komentarzy inline — otwórz osobne
+            GitHub issue dla KAŻDEGO znaleziska. W każdym issue:
+              - tytuł: zwięzły opis problemu,
+              - treść: plik:linia, na czym polega, sugestia naprawy oraz odnośnik do PR
+                #${{ github.event.pull_request.number }},
+              - etykieta: "code-review" (gdy jej nie ma, utwórz ją).
+            Najpierw przeszukaj OTWARTE issues i NIE twórz duplikatów.
+          track_progress: true
+          use_sticky_comment: true
+          # Reguły MUSZĄ być w cudzysłowach powłoki: claude_args przechodzi przez shell-quote,
+          # który nie escapuje spacji, więc bez nich "Bash(gh issue create:*)" rozpada się
+          # na tokeny i reguła nie powstaje. --allowedTools sumuje się z zestawem trybu tag,
+          # więc Read/Grep/Glob nie trzeba tu wymieniać. gh release list/view służą ocenie
+          # PR-ów Dependabota (informacje o wydaniach podbijanych akcji).
+          # Model i effort z kroku „Wybór modelu i effort” (podagent albo zapas), zawsze z listy
+          # dozwolonych wartości, a nie domyślne akcji, które zmieniałyby się z jej wersją.
+          claude_args: '--model ${{ steps.wybor.outputs.model }} --effort ${{ steps.wybor.outputs.effort }} --allowedTools "Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh release list:*),Bash(gh release view:*)"'
