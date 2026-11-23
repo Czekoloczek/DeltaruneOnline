@@ -39,3 +39,5 @@ jitter=0
 ; write the local player's input of every frame to this file (an existing file is kept, the new one gets .2, .3, ...;
 ; with DRONLINE_ROLE the role goes into the name: dronline_rec_host.bin)
 ;script_record=dronline_rec.bin
+; (host/client/solo) TCP port for the Agent API, JSON lines on 127.0.0.1 only. 0/off. Untested draft.
+;agent=8765

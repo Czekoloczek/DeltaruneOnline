@@ -203,6 +203,30 @@ position) never finishes. Online that is a desync as soon as the other machine's
 frame 90). A sound that fails to play online is logged in `drnet.log`, and the first 2400 frames log the parts of
 every state hash (room, instance count, summed x and y, plot), so the first differing checkpoint shows what differs.
 
+## Agent API (untested draft)
+
+`agent=<port>` in `[online]` (host, client and solo) opens a separate TCP listener on **127.0.0.1 only**.
+One agent connection is accepted at a time; a second one is refused with an error. Messages are JSON objects,
+one per UTF-8 line, in both directions. An agent can:
+
+- `{"cmd":"state"}` → `{"type":"state","id":…,"state":{…}}`, built in the next game frame.
+- `{"cmd":"input","steps":[{"buttons":["right"],"frames":30}, …]}` → queued frames. The game replies with
+  `queued` immediately and with `done` plus a state object once the last frame was applied (online that is
+  `drnet_delay()` frames later). At most 60 steps, 3600 frames per step and 10 queued input commands.
+- `{"cmd":"clear"}` drops all queued input and replies `cleared`.
+- Invalid JSON, unknown commands and lines over 64 KB are answered with an `error` object.
+
+The state JSON contains `frame`, `chapter`, `room`, `mode`, `player`, `players`, `online`, `desync`,
+`interact`, `menuno`, `submenu`, `battle`, `can_move`, `players_pos`, `dialogue`, `choice`, `camera` and
+`nearby`. It is built from plain GML strings and arrays only, with every global read guarded by
+`variable_global_exists` and missing values returned as `null`. The DLL thread never touches game state; GML
+pulls one parsed command per frame.
+
+`tools/agent_client.py` is a small standard-library client and module for the API. Its `do "<steps>"` command
+accepts the `tools/input_script.py` text syntax and converts it to input steps.
+
+**This draft has not been tested against the game yet.**
+
 ## Determinism hazards
 
 `tools/scan_determinism.py` lists them. Chapter 5 (game 0.253 + mod v19):

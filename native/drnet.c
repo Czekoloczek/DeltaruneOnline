@@ -692,3 +692,533 @@ EXPORT double drnet_stop(void)
     connected = 0;
     return 1;
 }
+
+/* ------------------------------------------------------------------------- */
+/* Agent API (untested draft): a separate TCP listener on 127.0.0.1 only.    */
+/* One active connection at a time; a second connection is refused.          */
+/* The DLL parses the small JSON command subset and queues typed commands.   */
+/* The GML side pulls one command per frame, builds state JSON, queues       */
+/* input steps, and sends replies.                                           */
+/* ------------------------------------------------------------------------- */
+
+#define AGENT_MAX_LINE 65536
+#define AGENT_MAX_CMDS 16
+#define AGENT_MAX_STEPS 60
+#define AGENT_MAX_ID 64
+
+typedef struct { uint16_t buttons; uint32_t frames; } agent_step_t;
+typedef struct {
+    int type;                  /* 1 state, 2 input, 3 clear, -1 unknown, 0 none/invalid */
+    int id_is_string;
+    char id[AGENT_MAX_ID + 1];
+    int steps_count;           /* actual number of steps, may exceed AGENT_MAX_STEPS */
+    agent_step_t steps[AGENT_MAX_STEPS];
+} agent_cmd_t;
+
+static SOCKET agent_listen = INVALID_SOCKET;
+static SOCKET agent_conn = INVALID_SOCKET;
+static CRITICAL_SECTION agent_cs;
+static int agent_cs_ready;
+static volatile LONG agent_running;
+static HANDLE agent_thread;
+static char agent_rbuf[AGENT_MAX_LINE + 2];
+static int agent_rlen;
+static int agent_discarding;
+static agent_cmd_t agent_cmds[AGENT_MAX_CMDS];
+static int agent_cmd_head, agent_cmd_tail, agent_cmd_count;
+static agent_cmd_t agent_last_cmd;
+static char agent_last_id[AGENT_MAX_ID + 1];
+static int agent_last_id_is_string;
+
+static void agent_lock(void) { EnterCriticalSection(&agent_cs); }
+static void agent_unlock(void) { LeaveCriticalSection(&agent_cs); }
+
+static void agent_ws(const char **p)
+{
+    while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n')
+        (*p)++;
+}
+
+static int agent_parse_string(const char **pp, char *out, int outsz)
+{
+    const char *p = *pp;
+    int i = 0;
+    if (*p != '"') return 0;
+    p++;
+    while (*p && *p != '"') {
+        unsigned char c = (unsigned char)*p++;
+        if (c == '\\') {
+            if (*p == 0) return 0;
+            c = (unsigned char)*p++;
+            switch (c) {
+                case '"': c = '"'; break;
+                case '\\': c = '\\'; break;
+                case '/': c = '/'; break;
+                case 'b': c = '\b'; break;
+                case 'f': c = '\f'; break;
+                case 'n': c = '\n'; break;
+                case 'r': c = '\r'; break;
+                case 't': c = '\t'; break;
+                case 'u': {
+                    int k;
+                    if (i < outsz - 1) out[i++] = 'u';
+                    for (k = 0; k < 4 && *p; k++) {
+                        if (i < outsz - 1) out[i++] = *p;
+                        p++;
+                    }
+                    continue;
+                }
+                default: return 0;
+            }
+        }
+        if (i < outsz - 1) out[i++] = (char)c;
+    }
+    if (*p != '"') return 0;
+    p++;
+    out[i] = '\0';
+    *pp = p;
+    return 1;
+}
+
+static int agent_parse_number_token(const char **pp, char *out, int outsz)
+{
+    const char *p = *pp;
+    int i = 0;
+    while ((*p >= '0' && *p <= '9') || *p == '-' || *p == '+' || *p == '.' || *p == 'e' || *p == 'E') {
+        if (i < outsz - 1) out[i++] = *p;
+        p++;
+    }
+    if (i == 0) return 0;
+    out[i] = '\0';
+    *pp = p;
+    return 1;
+}
+
+static int agent_skip_json_value(const char **pp)
+{
+    const char *p = *pp;
+    int i;
+    char tmp[16];
+    agent_ws(&p);
+    if (*p == '"') return agent_parse_string(&p, tmp, sizeof(tmp));
+    if (*p == '{') {
+        p++;
+        agent_ws(&p);
+        if (*p == '}') { p++; *pp = p; return 1; }
+        for (;;) {
+            agent_ws(&p);
+            if (!agent_parse_string(&p, tmp, sizeof(tmp))) return 0;
+            agent_ws(&p);
+            if (*p != ':') return 0;
+            p++;
+            if (!agent_skip_json_value(&p)) return 0;
+            agent_ws(&p);
+            if (*p == ',') { p++; continue; }
+            if (*p == '}') { p++; *pp = p; return 1; }
+            return 0;
+        }
+    }
+    if (*p == '[') {
+        p++;
+        agent_ws(&p);
+        if (*p == ']') { p++; *pp = p; return 1; }
+        for (;;) {
+            if (!agent_skip_json_value(&p)) return 0;
+            agent_ws(&p);
+            if (*p == ',') { p++; continue; }
+            if (*p == ']') { p++; *pp = p; return 1; }
+            return 0;
+        }
+    }
+    if (p[0] == 't' && p[1] == 'r' && p[2] == 'u' && p[3] == 'e') { *pp = p + 4; return 1; }
+    if (p[0] == 'f' && p[1] == 'a' && p[2] == 'l' && p[3] == 's' && p[4] == 'e') { *pp = p + 5; return 1; }
+    if (p[0] == 'n' && p[1] == 'u' && p[2] == 'l' && p[3] == 'l') { *pp = p + 4; return 1; }
+    i = 0;
+    while (i < (int)sizeof(tmp) - 1 && ((*p >= '0' && *p <= '9') || *p == '-' || *p == '+' || *p == '.' || *p == 'e' || *p == 'E')) {
+        tmp[i++] = *p++;
+    }
+    if (i == 0) return 0;
+    *pp = p;
+    return 1;
+}
+
+static int agent_button_bits(const char *name)
+{
+    if (!strcmp(name, "down")) return 1;
+    if (!strcmp(name, "right")) return 2;
+    if (!strcmp(name, "up")) return 4;
+    if (!strcmp(name, "left")) return 8;
+    if (!strcmp(name, "confirm")) return 16;
+    if (!strcmp(name, "cancel")) return 32;
+    if (!strcmp(name, "menu")) return 64;
+    return -1;
+}
+
+static int agent_parse_steps(const char **pp, agent_cmd_t *cmd)
+{
+    const char *p = *pp;
+    if (*p != '[') return 0;
+    p++;
+    cmd->steps_count = 0;
+    for (;;) {
+        char key[32];
+        int got_buttons = 0, got_frames = 0;
+        uint32_t frames = 0;
+        uint16_t bits = 0;
+        agent_ws(&p);
+        if (*p == ']') { p++; *pp = p; return 1; }
+        if (*p != '{') return 0;
+        p++;
+        for (;;) {
+            agent_ws(&p);
+            if (*p == '}') { p++; break; }
+            if (!agent_parse_string(&p, key, sizeof(keys))) return 0;
+            agent_ws(&p);
+            if (*p != ':') return 0;
+            p++;
+            agent_ws(&p);
+            if (!strcmp(key, "buttons")) {
+                if (*p != '[') return 0;
+                p++;
+                for (;;) {
+                    char bname[32];
+                    int b;
+                    agent_ws(&p);
+                    if (*p == ']') { p++; break; }
+                    if (!agent_parse_string(&p, bname, sizeof(bname))) return 0;
+                    b = agent_button_bits(bname);
+                    if (b < 0) return 0;
+                    bits |= (uint16_t)b;
+                    agent_ws(&p);
+                    if (*p == ',') { p++; continue; }
+                    if (*p == ']') { p++; break; }
+                    return 0;
+                }
+                got_buttons = 1;
+            } else if (!strcmp(key, "frames")) {
+                char num[32];
+                if (!agent_parse_number_token(&p, num, sizeof(num))) return 0;
+                frames = (uint32_t)strtoul(num, NULL, 10);
+                got_frames = 1;
+            } else {
+                if (!agent_skip_json_value(&p)) return 0;
+            }
+            agent_ws(&p);
+            if (*p == ',') { p++; continue; }
+            if (*p == '}') { p++; break; }
+            return 0;
+        }
+        if (!got_buttons || !got_frames) return 0;
+        cmd->steps_count++;
+        if (cmd->steps_count <= AGENT_MAX_STEPS) {
+            cmd->steps[cmd->steps_count - 1].buttons = bits;
+            cmd->steps[cmd->steps_count - 1].frames = frames;
+        }
+        agent_ws(&p);
+        if (*p == ',') { p++; continue; }
+        if (*p == ']') { p++; *pp = p; return 1; }
+        return 0;
+    }
+}
+
+static int agent_parse_cmd(const char *s, agent_cmd_t *cmd)
+{
+    const char *p = s;
+    char key[32];
+    agent_ws(&p);
+    if (*p != '{') return 0;
+    p++;
+    memset(cmd, 0, sizeof(*cmd));
+    for (;;) {
+        agent_ws(&p);
+        if (*p == '}') { return 1; }
+        if (!agent_parse_string(&p, key, sizeof(key))) return 0;
+        agent_ws(&p);
+        if (*p != ':') return 0;
+        p++;
+        agent_ws(&p);
+        if (!strcmp(key, "cmd")) {
+            char name[16];
+            if (!agent_parse_string(&p, name, sizeof(name))) return 0;
+            if (!strcmp(name, "state")) cmd->type = 1;
+            else if (!strcmp(name, "input")) cmd->type = 2;
+            else if (!strcmp(name, "clear")) cmd->type = 3;
+            else cmd->type = -1;
+        } else if (!strcmp(key, "id")) {
+            if (*p == '"') {
+                cmd->id_is_string = 1;
+                if (!agent_parse_string(&p, cmd->id, AGENT_MAX_ID)) return 0;
+            } else {
+                cmd->id_is_string = 0;
+                if (!agent_parse_number_token(&p, cmd->id, AGENT_MAX_ID)) return 0;
+            }
+        } else if (!strcmp(key, "steps")) {
+            if (!agent_parse_steps(&p, cmd)) return 0;
+        } else {
+            if (!agent_skip_json_value(&p)) return 0;
+        }
+        agent_ws(&p);
+        if (*p == ',') { p++; continue; }
+        if (*p == '}') { return 1; }
+        return 0;
+    }
+}
+
+static void agent_send_raw(SOCKET s, const char *text)
+{
+    char line[AGENT_MAX_LINE + 96];
+    int len = snprintf(line, sizeof(line), "%s\n", text);
+    if (len < 0) return;
+    if (len >= (int)sizeof(line)) len = (int)sizeof(line) - 1;
+    send(s, line, len, 0);
+}
+
+static void agent_send_locked(const char *text)
+{
+    if (agent_conn != INVALID_SOCKET)
+        agent_send_raw(agent_conn, text);
+}
+
+static void agent_c_json_id(agent_cmd_t *cmd, char *out, int outsz)
+{
+    if (cmd->id[0]) {
+        if (cmd->id_is_string) snprintf(out, outsz, "\"%s\"", cmd->id);
+        else snprintf(out, outsz, "%s", cmd->id);
+    } else {
+        snprintf(out, outsz, "null");
+    }
+}
+
+static int agent_enqueue_locked(const agent_cmd_t *cmd)
+{
+    if (agent_cmd_count >= AGENT_MAX_CMDS) return 0;
+    agent_cmds[agent_cmd_tail] = *cmd;
+    agent_cmd_tail = (agent_cmd_tail + 1) % AGENT_MAX_CMDS;
+    agent_cmd_count++;
+    return 1;
+}
+
+static void agent_handle_line(char *line)
+{
+    agent_cmd_t cmd;
+    if (line[0] == '\0') return;
+    if (agent_parse_cmd(line, &cmd) && cmd.type != 0) {
+        if (cmd.type == -1) {
+            char msg[AGENT_MAX_LINE + 96];
+            char idbuf[AGENT_MAX_ID + 16];
+            agent_c_json_id(&cmd, idbuf, sizeof(idbuf));
+            snprintf(msg, sizeof(msg), "{\"type\":\"error\",\"id\":%s,\"error\":\"unknown command\"}", idbuf);
+            agent_send_locked(msg);
+        } else if (!agent_enqueue_locked(&cmd)) {
+            char msg[AGENT_MAX_LINE + 96];
+            char idbuf[AGENT_MAX_ID + 16];
+            agent_c_json_id(&cmd, idbuf, sizeof(idbuf));
+            snprintf(msg, sizeof(msg), "{\"type\":\"error\",\"id\":%s,\"error\":\"too many queued agent commands\"}", idbuf);
+            agent_send_locked(msg);
+        }
+    } else {
+        agent_send_locked("{\"type\":\"error\",\"error\":\"bad command\"}");
+    }
+}
+
+static void agent_process_bytes(const char *buf, int len)
+{
+    int i;
+    for (i = 0; i < len; i++) {
+        char c = buf[i];
+        if (agent_discarding) {
+            if (c == '\n') agent_discarding = 0;
+            continue;
+        }
+        if (c == '\n') {
+            if (agent_rlen > 0 && agent_rbuf[agent_rlen - 1] == '\r') agent_rlen--;
+            agent_rbuf[agent_rlen] = '\0';
+            agent_handle_line(agent_rbuf);
+            agent_rlen = 0;
+        } else if (agent_rlen >= AGENT_MAX_LINE) {
+            agent_send_locked("{\"type\":\"error\",\"error\":\"line too long\"}");
+            agent_rlen = 0;
+            agent_discarding = 1;
+        } else {
+            agent_rbuf[agent_rlen++] = c;
+        }
+    }
+}
+
+static DWORD WINAPI agent_thread_func(LPVOID unused)
+{
+    char buf[1024];
+    (void)unused;
+    while (agent_running) {
+        fd_set rs;
+        struct timeval tv;
+        SOCKET l, c;
+        int n;
+        FD_ZERO(&rs);
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000;
+        agent_lock();
+        l = agent_listen;
+        c = agent_conn;
+        if (l != INVALID_SOCKET) FD_SET(l, &rs);
+        if (c != INVALID_SOCKET) FD_SET(c, &rs);
+        agent_unlock();
+        n = select(0, &rs, NULL, NULL, &tv);
+        if (n <= 0) continue;
+        agent_lock();
+        if (l != INVALID_SOCKET && FD_ISSET(l, &rs)) {
+            SOCKET cl = accept(l, NULL, NULL);
+            if (cl != INVALID_SOCKET) {
+                u_long nb = 1;
+                ioctlsocket(cl, FIONBIO, &nb);
+                SetHandleInformation((HANDLE)cl, HANDLE_FLAG_INHERIT, 0);
+                if (agent_conn == INVALID_SOCKET) {
+                    agent_conn = cl;
+                    agent_rlen = 0;
+                    agent_discarding = 0;
+                } else {
+                    agent_send_raw(cl, "{\"type\":\"error\",\"error\":\"an agent connection is already open\"}");
+                    closesocket(cl);
+                }
+            }
+        }
+        if (c != INVALID_SOCKET && FD_ISSET(c, &rs)) {
+            int r = recv(c, buf, sizeof(buf), 0);
+            if (r == 0 || (r == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK)) {
+                closesocket(c);
+                if (agent_conn == c) {
+                    agent_conn = INVALID_SOCKET;
+                    agent_rlen = 0;
+                    agent_discarding = 0;
+                    agent_cmd_head = agent_cmd_tail = agent_cmd_count = 0;
+                }
+            } else if (r > 0) {
+                agent_process_bytes(buf, r);
+            }
+        }
+        agent_unlock();
+    }
+    return 0;
+}
+
+EXPORT double drnet_agent_start(double port)
+{
+    WSADATA w;
+    struct sockaddr_in a;
+    u_long nb = 1;
+    int p = (int)port;
+    if (agent_listen != INVALID_SOCKET) return 1;
+    if (p <= 0 || p > 65535) return 0;
+    if (!agent_cs_ready) {
+        InitializeCriticalSection(&agent_cs);
+        agent_cs_ready = 1;
+    }
+    if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return fail("agent WSAStartup");
+    agent_listen = WSASocketW(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (agent_listen == INVALID_SOCKET) {
+        logm("agent WSASocketW failed (WSA %d), using socket()", WSAGetLastError());
+        agent_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (agent_listen == INVALID_SOCKET) return fail("agent socket");
+        if (!SetHandleInformation((HANDLE)agent_listen, HANDLE_FLAG_INHERIT, 0))
+            logm("agent SetHandleInformation failed (%lu)", GetLastError());
+    }
+    ioctlsocket(agent_listen, FIONBIO, &nb);
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_port = htons((u_short)p);
+    a.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (bind(agent_listen, (struct sockaddr *)&a, sizeof(a)) != 0) {
+        fail("agent bind");
+        closesocket(agent_listen);
+        agent_listen = INVALID_SOCKET;
+        return 0;
+    }
+    if (listen(agent_listen, 1) != 0) {
+        fail("agent listen");
+        closesocket(agent_listen);
+        agent_listen = INVALID_SOCKET;
+        return 0;
+    }
+    agent_cmd_head = agent_cmd_tail = agent_cmd_count = 0;
+    agent_conn = INVALID_SOCKET;
+    agent_rlen = 0;
+    agent_discarding = 0;
+    agent_running = 1;
+    agent_thread = CreateThread(NULL, 0, agent_thread_func, NULL, 0, NULL);
+    if (!agent_thread) {
+        agent_running = 0;
+        closesocket(agent_listen);
+        agent_listen = INVALID_SOCKET;
+        return fail("CreateThread(agent)");
+    }
+    logm("agent API listening on 127.0.0.1:%d (untested draft)", p);
+    return 1;
+}
+
+EXPORT double drnet_agent_connected(void)
+{
+    double r = 0;
+    if (agent_cs_ready) {
+        agent_lock();
+        r = (agent_conn != INVALID_SOCKET);
+        agent_unlock();
+    }
+    return r;
+}
+
+EXPORT double drnet_agent_command(void)
+{
+    int type = 0;
+    if (!agent_cs_ready) return 0;
+    agent_lock();
+    if (agent_cmd_count > 0) {
+        agent_cmd_t *c = &agent_cmds[agent_cmd_head];
+        type = c->type;
+        agent_last_cmd = *c;
+        strncpy(agent_last_id, c->id, AGENT_MAX_ID);
+        agent_last_id[AGENT_MAX_ID] = '\0';
+        agent_last_id_is_string = c->id_is_string;
+        agent_cmd_head = (agent_cmd_head + 1) % AGENT_MAX_CMDS;
+        agent_cmd_count--;
+    }
+    agent_unlock();
+    return (double)type;
+}
+
+EXPORT const char *drnet_agent_id(void)
+{
+    return agent_last_id;
+}
+
+EXPORT double drnet_agent_id_is_string(void)
+{
+    return agent_last_id_is_string;
+}
+
+EXPORT double drnet_agent_steps_count(void)
+{
+    return agent_last_cmd.steps_count;
+}
+
+EXPORT double drnet_agent_step_frames(double index)
+{
+    int i = (int)index;
+    if (i < 0 || i >= AGENT_MAX_STEPS || i >= agent_last_cmd.steps_count) return 0;
+    return (double)agent_last_cmd.steps[i].frames;
+}
+
+EXPORT double drnet_agent_step_buttons(double index)
+{
+    int i = (int)index;
+    if (i < 0 || i >= AGENT_MAX_STEPS || i >= agent_last_cmd.steps_count) return 0;
+    return (double)agent_last_cmd.steps[i].buttons;
+}
+
+EXPORT double drnet_agent_send(const char *text)
+{
+    if (!text || !agent_cs_ready) return 0;
+    agent_lock();
+    agent_send_locked(text);
+    agent_unlock();
+    return 1;
+}
