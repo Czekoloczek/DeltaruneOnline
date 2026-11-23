@@ -49,8 +49,8 @@ refused before it is built).
 - **One screen at a time.** The steps are played in pieces, a new piece at every press of confirm, cancel or
   menu and every second of a long walk or wait, and the rest is dropped as soon as the screen changes (a dialogue,
   choice, menu or room appears, changes or closes). A held direction is cut only while walking, since in a menu
-  pressing it again would move the cursor again. An answer is not played at all if the screen changed while the
-  model was thinking; the model is asked again. In the first run in the game, four confirms in one turn ran
+  pressing it again would move the cursor again. An answer is not played at all if the screen changed (or the save
+  menu's cursor moved) while the model was thinking; the model is asked again. In the first run in the game, four confirms in one turn ran
   through the save point's dialogue, its menu and a save; now the model sees each screen.
 - **Dialogue without the model.** A box that is still typing is waited for in one turn, until it waits for
   confirm or its text has not grown for 3 s (confirm does not skip typing, and the save point's text has pauses),

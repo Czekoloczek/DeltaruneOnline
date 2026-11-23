@@ -361,6 +361,23 @@ class Loop(unittest.TestCase):
         self.assertEqual(len(model.asked), 2)
         self.assertIn("not played: the screen changed while you were thinking", model.asked[1][1]["content"])
 
+    def test_a_cursor_moved_during_the_call_is_seen_by_the_save_guard(self):
+        self.game.menu = {"stage": 1, "x": 0, "y": 0, "slot": 3, "overwrite": 0, "overwrite_x": 0}
+        model = p.FakeModel([answer("tap confirm", "Return"), answer("tap confirm", "Return"), answer("tap cancel")])
+        asked = model.ask
+
+        def ask(msgs, seconds=120):
+            if not model.asked:
+                self.game.menu["slot"] = 2      # the keyboard moves the cursor while the model thinks
+            return asked(msgs, seconds)
+        model.ask = ask
+        with agent_client.AgentClient(port=self.game.port) as game:
+            code, why = p.play(game, model, "go", pause=0)
+        self.assertEqual(code, 0, why)
+        self.assertIsNone(self.game.saved)
+        self.assertIn("not played: the screen changed", model.asked[1][1]["content"])
+        self.assertIn("refused: confirm here saves to file slot 2", model.asked[2][1]["content"])
+
     def test_saving_is_refused_without_allow_save(self):
         http = Http([answer("30 right"), answer("tap confirm"), answer("tap confirm", "Save"),
                      answer("tap confirm", "slot 0"), answer("tap cancel"), answer("", "menu seen", True)])

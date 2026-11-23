@@ -11,9 +11,9 @@ run. Version 1 of the Agent API covers the overworld and dialogue; in a battle t
 A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece; a long walk
 or wait is cut every second), and the rest is dropped as soon as the screen changes: a dialogue, choice, menu or
 room appears, changes or closes. So a model that sends "tap confirm 4 10" sees each new screen instead of running
-through it. An answer is not played if the screen changed while the model was thinking. A dialogue box that is
-still typing is waited for (until it waits, or its text has not grown for 3 s), and one that waits for confirm is
-confirmed, without asking the model (--no-auto-confirm turns both off).
+through it. An answer is not played if the screen changed (or the save menu's cursor moved) while the model
+was thinking. A dialogue box that is still typing is waited for (until it waits, or its text has not grown for
+3 s), and one that waits for confirm is confirmed, without asking the model (--no-auto-confirm turns both off).
 
 Saving is guarded: unless --allow-save is given, confirm is refused while the save point menu's cursor is on a
 file slot or on "Save" in the overwrite question, so the model cannot save over a file; after the second refusal
@@ -681,9 +681,10 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
                 turn, short(state)[:34], why, do or "-", spent))
             raise Stop(3, "time limit (%g min)" % max_minutes)
         # The answer is for the screen the model was shown. If that changed during the call (a cutscene, a timer,
-        # another player), the answer is not played: the model is asked again about the new screen.
+        # the keyboard), or the save menu's cursor moved, the answer is not played: the model is asked again about
+        # the new screen. Either way the save guard and --until look at the state from after the call.
         now = game.state()
-        if screen(now) != screen(state):
+        if screen(now) != screen(state) or now.get("save_menu") != state.get("save_menu"):
             note = "not played: the screen changed while you were thinking"
             history.append("turn %d: %s -> %s (%s)" % (turn, do or "(nothing)", change(state, now), note))
             record.update(result=change(state, now), played=0, note=note)
