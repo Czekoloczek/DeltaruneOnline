@@ -31,8 +31,9 @@ Limits (each ends the run with exit code 3):
   --max-usd <usd>     spending on DeepSeek, default 0.05. Counted from the tokens the API reports, at the peak
                       prices, so the real cost is the same or lower. The run stops before a call that could pass it
   --max-minutes <m>   wall time, default 20
-  --max-frames <n>    input frames a turn, 30 to 3600, default 150 (5 s); a longer answer is cut there, and one
-                      of more than 3600 frames is refused
+  --max-frames <n>    input frames of a model's turn, 30 to 3600, default 150 (5 s); a longer answer is cut
+                      there, and one of more than 3600 frames is refused (the program's own turns are short:
+                      a confirm is 6 frames, waiting for a typing box at most 300)
 
 Other options:
   --until <cond>      end the run (exit 0) as soon as the state meets this, without asking the model: a key that is
