@@ -39,6 +39,7 @@ class FakeGame:
         self.menu = None            # the save_menu dict while the menu is open
         self.saved = None           # the slot saved to
         self.choice = None          # unused by the world; a test may set it
+        self.door = None            # a test may set an x from which on the player is in room_next
         self.last = 0
         self.inputs = []            # every input command's steps, as the game got them
         self.cleared = 0
@@ -46,7 +47,8 @@ class FakeGame:
 
     def state(self):
         d = self.dialogue
-        s = {"frame": self.frame, "chapter": 1, "room": "room_test", "player": 1, "battle": False, "menuno": -1,
+        room = "room_next" if self.door is not None and self.x >= self.door else "room_test"
+        s = {"frame": self.frame, "chapter": 1, "room": room, "player": 1, "battle": False, "menuno": -1,
              "interact": 0 if d is None and self.menu is None else 1,
              "players_pos": [{"player": 1, "object": "obj_mainchara", "name": "kris", "x": self.x, "y": self.y,
                               "facing": 1}],
@@ -316,6 +318,48 @@ class Loop(unittest.TestCase):
         self.assertIn("dropped: the screen changed", turn["note"])
         self.assertIsNotNone(self.game.dialogue)
         self.assertIsNone(self.game.saved)
+
+    def test_a_long_walk_stops_at_a_door(self):
+        self.game.door = 45
+        code, out, records = self.fake([answer("120 right")], "--max-frames", "150")
+        self.assertEqual(code, 0, out)
+        turn = [r for r in records if r["event"] == "turn"][0]
+        self.assertEqual(turn["played"], p.PIECE)
+        self.assertIn("the rest (90 frames) dropped", turn["note"])
+        self.assertEqual(self.game.x, 3 * p.PIECE)
+
+    def test_long_holds_are_cut_only_where_that_is_harmless(self):
+        class Game:
+            def __init__(self, state):
+                self.st, self.sent = state, []
+
+            def send_steps(self, steps):
+                self.sent.append(sum(s["frames"] for s in steps))
+                return self.st
+        walk = {"room": "r", "can_move": True, "dialogue": [], "choice": None, "save_menu": None}
+        menu = dict(walk, can_move=False, save_menu={"stage": 0, "x": 0})
+        for state, text, sent in [(walk, "70 right", [30, 30, 10]), (walk, "wait 40", [30, 10]),
+                                  (menu, "wait 40", [30, 10]), (menu, "40 right", [40]),
+                                  (walk, "40 right+confirm", [40]), (walk, "20 right", [20])]:
+            g = Game(state)
+            _, played, note = p.play_turn(g, a_frames(text), state, False, None)
+            self.assertEqual((g.sent, played, note), (sent, sum(sent), ""), text)
+
+    def test_an_answer_is_not_played_when_the_screen_changed_during_the_call(self):
+        model = p.FakeModel([answer("20 right"), answer("", "a box came", True)])
+        asked = model.ask
+
+        def ask(msgs, seconds=120):
+            if not model.asked:
+                self.game.dialogue = ["* A cutscene.", 0]       # appears while the model thinks
+            return asked(msgs, seconds)
+        model.ask = ask
+        with agent_client.AgentClient(port=self.game.port) as game:
+            code, why = p.play(game, model, "go", auto_confirm=False, pause=0)
+        self.assertEqual(code, 0, why)
+        self.assertEqual(self.game.x, 0)            # "20 right" was for the screen before the box
+        self.assertEqual(len(model.asked), 2)
+        self.assertIn("not played: the screen changed while you were thinking", model.asked[1][1]["content"])
 
     def test_saving_is_refused_without_allow_save(self):
         http = Http([answer("30 right"), answer("tap confirm"), answer("tap confirm", "Save"),

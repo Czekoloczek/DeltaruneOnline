@@ -8,9 +8,10 @@ sends DeepSeek a short summary of it with the goal and the last few turns, and p
 (at most --max-frames frames a turn), until the model says the goal is reached, --until is met, or a limit ends the
 run. Version 1 of the Agent API covers the overworld and dialogue; in a battle the model sees only "battle".
 
-A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece), and the
-rest is dropped as soon as the screen changes: a dialogue, choice, menu or room appears, changes or closes. So a
-model that sends "tap confirm 4 10" sees each new screen instead of running through it. A dialogue box that is
+A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece; a long walk
+or wait is cut every second), and the rest is dropped as soon as the screen changes: a dialogue, choice, menu or
+room appears, changes or closes. So a model that sends "tap confirm 4 10" sees each new screen instead of running
+through it. An answer is not played if the screen changed while the model was thinking. A dialogue box that is
 still typing is waited for (until it waits, or its text has not grown for 3 s), and one that waits for confirm is
 confirmed, without asking the model (--no-auto-confirm turns both off).
 
@@ -96,6 +97,7 @@ WAIT_STEP, WAIT_QUIET, WAIT_MAX = 5, 90, 300    # waiting for a typing box: fram
 MAX_ANSWER_FRAMES = 3600    # an answer whose steps make more frames than this is refused, not cut
 TEMPLATE_TOKENS = 20    # tokens of the chat template around each message (role, separators), at most
 AUTO_PER_STEP = 5       # turns without the model allowed per --max-steps
+PIECE = 30              # frames: a long walk or wait is played in pieces this long, the screen checked after each
 CONFIRM, PRESSES, DIRECTIONS = 16, 16 | 32 | 64, 1 | 2 | 4 | 8      # action bits (agent_client.AGENT_BUTTONS)
 
 SYSTEM = """You play DELTARUNE through a program. Each turn you get the game state and the last turns, and you
@@ -559,11 +561,26 @@ def walked(frames, before, after):
     return (held, dist) if dist > 0 else None
 
 
+def walking(state):
+    """True when the player walks freely: a held direction moves Kris, it does not move a menu's cursor."""
+    s = state or {}
+    return bool(s.get("can_move")) and not boxes(s) and not s.get("choice") and not s.get("save_menu") \
+        and not s.get("battle")
+
+
 def play_turn(game, frames, state, allow_save, until):
     """Plays a turn's frames piece by piece. Returns (state after, frames played, why the rest was dropped or "")."""
     played = 0
     parts = pieces(frames)
-    for i, part in enumerate(parts):
+    i = 0
+    while i < len(parts):
+        part = parts[i]
+        # A long walk or wait goes in pieces of PIECE frames, so a door or a cutscene on the way ends it. Only
+        # without a press in it (letting go of a held button between pieces would press it again), and directions
+        # only while walking (in a menu a held direction pressed again would move the cursor again).
+        if len(part) > PIECE and not any(b & PRESSES for b in part) and (walking(state) or not any(part)):
+            parts[i:i + 1] = [part[:PIECE], part[PIECE:]]
+            part = parts[i]
         risk = save_risk(state)
         if risk and part[0] & CONFIRM and not allow_save:
             return state, played, ("refused: %s, and saving is not allowed in this run. Do not try again: if the "
@@ -573,6 +590,7 @@ def play_turn(game, frames, state, allow_save, until):
         played += len(part)
         if i + 1 < len(parts) and (screen(state) != screen(before) or met(state, until)):
             return state, played, "the rest (%d frames) dropped: the screen changed" % (len(frames) - played)
+        i += 1
     return state, played, ""
 
 
@@ -662,6 +680,20 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             log.write(record, "%3d  %-34s  %s | %s (not played: time is up)  [%.4f USD]" % (
                 turn, short(state)[:34], why, do or "-", spent))
             raise Stop(3, "time limit (%g min)" % max_minutes)
+        # The answer is for the screen the model was shown. If that changed during the call (a cutscene, a timer,
+        # another player), the answer is not played: the model is asked again about the new screen.
+        now = game.state()
+        if screen(now) != screen(state):
+            note = "not played: the screen changed while you were thinking"
+            history.append("turn %d: %s -> %s (%s)" % (turn, do or "(nothing)", change(state, now), note))
+            record.update(result=change(state, now), played=0, note=note)
+            log.write(record, "%3d  %-34s  %s | %s (%s)  [%.4f USD]" % (
+                turn, short(state)[:34], why, do or "-", note, spent))
+            state = now
+            continue
+        state = now
+        if met(state, until):
+            continue
         if done:
             log.write(record, "%3d  %-34s  %s  [%.4f USD]" % (turn, short(state)[:34], why or "done", spent))
             if why.lower().startswith("give up"):
@@ -671,7 +703,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         if frames:
             state, played, note = play_turn(game, frames, state, allow_save, until)
         else:
-            state, played, note = game.state(), 0, ""
+            played, note = 0, ""
         refused += note.startswith("refused")
         w = walked(frames[:played], before, state)
         if w and (walk is None or w[0] >= walk[0]):

@@ -47,9 +47,11 @@ text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s; an 
 refused before it is built).
 
 - **One screen at a time.** The steps are played in pieces, a new piece at every press of confirm, cancel or
-  menu, and the rest is dropped as soon as the screen changes (a dialogue, choice, menu or room appears, changes
-  or closes). In the first run in the game, four confirms in one turn ran through the save point's dialogue, its
-  menu and a save; now the model sees each screen.
+  menu and every second of a long walk or wait, and the rest is dropped as soon as the screen changes (a dialogue,
+  choice, menu or room appears, changes or closes). A held direction is cut only while walking, since in a menu
+  pressing it again would move the cursor again. An answer is not played at all if the screen changed while the
+  model was thinking; the model is asked again. In the first run in the game, four confirms in one turn ran
+  through the save point's dialogue, its menu and a save; now the model sees each screen.
 - **Dialogue without the model.** A box that is still typing is waited for in one turn, until it waits for
   confirm or its text has not grown for 3 s (confirm does not skip typing, and the save point's text has pauses),
   and a box that waits for confirm is confirmed, unless that changed nothing twice; the text still goes into the
@@ -88,8 +90,9 @@ refused before it is built).
 | 3 | open its menu, then close it again without saving | reached: 5 calls, 0.0010 USD; the save files unchanged |
 | 4, `--max-steps 8` | open the menu and save to your current file | the guard refused confirm on file slot 2, nothing saved; the model then tried again until the step limit (the second refusal now ends the run), 0.0019 USD |
 
-Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn and ending the
-run after the second refusal came after runs 2 to 4 and are not yet tried in the game.
+Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn, ending the run
+after the second refusal, cutting long walks every second and dropping an answer when the screen changed during the
+call came after runs 2 to 4 and are not yet tried in the game.
 
 ## Protocol
 
