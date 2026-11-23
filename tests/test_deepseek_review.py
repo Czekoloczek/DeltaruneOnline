@@ -420,9 +420,9 @@ class RepoScope(unittest.TestCase):
         for c in chunks:
             self.assertTrue(c.startswith(r.REPO_MARKER))
             self.assertLessEqual(len(c), 40_000 + len(r.REPO_MARKER) + 1)
+        # without the marker line added to the second and later comments, the comments are the report, exactly
         body = "".join(c if i == 0 else c[len(r.REPO_MARKER) + 1:] for i, c in enumerate(chunks))
-        # only line breaks can differ (a break where a line had to be cut); nothing else is lost or added
-        self.assertEqual(body.replace("\n", ""), report.replace("\n", ""))
+        self.assertEqual(body, report)
         self.assertIn("line 01199 " + "y" * 60, body)
 
     def test_a_failed_part_does_not_stop_the_rest(self):

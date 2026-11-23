@@ -166,30 +166,24 @@ def priority(path):
 
 
 def comment_chunks(report, limit=MAX_REVIEW_CHARS):
-    """The repo report as PR comments of at most `limit` characters plus the marker, without dropping any of it.
+    """The repo report as PR comments of at most `limit` characters plus the marker line, without losing any of it.
 
-    Splits between parts first, then between lines of a part that is too long on its own, and only then inside a
-    line longer than the limit. Every comment after the first starts with REPO_MARKER (the report itself does).
+    Each comment takes as much of the report as fits, cut before a part heading ("\n## ") when the window has one,
+    else after a line break, and only inside a line when a single line is longer than the limit. Every comment
+    after the first starts with REPO_MARKER and a line break (the report itself starts with the marker), so
+    joining the comments without that added first line gives the report back exactly.
     """
-    head, *rest = report.split("\n## ")
-    pieces = []
-    for part in [head] + ["## " + p for p in rest]:
-        while len(part) > limit:
-            at = part.rfind("\n", 0, limit + 1)
-            if at > 0:
-                pieces.append(part[:at])
-                part = part[at + 1:]          # that line break becomes the break between the two pieces
-            else:
-                pieces.append(part[:limit])
-                part = part[limit:]
-        pieces.append(part)
-    chunks = [pieces[0]]
-    for piece in pieces[1:]:
-        if len(chunks[-1]) + 1 + len(piece) > limit:
-            chunks.append(REPO_MARKER + "\n" + piece)
-        else:
-            chunks[-1] += "\n" + piece
-    return chunks
+    bodies, start = [], 0
+    while len(report) - start > limit:
+        window = report[start:start + limit]
+        at = window.rfind("\n## ")
+        if at <= 0:
+            nl = window.rfind("\n")
+            at = nl + 1 if nl > 0 else limit
+        bodies.append(report[start:start + at])
+        start += at
+    bodies.append(report[start:])
+    return [b if i == 0 else REPO_MARKER + "\n" + b for i, b in enumerate(bodies)]
 
 
 def cut(text, limit):
