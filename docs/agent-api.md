@@ -4,12 +4,13 @@ An AI agent (for example Claude Code on the player's PC) can play DELTARUNE from
 reads the game state as JSON and sends input such as "hold right for 30 frames, then press confirm". Version 1
 covers the **overworld and dialogue**. In a battle the agent can only see `"battle": true`.
 
-> **Status: tried in the game once, in `mode=solo`.** In chapter 5 (Linux, under Proton) an agent connected,
-> read the state and played: the file select, loading a save, walking, talking to a save point, the menu. `room`,
-> player 1 in `players_pos`, `nearby` and `dialogue` matched the screen. Not tried in the game yet: an agent in an
-> online game, a chapter change with an agent connected, a choice box (`choice`), players 2 and 3 in
-> `players_pos`, the pages of the Dark World menu, and `save_menu`, which was added after that run. The names of
-> the game's objects and variables for those were looked up in the game, not seen working. The network side
+> **Status: tried in the game, in `mode=solo` only.** In chapter 5 (Linux, under Proton) an agent connected, read
+> the state and played: the file select, loading a save, walking, talking to a save point, the Dark World menu
+> and one of its pages, a save point's menu up to the question whether to overwrite a file. `room`, player 1 in
+> `players_pos`, `nearby`, `dialogue`, `interact`, `menuno` and `save_menu` matched the screen. Not tried in the
+> game yet: an agent in an online game, a chapter change with an agent connected, a choice box (`choice`),
+> players 2 and 3 in `players_pos`, and saving itself (`save_menu` after a file was written). The names of the
+> game's objects and variables for those were looked up in the game, not seen working. The network side
 > (protocol, input queue, timing) is tested without the game, on Linux under Wine and on Windows
 > (`native/test_agent.py`).
 
@@ -97,7 +98,7 @@ chapter does not have is `null`.
 | `players_pos` | a list of `{"player","object","name","x","y","facing"}`. Player 1 is `obj_mainchara`; in the Local Multiplayer mod players 2 and 3 are the `obj_caterpillarchara` with `controls` 1 and 2 (`name`: `susie`, `ralsei`, `noelle`). `facing`: 0 down, 1 right, 2 up, 3 left. A player without an instance is left out |
 | `dialogue` | a list, one entry per `obj_writer` (at most 8): `raw` (the text with the game's control codes), `text` (without them), `shown` (characters typed so far), `length`, `waiting` (the box waits for confirm), `x`, `y` |
 | `choice` | `null`, or while an `obj_choicer_neo` exists: `options` (texts, at most 8), `selected` (-1: none), `can_choose`. A direction picks an option (0 left, 1 right, 2 up, 3 down), then confirm |
-| `save_menu` | `null`, or while a save point's menu (`obj_savemenu`) is open, the game's own numbers for it. `stage`: 0 the main box, 1 the list of file slots, 2 after saving to a slot. `x`, `y`: the cursor in the main box, `x` 0 left or 1 right, `y` 0 top row or 1 bottom row: Save (0,0), Return (1,0), Storage (0,1), Recruits (1,1); `x` 2 means the "saved" message waits for confirm. `slot`: the cursor in the list, 0 to 2 a file, 3 Return. `overwrite`: 1 while the question whether to overwrite a file is shown (0 none, 0.5 opening), `overwrite_x` its cursor, 0 Save or 1 Return |
+| `save_menu` | `null`, or while a save point's menu (`obj_savemenu`) is open, the game's own numbers for it. `stage`: 0 the main box, 1 the list of file slots, 2 after saving to a slot. `x`, `y`: the cursor in the main box, `x` 0 left or 1 right, `y` 0 top row or 1 bottom row: Save (0,0), Return (1,0), Storage (0,1), Recruits (1,1); `x` 2 means the "saved" message waits for confirm. `slot`: the cursor in the list, 0 to 2 a file, 3 Return; it starts on the file the game was loaded from. `overwrite`: 1 while the question whether to overwrite a file is shown (0 none, 0.5 opening), `overwrite_x` its cursor, 0 Save or 1 Return |
 | `camera` | `x`, `y`, `w`, `h` of the view |
 | `nearby` | up to 30 instances with a sprite within 240 px of player 1, nearest first: `object`, `x`, `y`, `solid`, `visible`. The players themselves are left out |
 
@@ -109,6 +110,10 @@ chapter does not have is `null`.
 they mean is written here for chapter 5 with the mod; another chapter may use others. A save point's menu draws
 its labels itself, so the state has its cursors but not its texts, and the question "return to the title?" that
 the menu asks in the Light World of earlier chapters (`stage` 10 and 11) has its cursor outside the state.
+
+The numbers of one stage of `save_menu` keep their last values when the menu is in another: in `stage` 0, `slot`
+and `overwrite_x` still show where those cursors stood before. So read `x` and `y` in `stage` 0, `slot` in
+`stage` 1, and `overwrite_x` while `overwrite` is 1.
 
 ## Security
 

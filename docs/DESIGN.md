@@ -224,7 +224,7 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 `agent=<port>` in `[online]` (host, client and solo) lets a program on the same PC, such as an AI agent, read the
 game state as JSON and send input for the local player. The protocol, the keys of the state and the security
 notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module.
-**In the game** it has been tried once, in chapter 5 in `mode=solo`; not yet online or across a chapter change
+**In the game** it has been tried in chapter 5 in `mode=solo` only; not yet online or across a chapter change
 (the status at the top of agent-api.md says what was seen).
 
 - **The DLL holds the protocol.** `drnet.dll` listens on 127.0.0.1 only, on a TCP socket of its own (the lockstep

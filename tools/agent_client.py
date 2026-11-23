@@ -3,7 +3,7 @@
 
 With agent=<port> in dronline.ini the patched game listens on 127.0.0.1:<port> (docs/agent-api.md has the protocol
 and the keys of the state). Tested against drnet.dll without the game (native/test_agent.py); in the game itself
-it has been tried once, in mode=solo.
+it has been tried in mode=solo only.
 
   python3 tools/agent_client.py state                             print the game state
   python3 tools/agent_client.py do "20 right; tap confirm 2 15"   send input, wait until the game has applied it,

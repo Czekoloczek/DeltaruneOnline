@@ -8,7 +8,7 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
 > With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
 > input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, and in the game it
-> has been tried once, in `mode=solo` (not yet online or across a chapter change).
+> has been tried in `mode=solo` only (not yet online or across a chapter change).
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
