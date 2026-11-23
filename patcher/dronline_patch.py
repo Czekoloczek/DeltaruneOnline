@@ -38,6 +38,10 @@ RULES = [
     (r"\bgamepad_is_connected\(", "dro_gp_connected("),
     (r"\bgamepad_get_device_count\(", "dro_gp_count("),
     (r"\brandomize\(\s*\)", "dro_randomize()"),
+    # chapter change: every machine leaves in the same frame, so the others' goodbyes are expected
+    (r"\bgame_change\(", "dro_game_change("),
+    # restart: fires Game End, but the game goes on, so no goodbye then
+    (r"\bgame_restart\(\s*\)", "dro_game_restart()"),
     # Local Multiplayer player count: online it comes from the session, not the local keyconfig_mod.ini
     (r"\bini_read_real\(\s*\"PLAYER_AMOUNT\"", "dro_ini_player_amount(\"PLAYER_AMOUNT\""),
     # audio state that game logic reads -> virtual audio clock

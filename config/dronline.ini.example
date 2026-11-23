@@ -3,6 +3,8 @@
 ;   Linux/Proton: <prefix>/drive_c/users/steamuser/AppData/Local/DELTARUNE/dronline.ini
 ; No file or mode=off: the patched game behaves like the unpatched one.
 ; Step-by-step setup for online play: https://github.com/Czekoloczek/DeltaruneOnline/wiki/Playing-with-a-friend
+; Two copies on one PC: start each with DRONLINE_ROLE=<name> to read dronline_<name>.ini instead
+;   (tools\local_test.bat does that for a host and a client).
 [online]
 ; host | client: online play (the host is player 1)
 ; off: like the unpatched game

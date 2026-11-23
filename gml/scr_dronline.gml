@@ -3,7 +3,8 @@
 // The patcher rewrites every keyboard/gamepad read in the game and the mod to the dro_* functions below.
 // This file itself is NOT rewritten, so it can still read the real devices.
 //
-// Config: dronline.ini in the game's save folder (%LOCALAPPDATA%\DELTARUNE).
+// Config: dronline.ini in the game's save folder (%LOCALAPPDATA%\DELTARUNE), or dronline_<role>.ini
+// when the environment variable DRONLINE_ROLE=<role> is set and that file exists (two copies on one PC).
 //   [online]
 //   mode   = off | solo | record | replay | host | client
 //   players = 2 | 3                            (host/client) number of players; also the Local Multiplayer player count
@@ -30,9 +31,16 @@ function dronline_init()
     global.dro_maxdelay = 6;
     global.dro_lag = 0;
     global.dro_jitter = 0;
-    if (file_exists("dronline.ini"))
+    // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
+    // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
+    // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
+    global.dro_ini = "dronline.ini";
+    var role = environment_get_variable("DRONLINE_ROLE");
+    if (role != "" && string_length(role) <= 16 && string_lettersdigits(role) == role && file_exists("dronline_" + role + ".ini"))
+        global.dro_ini = "dronline_" + role + ".ini";
+    if (file_exists(global.dro_ini))
     {
-        ini_open("dronline.ini");
+        ini_open(global.dro_ini);
         global.dro_mode = string_lower(ini_read_string("online", "mode", "off"));
         global.dro_player = clamp(ini_read_real("online", "player", 1), 1, 3);
         global.dro_seed = ini_read_real("online", "seed", 1234);
@@ -59,6 +67,8 @@ function dronline_init()
     global.dro_hashlog = -1;
     global.dro_net = false;
     global.dro_connecting = false;
+    global.dro_leaving = false;
+    global.dro_restarting = false;
     global.dro_netframe = 0;
     global.dro_desync = -1;
     global.dro_msg = "";
@@ -101,7 +111,7 @@ function dronline_init()
         // and draws the "waiting" text, then frame 1 blocks until everybody is there.
         global.dro_net = true;
         global.dro_connecting = true;
-        drnet_log("init: network started, room " + room_get_name(room));
+        drnet_log("init: network started, room " + room_get_name(room) + ", config " + global.dro_ini);
         if (global.dro_debug)
         {
             // hits travel as plain instance numbers: check that the runtime accepts them as ids
@@ -236,6 +246,7 @@ function dronline_step()
 {
     if (!dronline_ready())
         return;
+    global.dro_restarting = false;
     dronline_heart_unswap();
     for (var p = 0; p < 4; p++)
         global.dro_bits[p] = 0;
@@ -284,9 +295,20 @@ function dronline_step()
         global.dro_netframe++;
         if (_all < 0)
         {
+            // -2: another player said goodbye (closed the game) and their input ran out; -1: no answer for 10 s
+            var why = drnet_status();
             drnet_stop();
             global.dro_net = false;
-            show_message("DeltaruneOnline: connection lost at frame " + string(global.dro_frame) + ".");
+            if (global.dro_leaving)
+            {
+                // this game is changing chapter too (dro_game_change), so the others leaving is expected
+                drnet_log("network closed while changing chapter at frame " + string(global.dro_frame));
+                return;
+            }
+            if (_all == -2)
+                show_message("DeltaruneOnline: " + why + " (frame " + string(global.dro_frame) + "). Closing the game.");
+            else
+                show_message("DeltaruneOnline: connection lost at frame " + string(global.dro_frame) + ".");
             game_end();
             return;
         }
@@ -391,6 +413,11 @@ function dronline_shutdown()
 {
     if (!variable_global_exists("dro_mode"))
         return;
+    // Game End: the window was closed, Esc was held or game_end ran, so tell the others now, while the game still
+    // runs (a goodbye sent by the DLL at process exit never arrived). Not on game_restart: the game goes on.
+    // The socket stays open: DELTARUNE also fires Game End when it restarts itself at chapter start.
+    if (global.dro_net && !global.dro_restarting)
+        drnet_bye("game end");
     dronline_flush();
     if (global.dro_hashlog != -1)
     {
@@ -507,6 +534,30 @@ function dro_gp_axis(d, a)
     if (!dronline_ready())
         return gamepad_axis_value(d, a);
     return 0;
+}
+
+// Replaces game_change (patcher): the chapter select starts a new game process and this one exits. Every
+// machine does that in the same frame, so goodbyes that arrive meanwhile must not show "player left".
+function dro_game_change(_dir, _params)
+{
+    if (variable_global_exists("dro_net") && global.dro_net)
+    {
+        global.dro_leaving = true;
+        drnet_bye("chapter change at frame " + string(global.dro_frame));
+    }
+    return game_change(_dir, _params);
+}
+
+// Replaces game_restart (patcher): it fires Game End, but the game goes on, so Game End must not say goodbye.
+// Every machine restarts in the same frame; the flag is cleared again in the next dronline_step.
+function dro_game_restart()
+{
+    if (variable_global_exists("dro_net") && global.dro_net)
+    {
+        global.dro_restarting = true;
+        drnet_log("game_restart at frame " + string(global.dro_frame));
+    }
+    game_restart();
 }
 
 function dro_randomize()

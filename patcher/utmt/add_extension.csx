@@ -46,6 +46,7 @@ Fn("drnet_hash", D, D, D);
 Fn("drnet_desync", D);
 Fn("drnet_status", S);
 Fn("drnet_stop", D);
+Fn("drnet_bye", D, S);
 Fn("drnet_log", D, S);
 Fn("drnet_option", D, S, D);
 Fn("drnet_set_aux", D, D);

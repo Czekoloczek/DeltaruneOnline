@@ -63,6 +63,18 @@ a bullet hits, so the design avoids both:
 (Rollback, the textbook answer, would need saving and restoring the complete GameMaker state every frame:
 instance ids cannot be recreated and data structure ids are plain numbers, so DELTARUNE gives no way to do it.)
 
+**Goodbye.** A game that closes sends a BYE packet with its last inputs: from obj_time's Game End (window
+closed, Esc held, `game_end`) and from `dro_game_change` (chapter change), through `drnet_bye`, and from
+`drnet_stop`. The others stop waiting for it as soon as they run out of its input, then show "the other player
+left the game" and close, instead of freezing for the 10 s timeout. The last inputs inside the BYE let a partner
+that is a frame behind still reach the same last frame. Every machine changes chapter in the same frame, so
+`dro_game_change` also marks the game as leaving: a goodbye that arrives then shows no message. `game_restart`
+fires Game End too, but the game goes on, so `dro_game_restart` suppresses that goodbye, and a player who sends
+input newer than their goodbye counts as back. Older input that arrives after the goodbye (sent just before it, or
+reordered) does not. With 3 players, a client gets the other client's input only through the host, so once the host
+said goodbye, a client counts any missing input as "left". A crash or a killed process sends nothing, so the 10 s
+timeout remains for those.
+
 `delay=<frames>` in `dronline.ini` fixes *D* instead; with a fixed 0 the game waits out the network every
 frame and slows down above roughly 30 ms ping.
 
@@ -113,6 +125,14 @@ why the settings live in `dronline.ini`.
 ## Testing on one PC
 
 `tools/local_test.sh` runs a host and a client in two Wine prefixes with copies of the same save folder.
+
+On Windows both copies share one save folder (`%LOCALAPPDATA%\DELTARUNE`), so they would read the same
+`dronline.ini`. A copy started with the environment variable `DRONLINE_ROLE=<name>` (letters and digits) reads
+`dronline_<name>.ini` instead, if that file exists, and `drnet.dll` then logs to `drnet_<name>.log`.
+`tools\local_test.bat "<game folder>"` creates `dronline_host.ini` and `dronline_client.ini` (client connects to
+127.0.0.1) and starts both copies; choose Chapter 5 in each window. Without the variable, or without the
+matching file, a copy uses `dronline.ini` and `drnet.log` as before. Windows passes environment variables on to
+child processes, so the role should survive the launcher's chapter change too.
 
 ## Testing without a network: record and replay
 
@@ -183,6 +203,13 @@ reads in game logic.
   → `ROOM_INITIALIZE`), so nothing in Game End may close the network socket.
 - Under Wine/Proton with two monitors, the game positions its window from the X11 monitor layout, which
   can differ from the Wayland compositor's layout, so windows may open off screen.
+- **The socket must not be inheritable.** A chapter change (`game_change()`) starts a new game process that
+  inherits the old one's handles, and the old process exits without Clean Up. An inherited socket kept the host
+  port bound inside the new process, so hosting again failed. `drnet.c` creates its socket with
+  `WSA_FLAG_NO_HANDLE_INHERIT` (making it non-inheritable afterwards passed the Windows test, 2026-11-23).
+- **No networking at process exit.** A goodbye sent from `DllMain` (`DLL_PROCESS_DETACH`) was logged as sent
+  but never arrived (Windows, 2026-11-23), so it is sent from Game End and the chapter change instead, while the
+  game still runs.
 
 ## Playing over WireGuard
 

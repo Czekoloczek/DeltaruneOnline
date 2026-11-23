@@ -13,6 +13,12 @@
  * frames themselves are what everybody agrees on. Frames filled ahead of time carry LAG_BIT, so the
  * game knows the local player sees their own SOUL ahead of the shared simulation (see scr_dronline.gml).
  *
+ * Goodbye: a game that closes (window closed, Esc held, chapter change) sends BYE with its last inputs, through
+ * drnet_bye (Game End and chapter change, called by scr_dronline.gml) or drnet_stop. The others then stop
+ * waiting for it at once instead of after the 10 s timeout, but only once they run out of its input, so a
+ * partner that is a frame behind still reaches the same last frame (both sides of a chapter change leave in the
+ * same frame). It must be sent while the game still runs: sent from DllMain at process exit it never arrived.
+ *
  * GameMaker calling convention: cdecl, numbers are double, strings are char*.
  *
  *   drnet_option(name, value)                                     -> 1 (before drnet_start: "lag", "jitter",
@@ -23,7 +29,8 @@
  *   drnet_connect(timeout_ms)                                     -> 1 all players connected, 0 timeout
  *   drnet_set_aux(value)                                          -> 1 (event sent with the next input, e.g. a hit)
  *   drnet_exchange(frame, my_bits)                                -> bits of all players for `frame`
- *                                                                    (p1 | p2 << 16 | p3 << 32), -1 on timeout
+ *                                                                    (p1 | p2 << 16 | p3 << 32), -1 on timeout,
+ *                                                                    -2 when a player whose input is missing left
  *   drnet_aux(player)                                             -> that player's event for the last exchanged frame
  *   drnet_pending_count()                                         -> own inputs already sent for later frames
  *   drnet_pending(i)                                              -> bits of the i-th of them (oldest first)
@@ -33,7 +40,8 @@
  *   drnet_hash(frame, hash)                                       -> 1 (sends a state fingerprint)
  *   drnet_desync()                                                -> first frame whose fingerprints differ, -1 none
  *   drnet_status()                                                -> short text for the screen
- *   drnet_stop()                                                  -> 1
+ *   drnet_bye(reason)                                             -> 1 sent, 0 not connected (goodbye, socket stays open)
+ *   drnet_stop()                                                  -> 1 (says goodbye to the others first)
  *   drnet_log(text)                                               -> 1 (writes to drnet.log)
  *
  * Options: lag = extra one-way latency in ms added to every sent packet (testing), jitter = random extra
@@ -56,12 +64,12 @@
 #define WINDOW 16
 #define HRING 64
 #define MAGIC 0x44524F4E /* "DRON" */
-#define PROTO 2
+#define PROTO 3   /* 3: BYE */
 #define LAG_BIT 0x0800
 #define FRAME_MS (1000.0 / 30.0)
 #define QSIZE 1024
 
-enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4 };
+enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5 };   /* BYE: an input packet that also says goodbye */
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t player; uint8_t players; uint8_t proto; } hdr_t;
@@ -108,6 +116,8 @@ static int wait_pos;
 static int32_t hash_frame[MAXP + 1][HRING];
 static uint32_t hash_val[MAXP + 1][HRING];
 static int32_t desync_at = -1;
+static int gone[MAXP + 1];                  /* player said goodbye */
+static int32_t bye_last[MAXP + 1];          /* last frame in that goodbye */
 static char status[256];
 static FILE *log_file;
 static char host_addr[64] = "127.0.0.1";
@@ -123,13 +133,30 @@ static uint64_t now_us(void)
     return (uint64_t)c.QuadPart / qpf * 1000000 + (uint64_t)c.QuadPart % qpf * 1000000 / qpf;
 }
 
-/* Log to %LOCALAPPDATA%\\DELTARUNE\\drnet.log (the game's save folder), one file per Wine prefix / PC. */
+/* DRONLINE_ROLE: letters and digits, at most 16 (the same rule as dronline_init in scr_dronline.gml). */
+static int valid_role(const char *r)
+{
+    int i;
+    if (!r || !*r) return 0;
+    for (i = 0; r[i]; i++)
+        if (i >= 16 || !((r[i] >= 'a' && r[i] <= 'z') || (r[i] >= 'A' && r[i] <= 'Z') || (r[i] >= '0' && r[i] <= '9'))) return 0;
+    return 1;
+}
+
+/* Log to %LOCALAPPDATA%\\DELTARUNE\\drnet.log (the game's save folder), one file per Wine prefix / PC.
+ * Two copies on one PC share that folder: a copy started with DRONLINE_ROLE=<name> that reads its own
+ * dronline_<name>.ini (scr_dronline.gml) logs to drnet_<name>.log instead. */
 static void logm(const char *fmt, ...)
 {
     va_list ap;
     if (!log_file) {
-        char path[600]; const char *la = getenv("LOCALAPPDATA");
-        snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet.log", la ? la : ".");
+        char path[600]; const char *la = getenv("LOCALAPPDATA"), *role = getenv("DRONLINE_ROLE");
+        if (!la) la = ".";
+        snprintf(path, sizeof(path), "%s\\DELTARUNE\\dronline_%s.ini", la, valid_role(role) ? role : "");
+        if (valid_role(role) && GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES)
+            snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet_%s.log", la, role);
+        else
+            snprintf(path, sizeof(path), "%s\\DELTARUNE\\drnet.log", la);
         log_file = fopen(path, "a");
         if (!log_file) return;
     }
@@ -227,7 +254,7 @@ static void send_window(int p, int32_t last)
     if (last < 0) return;
     if (first < 0) first = 0;
     memset(&k, 0, sizeof(k));
-    fill_hdr(&k.h, T_INPUT, p);
+    fill_hdr(&k.h, gone[p] ? T_BYE : T_INPUT, p);   /* the host keeps relaying a player who left as BYE */
     k.first = (uint32_t)first; k.count = (uint8_t)(last - first + 1);
     for (i = 0; i < k.count; i++) { k.bits[i] = bits_of[p][(first + i) % RING]; k.aux[i] = aux_of[p][(first + i) % RING]; }
     if (is_host) {
@@ -258,6 +285,13 @@ static void measure(int q, const input_pkt *k, uint64_t now)
     }
 }
 
+/* Status text once player p's goodbye made drnet_exchange give up (lock held). */
+static void left_status(int p)
+{
+    if (players == 2) snprintf(status, sizeof(status), "the other player left the game");
+    else snprintf(status, sizeof(status), "player %d left the game", p);
+}
+
 /* Runs on the network thread, with the lock held. */
 static void handle(const char *buf, int len, const struct sockaddr_in *from, uint64_t now)
 {
@@ -276,7 +310,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         send_to(from, &w, sizeof(w));
     } else if (h->type == T_WELCOME && !is_host) {
         connected = 1;
-    } else if (h->type == T_INPUT && len >= (int)sizeof(input_pkt)) {
+    } else if ((h->type == T_INPUT || h->type == T_BYE) && len >= (int)sizeof(input_pkt)) {
         const input_pkt *k = (const input_pkt *)buf; int i;
         if (k->h.player < 1 || k->h.player > players || k->h.player == me) return;
         if (is_host) measure(k->h.player, k, now);          /* every packet at the host comes straight from its client */
@@ -286,6 +320,17 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             int q; input_pkt r = *k;
             for (q = 2; q <= players; q++)
                 if (have_peer[q] && q != k->h.player) { stamp(&r, q); send_to(&peer[q], &r, sizeof(r)); }
+        }
+        /* Back after a goodbye only with input newer than the goodbye. An older input packet can still arrive after
+           the goodbye (sent just before it, reordered, or held in a queue), and must not undo it (test 4b, 2026-11-23). */
+        if (h->type == T_INPUT && gone[k->h.player] && k->count && (int32_t)(k->first + k->count - 1) > bye_last[k->h.player]) {
+            gone[k->h.player] = 0;
+            logm("player %d sends input again", k->h.player);
+        }
+        if (h->type == T_BYE && !gone[k->h.player]) {
+            gone[k->h.player] = 1;
+            bye_last[k->h.player] = k->count ? (int32_t)(k->first + k->count - 1) : -1;
+            logm("player %d said goodbye (last frame %d)", k->h.player, bye_last[k->h.player]);
         }
         SetEvent(ev_input);
     } else if (h->type == T_HASH && len >= (int)sizeof(hash_pkt)) {
@@ -374,6 +419,31 @@ static void update_delay(uint64_t now)
     }
 }
 
+/* Goodbye: my last WINDOW frames as a BYE packet, so a partner still gets the input it needs to reach my last
+ * frame. Sent three times, because UDP may lose one, and straight out (not through the test latency queue).
+ * Lock held. */
+static void send_bye(void)
+{
+    input_pkt k; int32_t last = next_target - 1, first = last - WINDOW + 1; int i, r, n = 0;
+    if (sock == INVALID_SOCKET || !connected) return;
+    if (first < 0) first = 0;
+    memset(&k, 0, sizeof(k));
+    fill_hdr(&k.h, T_BYE, me);
+    if (last >= 0) {
+        k.first = (uint32_t)first; k.count = (uint8_t)(last - first + 1);
+        for (i = 0; i < k.count; i++) { k.bits[i] = bits_of[me][(first + i) % RING]; k.aux[i] = aux_of[me][(first + i) % RING]; }
+    }
+    for (r = 0; r < 3; r++) {
+        if (is_host) {
+            for (i = 2; i <= players; i++)
+                if (have_peer[i] && !gone[i]) { stamp(&k, i); raw_send(&peer[i], &k, sizeof(k)); n++; }
+        } else if (have_peer[1] && !gone[1]) {
+            stamp(&k, 1); raw_send(&peer[1], &k, sizeof(k)); n++;
+        }
+    }
+    if (n) logm("sent goodbye (last frame %d)", last);
+}
+
 EXPORT double drnet_option(const char *name, double value)
 {
     if (!name) return 0;
@@ -405,14 +475,25 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     delay_auto = dly < 0; delay = delay_auto ? 0 : (int)dly;
     if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); return 0; }
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); return 0; }
-    sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCKET) return fail("socket");
+    /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
+       process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
+       again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
+       SetHandleInformation alone can fail with layered Winsock providers (antivirus, VPN), and that is logged.
+       WSA_FLAG_OVERLAPPED keeps it the same kind of socket that socket() makes. */
+    sock = WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, NULL, 0, WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+    if (sock == INVALID_SOCKET) {               /* Windows older than 7 SP1 does not know the flag */
+        logm("WSASocketW failed (WSA %d), using socket()", WSAGetLastError());
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCKET) return fail("socket");
+        if (!SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0))
+            logm("SetHandleInformation failed (%lu): a chapter change may keep port %g busy", GetLastError(), port);
+    }
     ioctlsocket(sock, FIONBIO, &nb);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; return r; }
     for (p = 0; p <= MAXP; p++) {
-        have_peer[p] = 0; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
+        have_peer[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
         for (i = 0; i < RING; i++) frame_of[p][i] = -1;
         for (i = 0; i < HRING; i++) hash_frame[p][i] = -1;
     }
@@ -487,7 +568,7 @@ EXPORT double drnet_exchange(double frame, double my_bits)
 {
     int32_t f = (int32_t)frame;
     uint64_t start = now_us(), last_send;
-    int p, ready;
+    int p, ready, left;
     if (sock == INVALID_SOCKET || !connected) return -1;
     lock();
     update_delay(start);
@@ -498,8 +579,11 @@ EXPORT double drnet_exchange(double frame, double my_bits)
     for (;;) {
         uint64_t now;
         lock();
-        ready = 1;
-        for (p = 1; p <= players; p++) if (!has_input(p, f)) ready = 0;
+        ready = 1; left = 0;
+        for (p = 1; p <= players; p++) if (!has_input(p, f)) { ready = 0; if (gone[p]) left = p; }
+        /* a client gets the other clients' input only through the host: once the host left, nothing missing arrives */
+        if (!ready && !left && !is_host && gone[1]) left = 1;
+        if (left) left_status(left);
         now = now_us();
         if (!ready && now - last_send > 16000) {             /* resend while waiting */
             send_window(me, next_target - 1);
@@ -508,6 +592,7 @@ EXPORT double drnet_exchange(double frame, double my_bits)
         }
         unlock();
         if (ready) break;
+        if (left) { logm("exchange: player %d left before frame %d", left, f); return -2; }
         if (now - start > 10000000) { logm("exchange timeout at frame %d", f); return -1; }      /* peer gone */
         WaitForSingleObject(ev_input, 2);
         if (now - start > 100000) pump_window_messages();
@@ -587,9 +672,19 @@ EXPORT double drnet_log(const char *msg) { logm("gml: %s", msg ? msg : ""); retu
 
 EXPORT const char *drnet_status(void) { return status; }
 
+EXPORT double drnet_bye(const char *reason)
+{
+    if (sock == INVALID_SOCKET || !connected) return 0;
+    logm("goodbye: %s", reason ? reason : "");
+    lock(); send_bye(); unlock();
+    Sleep(20);   /* the game usually exits right after this: leave the network stack a moment to send */
+    return 1;
+}
+
 EXPORT double drnet_stop(void)
 {
     if (sock != INVALID_SOCKET) {
+        lock(); send_bye(); unlock();
         running = 0;
         if (thr) { WaitForSingleObject(thr, 1000); CloseHandle(thr); thr = NULL; }
         closesocket(sock); sock = INVALID_SOCKET; WSACleanup();
