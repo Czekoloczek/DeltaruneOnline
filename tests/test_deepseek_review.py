@@ -117,10 +117,12 @@ class Output(unittest.TestCase):
 class FakeAPI:
     """GitHub and DeepSeek in one; records every call."""
 
-    def __init__(self, fork=False, deepseek=None, files=None, shas=None, files_per_fetch=None):
+    def __init__(self, fork=False, deepseek=None, files=None, shas=None, files_per_fetch=None, base_shas=None):
         self.calls, self.comments, self.deepseek_bodies = [], [], []
         self.fork = fork
         self.shas = list(shas or ["abcdef1234"])  # head.sha per read of the PR; the last one stays
+        self.base_shas = list(base_shas or ["0000000base"])  # base.sha per read of the PR, the same way
+        self.file_fetches = 0
         self.deepseek = deepseek or [(200, {"choices": [{"message": {"content": "- **ważne** `gml/a.gml:3`: x"},
                                                           "finish_reason": "stop"}],
                                              "usage": {"prompt_tokens": 1200, "completion_tokens": 300,
@@ -141,10 +143,12 @@ class FakeAPI:
         if url.endswith("/pulls/7"):
             head_repo = {"full_name": "someone/fork" if self.fork else "o/r"}
             sha = self.shas.pop(0) if len(self.shas) > 1 else self.shas[0]
+            base_sha = self.base_shas.pop(0) if len(self.base_shas) > 1 else self.base_shas[0]
             return 200, {"number": 7, "title": "T", "body": "B", "additions": 2, "deletions": 2,
                          "user": {"login": "dev"}, "head": {"ref": "feat", "sha": sha, "repo": head_repo},
-                         "base": {"ref": "main", "repo": {"full_name": "o/r"}}}
+                         "base": {"ref": "main", "sha": base_sha, "repo": {"full_name": "o/r"}}}
         if "/pulls/7/files" in url:
+            self.file_fetches += 1
             if self.files_per_fetch:
                 return 200, self.files_per_fetch.pop(0) if len(self.files_per_fetch) > 1 else self.files_per_fetch[0]
             return 200, self.files
@@ -293,6 +297,13 @@ class Run(unittest.TestCase):
         self.assertIn("second_commit_line", prompt)
         self.assertNotIn("first_commit_line", prompt)
 
+    def test_target_branch_move_during_fetch_reads_the_files_again(self):
+        # the head stays, but main gets a commit between the files and the second read of the PR
+        api = FakeAPI(base_shas=["base1", "base2", "base2"])
+        self.assertEqual(self.run_review(api), 0)
+        self.assertEqual(api.file_fetches, 2)
+        self.assertEqual(len(api.deepseek_bodies), 1)
+
     def test_pr_that_keeps_moving_is_skipped(self):
         api = FakeAPI(shas=["a1", "b2", "c3", "d4", "e5"])
         self.assertEqual(self.run_review(api), 0)
@@ -397,6 +408,20 @@ class RepoScope(unittest.TestCase):
             self.assertTrue(c.startswith(r.REPO_MARKER))
             self.assertLessEqual(len(c), 65_000)
         self.assertEqual(sum(c.count("x" * 25_000) for c in api.comments), 5)
+
+    def test_comment_chunks_keep_every_character(self):
+        # one part far over the limit in many lines, then one single line over the limit
+        many_lines = "\n".join("line %05d " % i + "y" * 60 for i in range(1200))   # about 84 000 characters
+        report = r.REPO_MARKER + "\n# T\n\n## Part 1\n" + many_lines + "\n## Part 2\n" + "z" * 90_000 + "\n## Part 3\nend"
+        chunks = r.comment_chunks(report, limit=40_000)
+        self.assertGreater(len(chunks), 4)
+        for c in chunks:
+            self.assertTrue(c.startswith(r.REPO_MARKER))
+            self.assertLessEqual(len(c), 40_000 + len(r.REPO_MARKER) + 1)
+        body = "".join(c if i == 0 else c[len(r.REPO_MARKER) + 1:] for i, c in enumerate(chunks))
+        # only line breaks can differ (a break where a line had to be cut); nothing else is lost or added
+        self.assertEqual(body.replace("\n", ""), report.replace("\n", ""))
+        self.assertIn("line 01199 " + "y" * 60, body)
 
     def test_a_failed_part_does_not_stop_the_rest(self):
         ok = FakeAPI().deepseek[0]

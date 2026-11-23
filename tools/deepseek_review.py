@@ -164,6 +164,33 @@ def priority(path):
     return 1
 
 
+def comment_chunks(report, limit=MAX_REVIEW_CHARS):
+    """The repo report as PR comments of at most `limit` characters plus the marker, without dropping any of it.
+
+    Splits between parts first, then between lines of a part that is too long on its own, and only then inside a
+    line longer than the limit. Every comment after the first starts with REPO_MARKER (the report itself does).
+    """
+    head, *rest = report.split("\n## ")
+    pieces = []
+    for part in [head] + ["## " + p for p in rest]:
+        while len(part) > limit:
+            at = part.rfind("\n", 0, limit + 1)
+            if at > 0:
+                pieces.append(part[:at])
+                part = part[at + 1:]          # that line break becomes the break between the two pieces
+            else:
+                pieces.append(part[:limit])
+                part = part[limit:]
+        pieces.append(part)
+    chunks = [pieces[0]]
+    for piece in pieces[1:]:
+        if len(chunks[-1]) + 1 + len(piece) > limit:
+            chunks.append(REPO_MARKER + "\n" + piece)
+        else:
+            chunks[-1] += "\n" + piece
+    return chunks
+
+
 def cut(text, limit):
     """At most `limit` characters, cut at a line end when there is one in the second half."""
     if len(text) <= limit:
@@ -639,17 +666,8 @@ def run_repo(env, http=http_json, sleep=time.sleep, root=ROOT, list_files=repo_f
         f.write(report + "\n")
     summary(report)
     if gh:
-        # Split between parts, so that no comment passes GitHub's limit.
-        head, *rest = report.split("\n## ")
-        chunks = [head]
-        for part in rest:
-            part = "## " + part
-            if len(chunks[-1]) + len(part) + 1 > MAX_REVIEW_CHARS:
-                chunks.append(REPO_MARKER + "\n" + part)
-            else:
-                chunks[-1] += "\n" + part
-        for text in chunks:
-            gh.comment(number, cut(text, 65_000))
+        for text in comment_chunks(report):
+            gh.comment(number, text)
     return 1 if failed == len(sections) else 0
 
 
@@ -708,15 +726,19 @@ def run(env, http=http_json, sleep=time.sleep, design_path=os.path.join(ROOT, "d
         return 0
 
     # The files endpoint always lists the PR's current state, so a push between the two reads would pair the
-    # new diff with the old commit. Read the PR again after the files and start over while it keeps moving.
+    # new diff with the old commit, and a move of the target branch (a new commit there, or a new target) can
+    # change the comparison between pages. Read the PR again after the files and start over while either moves.
+    def state(p):
+        return p["head"]["sha"], p["base"]["ref"], p["base"].get("sha")
+
     for _ in range(3):
         files = gh.files(number)
         again = gh.pr(number)
-        if again["head"]["sha"] == pr["head"]["sha"]:
+        if state(again) == state(pr):
             break
         pr = again
     else:
-        gh.comment(number, f"{MARKER}\nPrzegląd DeepSeek pominięty: do PR-a ciągle przychodzą nowe commity. "
+        gh.comment(number, f"{MARKER}\nPrzegląd DeepSeek pominięty: do PR-a albo jego gałęzi docelowej ciągle przychodzą nowe commity. "
                            "Zamów przegląd jeszcze raz, gdy się uspokoi.")
         summary("PR zmieniał się w trakcie pobierania diffu; przegląd pominięty.")
         return 0
