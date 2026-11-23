@@ -690,6 +690,16 @@ function dro_randomize()
     random_set_seed(global.dro_seed);
 }
 
+// Replaces get_timer() (patcher). Online every machine must read the same clock, so it counts lockstep frames:
+// microseconds at the game's 30 fps since the session started. Offline it is the real timer. Draw events use it
+// too, and some of them move instances with it (obj_spin_petal sets x), which changes the game state.
+function dro_get_timer()
+{
+    if (!dronline_ready())
+        return get_timer();
+    return global.dro_frame * (1000000 / 30);
+}
+
 // Replaces the mod's ini_read_real("PLAYER_AMOUNT", ...) (patcher). Online, every machine uses the session's
 // player count from dronline.ini instead of its own keyconfig_mod.ini, so new game, loading a save and the
 // config menu agree everywhere. The game has the ini open while it calls this, so no other file is touched.

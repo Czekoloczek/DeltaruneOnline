@@ -232,8 +232,13 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 Random calls are fine as long as every machine consumes the RNG in the same order with the same seed.
 Clock, audio and fps reads are the real risks; record/replay shows which ones matter in practice.
 
-**System clock.** Audio state already goes through the virtual audio clock, but clock reads do not. Of the
-52 clock entries in Chapter 5, 30 are Draw events, which only change the picture. Of the other 22, `scr_save`
+**System clock.** Audio state already goes through the virtual audio clock; of the clock reads, only `get_timer()`
+goes through a frame clock (below). Of the 52 clock entries in Chapter 5, 30 are Draw events. Most of them only change the picture, but a Draw event can also
+change the game state: `obj_spin_petal` sets its `x` from `get_timer()`, so in the Chapter 5 garden the petals
+stood in different places on each machine and the games desynced on the first frame after loading a save there
+(found by the scripted two-player run). `get_timer()` (5 entries) therefore goes through `dro_get_timer()`, which
+counts lockstep frames online (`frames × 1000000 / 30` µs) and is the real timer offline; `current_time` is still
+read directly. Of the 22 entries outside Draw events, `scr_save`
 only writes the date into the save file, and `scr_screenspace` only uses the clock as a cache key for the camera
 position and is called from Draw events alone. The remaining **20 are game logic** and need a frame-based clock
 (`frames × 1000 / 30` ms): `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
