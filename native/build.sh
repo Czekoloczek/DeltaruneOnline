@@ -9,4 +9,6 @@ CC=${CC:-x86_64-w64-mingw32-gcc}
 "$CC" -O2 -shared -static-libgcc -Wall -o build/drnet.dll drnet.c -lws2_32 -luser32
 # Standalone lockstep test (native/test_pair.sh runs it under Wine, or natively on Windows)
 "$CC" -O2 -static-libgcc -Wall -o build/test_drnet.exe test_drnet.c
-echo "built native/build/drnet.dll and native/build/test_drnet.exe"
+# A stand-in game for the Agent API test (native/test_agent.py)
+"$CC" -O2 -static-libgcc -Wall -o build/test_agent.exe test_agent.c
+echo "built native/build/drnet.dll, native/build/test_drnet.exe and native/build/test_agent.exe"

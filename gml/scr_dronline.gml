@@ -30,6 +30,11 @@
 //                                              file, to replay it later with script=. An existing file is kept: the
 //                                              recording then goes to <name>.2, <name>.3, ... With DRONLINE_ROLE
 //                                              the role goes into the name: dronline_rec_host.bin
+//   agent  = 0                                 (host/client/solo) TCP port of the Agent API, 0 = off: a program on this
+//                                              PC connects to 127.0.0.1:<port>, reads the game state as JSON and
+//                                              sends input for the local player (docs/agent-api.md). Never open to
+//                                              the network; any program on this PC can connect, so leave it off
+//                                              unless you use it
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -46,6 +51,9 @@ function dronline_init()
     global.dro_script_file = "";
     global.dro_script_end = "idle";
     global.dro_srec_file = "";
+    global.dro_agent_port = 0;
+    global.dro_agent_on = false;
+    global.dro_agent_tries = 0;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -76,6 +84,7 @@ function dronline_init()
         global.dro_script_file = ini_read_string("online", "script", "");
         global.dro_script_end = string_lower(ini_read_string("online", "script_end", "idle"));
         global.dro_srec_file = ini_read_string("online", "script_record", "");
+        global.dro_agent_port = ini_read_real("online", "agent", 0);
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -150,6 +159,10 @@ function dronline_init()
         global.dro_netframe = 0;
         global.dro_msg = drnet_status();
     }
+    if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
+        dronline_agent_init();
+    else
+        global.dro_agent_port = 0;
     random_set_seed(global.dro_seed);
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_script_init();
@@ -291,6 +304,9 @@ function dronline_script_frame(mine)
                 mine = 0;
         }
     }
+    // The agent's buttons join the keyboard's or the script's, so a person can still step in. This comes before
+    // script_record, so a recording holds the agent's input too.
+    mine |= dronline_agent_bits();
     if (global.dro_srec != -1)
         buffer_write(global.dro_srec, buffer_u16, mine);
     return mine;
@@ -349,6 +365,7 @@ function dronline_step()
 {
     if (!dronline_ready())
         return;
+    dronline_agent_poll();
     global.dro_restarting = false;
     dronline_heart_unswap();
     for (var p = 0; p < 4; p++)
@@ -667,6 +684,14 @@ function dro_game_change(_dir, _params)
     {
         global.dro_leaving = true;
         drnet_bye("chapter change at frame " + string(global.dro_frame));
+    }
+    // The Agent API's port must be free for the new process, which listens on it again. Port 0: this process
+    // does not open it once more while it is on its way out.
+    if (variable_global_exists("dro_agent_port") && global.dro_agent_port > 0)
+    {
+        global.dro_agent_port = 0;
+        global.dro_agent_on = false;
+        drnet_agent_stop();
     }
     return game_change(_dir, _params);
 }
@@ -1195,4 +1220,315 @@ function dronline_heart_unswap()
         }
     }
     global.dro_swap = 0;
+}
+
+// ---- Agent API: a program on this PC reads the game state and plays (docs/agent-api.md) ----
+// agent=<port> makes drnet.dll listen on 127.0.0.1:<port>. The DLL does the talking: it reads the agent's commands,
+// keeps the input the agent queued and writes the replies (drnet.c, "Agent API"). The game side is two calls:
+//   dronline_agent_poll   first thing in dronline_step: the DLL runs the commands that came in. When a reply needs
+//                         the game state (a "state" command, or an input that is done), the state is built here,
+//                         before this frame changes anything. While the port could not be opened yet (it can be
+//                         busy for a moment after a chapter change), this tries again every second.
+//   dronline_agent_bits   in dronline_script_frame: the agent's buttons for this input frame, added to the local
+//                         player's own, so they travel like key presses (through drnet_exchange when online).
+// The state is only read. The agent runs on one machine, and anything it changed in the game there would be a
+// desync: no random calls, no instances, data structures, buffers or surfaces created, no game variable written,
+// no events run. Strings and arrays only, and globals of its own (global.dro_agent_*).
+
+function dronline_agent_init()
+{
+    var port = floor(global.dro_agent_port);
+    if (port <= 0)
+        return;
+    global.dro_agent_tries++;
+    if (!drnet_agent_start(port))
+    {
+        // Right after a chapter change the port can still belong to the last game process, or to the connection
+        // the agent had with it. dronline_agent_poll tries again every second.
+        if (global.dro_agent_tries == 1)
+            drnet_log("agent API not on yet: could not listen on 127.0.0.1:" + string(port) + ", trying again every second");
+        return;
+    }
+    // control characters and what JSON writes for them, for dronline_agent_str
+    var hex = "0123456789abcdef";
+    global.dro_agent_ctl = array_create(32, "");
+    global.dro_agent_esc = array_create(32, "");
+    for (var i = 1; i < 32; i++)
+    {
+        global.dro_agent_ctl[i] = chr(i);
+        global.dro_agent_esc[i] = "\\u00" + string_char_at(hex, (i div 16) + 1) + string_char_at(hex, (i mod 16) + 1);
+    }
+    global.dro_agent_on = true;
+    drnet_log("agent API on 127.0.0.1:" + string(port) + ((global.dro_agent_tries > 1) ? " (try " + string(global.dro_agent_tries) + ")" : ""));
+}
+
+function dronline_agent_poll()
+{
+    if (!global.dro_agent_on)
+    {
+        if (global.dro_agent_port > 0 && (global.dro_frame % 30) == 15)
+            dronline_agent_init();
+        return;
+    }
+    if (drnet_agent_frame())
+        drnet_agent_state(dronline_agent_state());
+}
+
+// The agent's action bits for this input frame: bit 0 down, 1 right, 2 up, 3 left, 4 confirm, 5 cancel, 6 menu.
+function dronline_agent_bits()
+{
+    if (!global.dro_agent_on)
+        return 0;
+    return drnet_agent_bits() & 127;
+}
+
+function dronline_agent_isnum(v)
+{
+    return is_real(v) || is_int32(v) || is_int64(v) || is_bool(v);
+}
+
+// A number as JSON; null for anything else (a missing variable, text, NaN, infinity).
+function dronline_agent_num(v)
+{
+    if (!dronline_agent_isnum(v))
+        return "null";
+    if (is_bool(v))
+        return v ? "1" : "0";
+    var s = string(v);
+    var last = ord(string_char_at(s, string_length(s)));
+    if (last < 48 || last > 57)
+        return "null";
+    return s;
+}
+
+// Text as a JSON string. string_replace_all runs inside the runner, so long text costs no GML loop.
+function dronline_agent_str(v)
+{
+    var s = string(v);
+    s = string_replace_all(s, "\\", "\\\\");
+    s = string_replace_all(s, "\"", "\\\"");
+    for (var i = 1; i < 32; i++)
+        s = string_replace_all(s, global.dro_agent_ctl[i], global.dro_agent_esc[i]);
+    return "\"" + s + "\"";
+}
+
+// A global of the game as a JSON number; null when this chapter does not have it.
+function dronline_agent_global(name)
+{
+    if (!variable_global_exists(name))
+        return "null";
+    return dronline_agent_num(variable_global_get(name));
+}
+
+// The game state as one JSON object. Keys and their meaning: docs/agent-api.md.
+function dronline_agent_state()
+{
+    var battle = "null";
+    var can_move = "null";
+    if (variable_global_exists("fighting"))
+    {
+        battle = (global.fighting == 1) ? "true" : "false";
+        if (variable_global_exists("interact"))
+            can_move = (global.interact == 0 && global.fighting != 1) ? "true" : "false";
+    }
+    var cam = view_camera[0];
+    return "{\"frame\":" + string(global.dro_frame)
+        + ",\"chapter\":" + dronline_agent_global("chapter")
+        + ",\"room\":" + dronline_agent_str(room_get_name(room))
+        + ",\"mode\":" + dronline_agent_str(global.dro_mode)
+        + ",\"player\":" + dronline_agent_num(global.dro_player)
+        + ",\"players\":" + (variable_global_exists("playeramount") ? dronline_agent_global("playeramount") : dronline_agent_num(global.dro_players))
+        + ",\"online\":" + (global.dro_net ? "true" : "false")
+        + ",\"desync\":" + dronline_agent_num(global.dro_desync)
+        + ",\"interact\":" + dronline_agent_global("interact")
+        + ",\"menuno\":" + dronline_agent_global("menuno")
+        + ",\"submenu\":" + dronline_agent_global("submenu")
+        + ",\"battle\":" + battle
+        + ",\"can_move\":" + can_move
+        + ",\"players_pos\":" + dronline_agent_players()
+        + ",\"dialogue\":" + dronline_agent_dialogue()
+        + ",\"choice\":" + dronline_agent_choice()
+        + ",\"camera\":{\"x\":" + dronline_agent_num(camera_get_view_x(cam)) + ",\"y\":" + dronline_agent_num(camera_get_view_y(cam))
+        + ",\"w\":" + dronline_agent_num(camera_get_view_width(cam)) + ",\"h\":" + dronline_agent_num(camera_get_view_height(cam)) + "}"
+        + ",\"nearby\":" + dronline_agent_nearby()
+        + "}";
+}
+
+// One entry of players_pos. `facing` is the name of the global that holds this character's direction.
+function dronline_agent_player(p, inst, facing)
+{
+    var nm = "null";
+    if (variable_instance_exists(inst, "name"))
+        nm = dronline_agent_str(variable_instance_get(inst, "name"));
+    return "{\"player\":" + string(p)
+        + ",\"object\":" + dronline_agent_str(object_get_name(inst.object_index))
+        + ",\"name\":" + nm
+        + ",\"x\":" + dronline_agent_num(inst.x)
+        + ",\"y\":" + dronline_agent_num(inst.y)
+        + ",\"facing\":" + dronline_agent_global(facing) + "}";
+}
+
+// Player 1 is obj_mainchara. In the Local Multiplayer mod, players 2 and 3 are the obj_caterpillarchara
+// instances with controls == 1 and controls == 2. A player without an instance is left out.
+function dronline_agent_players()
+{
+    var out = "";
+    var main = asset_get_index("obj_mainchara");
+    if (main >= 0 && instance_exists(main))
+        out = dronline_agent_player(1, instance_find(main, 0), "facing");
+    var cat = asset_get_index("obj_caterpillarchara");
+    if (cat >= 0)
+    {
+        var n = instance_number(cat);
+        for (var p = 2; p <= 3; p++)
+        {
+            for (var i = 0; i < n; i++)
+            {
+                var c = instance_find(cat, i);
+                if (c != noone && variable_instance_exists(c, "controls") && variable_instance_get(c, "controls") == p - 1)
+                {
+                    out += ((out == "") ? "" : ",") + dronline_agent_player(p, c, "facing" + string(p));
+                    break;
+                }
+            }
+        }
+    }
+    return "[" + out + "]";
+}
+
+// The text of a dialogue box without the writer's control codes: & is a line break, ` keeps the next character
+// as it is, / % | are dropped, ^ takes one more character with it and \ two more (\E2, \cR, \M1, ...).
+function dronline_agent_clean(s)
+{
+    var out = "";
+    var len = string_length(s);
+    var i = 1;
+    while (i <= len)
+    {
+        var c = string_char_at(s, i);
+        if (c == "&")
+            out += "\n";
+        else if (c == "`")
+        {
+            i++;
+            if (i <= len)
+                out += string_char_at(s, i);
+        }
+        else if (c == "^")
+            i++;
+        else if (c == "\\")
+            i += 2;
+        else if (c != "/" && c != "%" && c != "|")
+            out += c;
+        i++;
+    }
+    return out;
+}
+
+// Every obj_writer (a dialogue box that types its text): what it says and how far it is.
+function dronline_agent_dialogue()
+{
+    var out = "";
+    var wr = asset_get_index("obj_writer");
+    if (wr < 0)
+        return "[]";
+    var n = min(instance_number(wr), 8);
+    for (var i = 0; i < n; i++)
+    {
+        var w = instance_find(wr, i);
+        if (w == noone)
+            continue;
+        var raw = "";
+        if (variable_instance_exists(w, "mystring"))
+            raw = string(variable_instance_get(w, "mystring"));
+        var len = string_length(raw);
+        var pos = 1;
+        if (variable_instance_exists(w, "pos") && dronline_agent_isnum(variable_instance_get(w, "pos")))
+            pos = variable_instance_get(w, "pos");
+        // halt: 0 while the text is typed, anything else when the box waits for confirm
+        var waiting = variable_instance_exists(w, "halt") && dronline_agent_isnum(variable_instance_get(w, "halt"))
+            && variable_instance_get(w, "halt") != 0;
+        out += ((out == "") ? "" : ",") + "{\"raw\":" + dronline_agent_str(raw)
+            + ",\"text\":" + dronline_agent_str(dronline_agent_clean(raw))
+            + ",\"shown\":" + dronline_agent_num(clamp(pos - 1, 0, len))
+            + ",\"length\":" + string(len)
+            + ",\"waiting\":" + (waiting ? "true" : "false")
+            + ",\"x\":" + dronline_agent_num(w.x)
+            + ",\"y\":" + dronline_agent_num(w.y) + "}";
+    }
+    return "[" + out + "]";
+}
+
+// The choice on screen (obj_choicer_neo), or null. Its options are global.choicemsg[0..choicetotal].
+function dronline_agent_choice()
+{
+    var ch = asset_get_index("obj_choicer_neo");
+    if (ch < 0 || !instance_exists(ch))
+        return "null";
+    var c = instance_find(ch, 0);
+    var opts = "";
+    if (variable_global_exists("choicemsg") && variable_global_exists("choicetotal")
+        && is_array(global.choicemsg) && dronline_agent_isnum(global.choicetotal))
+    {
+        var n = min(global.choicetotal + 1, array_length(global.choicemsg), 8);
+        for (var i = 0; i < n; i++)
+            opts += ((i > 0) ? "," : "") + dronline_agent_str(string_hash_to_newline(string(global.choicemsg[i])));
+    }
+    var sel = "-1";
+    if (variable_instance_exists(c, "mychoice"))
+        sel = dronline_agent_num(variable_instance_get(c, "mychoice"));
+    var can = variable_instance_exists(c, "canchoose") && variable_instance_get(c, "canchoose") == 1;
+    return "{\"options\":[" + opts + "],\"selected\":" + sel + ",\"can_choose\":" + (can ? "true" : "false") + "}";
+}
+
+// Up to 30 instances with a sprite within 240 px of player 1, nearest first, without the players themselves.
+function dronline_agent_nearby()
+{
+    var main = asset_get_index("obj_mainchara");
+    if (main < 0 || !instance_exists(main))
+        return "[]";
+    var cat = asset_get_index("obj_caterpillarchara");
+    var me = instance_find(main, 0);
+    var px = me.x;
+    var py = me.y;
+    var names = [];
+    var xs = [];
+    var ys = [];
+    var flags = [];
+    var dist = [];
+    var n = 0;
+    with (all)
+    {
+        if (sprite_index >= 0 && object_index != main && object_index != cat)
+        {
+            var d = (x - px) * (x - px) + (y - py) * (y - py);
+            if (d <= 57600)
+            {
+                names[n] = object_get_name(object_index);
+                xs[n] = x;
+                ys[n] = y;
+                flags[n] = (solid ? 1 : 0) + (visible ? 2 : 0);
+                dist[n] = d;
+                n++;
+            }
+        }
+    }
+    var out = "";
+    var count = min(n, 30);
+    for (var k = 0; k < count; k++)
+    {
+        var best = -1;
+        for (var i = 0; i < n; i++)
+        {
+            if (dist[i] >= 0 && (best < 0 || dist[i] < dist[best]))
+                best = i;
+        }
+        out += ((k > 0) ? "," : "") + "{\"object\":" + dronline_agent_str(names[best])
+            + ",\"x\":" + dronline_agent_num(xs[best])
+            + ",\"y\":" + dronline_agent_num(ys[best])
+            + ",\"solid\":" + ((flags[best] & 1) ? "true" : "false")
+            + ",\"visible\":" + ((flags[best] & 2) ? "true" : "false") + "}";
+        dist[best] = -1;
+    }
+    return "[" + out + "]";
 }
