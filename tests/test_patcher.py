@@ -34,6 +34,13 @@ class RewriteRules(unittest.TestCase):
     def test_randomize_with_spaces(self):
         self.check("randomize( );", "dro_randomize();", 1)
 
+    def test_clock(self):
+        # obj_spin_petal's Draw: the petals' x followed the real clock, so it differed between machines
+        self.check("x = xstart + (sin(rando + (get_timer() / 500000)) * 3);",
+                   "x = xstart + (sin(rando + (dro_get_timer() / 500000)) * 3);", 1)
+        self.check("t = get_timer( );", "t = dro_get_timer();", 1)
+        self.check("t = my_get_timer() + get_timerx();", "t = my_get_timer() + get_timerx();", 0)
+
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",
                    "snd = dro_audio_play_sound_on(em, mus, 1, 0); dro_audio_play_sound(snd_x, 1, 0);", 2)
