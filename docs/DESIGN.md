@@ -125,8 +125,11 @@ why the settings live in `dronline.ini`.
 ## Automated tests (no game needed)
 
 `bash tools/verify.sh` runs all of them in one go, with the lockstep test in three variants: 0 and 30 ms with 2
-players, and 3 players. `bash tools/setup_env.sh` installs the tools with apt, dnf or pacman; cloud agents such as
-CodeRabbit use the two scripts as their setup and startup scripts.
+players, and 3 players. The lockstep test needs Wine on Linux (Git Bash on Windows runs it natively); without
+Wine, or with `SKIP_LOCKSTEP=1`, `verify.sh` skips it, says so, and still ends with OK, so read its output.
+`bash tools/setup_env.sh` installs the tools with apt, dnf or pacman, and only warns when no Wine package is
+available. Cloud agents such as CodeRabbit run `setup_env.sh` as their setup script and are told to check
+changes with `verify.sh`.
 
 They also run on every pull request and push to main (`.github/workflows/tests.yml`):
 
