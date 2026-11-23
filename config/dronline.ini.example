@@ -30,6 +30,9 @@ maxdelay=6
 ; testing only: extra latency in ms added to every packet this machine sends, and random extra 0..jitter ms
 lag=0
 jitter=0
+; testing only: 1 also writes dronline_state.txt (the instances at every checkpoint up to frame 2400, compared with
+; tools/diff_state.py after a desync) and logs every state hash after that frame
+debug=0
 ; (host/client/solo) scripted input for unattended tests: play the local player's input from this file instead of
 ; the keyboard and gamepad (Esc and F4 still work). Make it with tools/input_script.py from a text script, or
 ; record it with script_record. Replaying a recording frame for frame needs the same fixed delay=<frames>.

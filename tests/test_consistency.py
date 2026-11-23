@@ -5,6 +5,9 @@
 - Every drnet_* function the GML calls must be exported by native/drnet.c AND registered in
   patcher/utmt/add_extension.csx with the same arguments ("Extension functions must also be in the FUNC
   table"), and a DLL function with more than 4 arguments must take numbers only (docs/DESIGN.md, Pitfalls).
+- Every option name the GML passes to drnet_option must be one that drnet.c knows (it ignores the others).
+- Every dronline.ini key the GML reads must be in config/dronline.ini.example and in the settings comment at the
+  top of gml/scr_dronline.gml (CLAUDE.md).
 """
 import os
 import re
@@ -25,6 +28,7 @@ GML = read("gml", "scr_dronline.gml")
 DRNET_C = read("native", "drnet.c")
 EXT_CSX = read("patcher", "utmt", "add_extension.csx")
 PATCHER = read("patcher", "dronline_patch.py")
+INI_EXAMPLE = read("config", "dronline.ini.example")
 
 GML_FUNCS = set(re.findall(r"^function\s+(\w+)\s*\(", GML, re.M))
 
@@ -86,6 +90,25 @@ class ExtensionMatchesDll(unittest.TestCase):
                 with self.subTest(name=name):
                     self.assertTrue(all(a == "D" for a in args),
                                     "GameMaker refuses DLL functions with more than 4 arguments unless all are numbers")
+
+
+class SettingsMatch(unittest.TestCase):
+    def test_drnet_options_are_known_to_the_dll(self):
+        used = set(re.findall(r'\bdrnet_option\(\s*"(\w+)"', GML))
+        body = DRNET_C[DRNET_C.index("EXPORT double drnet_option("):]
+        body = body[:body.index("\n}\n")]
+        known = set(re.findall(r'!strcmp\(name, "(\w+)"\)', body))
+        self.assertTrue(used, "no drnet_option calls found in the GML")
+        self.assertEqual(sorted(used - known), [], "the GML sets options that drnet.c silently ignores")
+
+    def test_ini_keys_are_documented(self):
+        keys = set(re.findall(r'\bini_read_(?:string|real)\(\s*"online"\s*,\s*"(\w+)"', GML))
+        header = GML[:GML.index("function ")]
+        self.assertGreater(len(keys), 10, "the [online] keys were not found in the GML")
+        for key in sorted(keys):
+            with self.subTest(key=key):
+                self.assertRegex(INI_EXAMPLE, r"(?m)^;?\s*%s=" % key, "missing from config/dronline.ini.example")
+                self.assertRegex(header, r"(?m)^//\s+%s\s*=" % key, "missing from the settings comment in scr_dronline.gml")
 
 
 if __name__ == "__main__":
