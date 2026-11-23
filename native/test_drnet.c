@@ -34,6 +34,11 @@ int main(int argc, char **argv)
     int quit_at = argc > 8 ? atoi(argv[8]) : -1;
     int f, p;
     unsigned long long sum = 1469598103934665603ull;
+    /* Windows rounds Sleep() up to its 15.6 ms timer, so a 33 ms frame took 46.8 ms (3 ticks) on native Windows
+       (online test 6, 2026-11-23). Ask for a 1 ms timer; winmm is loaded at run time so
+       the build command needs no extra library. */
+    HMODULE mm = LoadLibraryA("winmm.dll");
+    if (mm) { typedef UINT (WINAPI *f_tbp)(UINT); f_tbp tbp = (f_tbp)GetProcAddress(mm, "timeBeginPeriod"); if (tbp) tbp(1); }
     HMODULE h = LoadLibraryA("drnet.dll");
     if (!h) { printf("cannot load drnet.dll\n"); return 1; }
     f_start start = (f_start)GetProcAddress(h, "drnet_start");
