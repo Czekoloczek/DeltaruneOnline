@@ -251,6 +251,18 @@ class Run(unittest.TestCase):
         self.assertIn("python3 -I tools/deepseek_review.py", wf)
         self.assertIn(r.COMMAND, wf)
 
+    def test_only_real_requests_share_a_concurrency_group(self):
+        """A /deepseek-review comment from someone without access must not join (and cancel) the PR's group,
+        so the group uses the job's own condition, author_association included."""
+        import re
+        with open(os.path.join(ROOT, ".github", "workflows", "deepseek-review.yml"), encoding="utf-8") as fh:
+            wf = fh.read()
+        group = re.search(r"^  group: (.+)$", wf, re.M).group(1).replace('\\"', '"')
+        job_if = re.search(r"^    if: >-\n((?:      .+\n)+)", wf, re.M).group(1)
+        job_if = " ".join(job_if.split())
+        self.assertIn(job_if, " ".join(group.split()))
+        self.assertIn("author_association", job_if)
+
 
 if __name__ == "__main__":
     unittest.main()

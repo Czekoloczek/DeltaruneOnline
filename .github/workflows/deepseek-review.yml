@@ -48,10 +48,11 @@ on:
         required: false
 
 # Każdy komentarz pod każdym PR-em i issue uruchamia ten workflow (job niżej zwykle się pomija). Grupa per PR
-# tylko dla prawdziwych żądań; inne komentarze dostają własną grupę, żeby np. komentarz bota pod tym samym PR-em
-# nie anulował trwającego przeglądu. Nowe żądanie pod tym samym PR-em anuluje poprzednie.
+# tylko dla żądań, które job naprawdę wykona (ten sam warunek co `if` joba, z author_association); inne
+# komentarze dostają własną grupę, żeby ani komentarz bota, ani `/deepseek-review` od kogoś bez uprawnień
+# nie anulował trwającego przeglądu. Nowe uprawnione żądanie pod tym samym PR-em anuluje poprzednie.
 concurrency:
-  group: "${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || startsWith(github.event.comment.body, '/deepseek-review')) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
+  group: "${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review') && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.comment.author_association))) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
   cancel-in-progress: true
 
 # Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
