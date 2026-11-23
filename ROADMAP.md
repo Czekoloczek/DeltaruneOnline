@@ -155,9 +155,19 @@ runs frame N only when it has BOTH            runs frame N only when it has BOTH
 - **Transport:** start with **TCP** (reliable and simple; GameMaker frames the messages for us). Every input packet
   already carries the last 8 frames, so moving the per-frame inputs to **UDP** later is easy if TCP causes hiccups
   on real internet connections. The save file and settings stay on TCP.
-- **Getting through home routers:** first test on one PC, then on a home network (LAN), then over a free virtual LAN
-  such as Tailscale, ZeroTier or Radmin VPN (no router setup needed). Port forwarding works too. A relay server is a
-  possible later extra.
+- **Getting through home routers:** first test on one PC, then on a home network (LAN), then between two homes over a
+  VPN. **The first testers will use WireGuard**, with the server on one tester's PC:
+  - Only the WireGuard server's PC needs one UDP port forwarded on its router (51820 by default). The game itself
+    needs no port forwarding, because inside the tunnel both PCs see each other as if they were on one home network.
+  - The game connects to the partner's **WireGuard address** (for example `10.8.0.2`), not their public internet
+    address.
+  - Windows Firewall often treats the WireGuard network as "Public" and blocks incoming connections. The PC that
+    hosts the game session needs a firewall rule that allows the game's port (or `DELTARUNE.exe`) on that network.
+  - Our packets are tiny (under 100 bytes), so WireGuard's smaller packet size limit (MTU) is no problem.
+  - Either PC can host the game session. It does not have to be the PC that runs the WireGuard server.
+
+  Other players can use any virtual LAN instead (Tailscale, ZeroTier, Radmin VPN) or plain port forwarding.
+  A relay server is a possible later extra.
 
 ---
 
@@ -272,7 +282,7 @@ Goal: two people can walk, talk and fight together in Chapter 5.
 - [ ] **S** Disable chapter changes in the prototype (Chapter 5 only).
 
 Done when: two copies on one PC play 10 minutes of Chapter 5 overworld and a normal battle without a desync; then the
-same on a home network; then over Tailscale/ZeroTier/Radmin between two homes.
+same on a home network; then over WireGuard between two homes.
 
 ### Phase 5: Determinism hardening (the biggest phase)
 
@@ -335,7 +345,8 @@ Done when: two players can go from one chapter to the next without restarting th
 
 - [ ] **M** A Windows-friendly patcher (double-click script or small window) that does the Phase 0 build on the
   player's own files.
-- [ ] **S** Install guide with screenshots, including how to set up Tailscale/ZeroTier/Radmin.
+- [ ] **S** Install guide with screenshots, including how to connect over WireGuard (and alternatives such as
+  Tailscale, ZeroTier or Radmin VPN), with the Windows Firewall rule.
 - [ ] **S** Ask Yomsman for permission before publishing, and credit the original authors.
 - [ ] **S** Version checks: if DELTARUNE or the local mod updates, the patcher refuses to run until we update the
   anchors.
@@ -361,7 +372,7 @@ Ordered from most to least likely to cause trouble.
 | 3 | **Two copies on one PC share the save folder** (`%LOCALAPPDATA%\DELTARUNE`), and only the focused window gets keyboard input. | The client uses prefixed file names (Phase 3). For one-PC tests, use a gamepad for the second copy or the replay tool. |
 | 4 | **Game or mod updates** change the code we edit. | Small anchored edits that fail loudly; checksums in the patcher. |
 | 5 | **Input delay feels sluggish** in timing-heavy parts (rhythm game, platforming). | Adjustable delay; play-test with real distances. |
-| 6 | **Home routers block connections.** | Recommend a free virtual LAN; document port forwarding. |
+| 6 | **Home routers or Windows Firewall block connections.** | WireGuard for the first testers (one forwarded UDP port on the server's router), a firewall rule for the game; document other VPNs and port forwarding. |
 | 7 | **Chapter changes drop the connection.** | Reconnect through launch parameters (Phase 6). |
 | 8 | **Community and legal:** game and mod files must not be shared. | The repo holds only our own code and scripts; players patch their own files. Ask Yomsman before release. |
 
@@ -370,7 +381,6 @@ Open questions to answer along the way:
 - When exactly does GameMaker run the async networking event within a frame? (Phase 1)
 - Does deactivating and reactivating all objects keep their order? (Phase 1)
 - How deterministic is Chapter 5 with replays alone, before any fixes? (Phase 1)
-- How will the first two testers connect: same home, VPN, or port forwarding?
 
 ---
 
