@@ -11,7 +11,8 @@ player=1
 seed=1234
 ; local gamepad index, -1 = first connected
 pad=-1
-; (host/client) number of players, host address (client), UDP port (host opens it)
+; (host/client) number of players (also sets the Local Multiplayer player count online), host address (client),
+; UDP port (host opens it)
 players=2
 host=192.168.1.10
 port=7845

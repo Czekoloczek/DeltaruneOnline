@@ -97,8 +97,11 @@ For now copy the host's save folder to the clients by hand; sending it automatic
 folder change gameplay and are easy to forget when the transfer is automated:
 
 - **`keyconfig_mod.ini`**, the Local Multiplayer settings: `SHARE_INV` (shared inventory), `EASIER_BOSS`,
-  `OLD_RHYTHM` (old rhythm game), `PREF_RALSEI`, `P2_FEATHER_INVERT` / `P3_FEATHER_INVERT`, and `PLAYER_AMOUNT`,
-  which must equal the number of players in the session. Colours and controller numbers are local only.
+  `OLD_RHYTHM` (old rhythm game), `PREF_RALSEI`, `P2_FEATHER_INVERT` / `P3_FEATHER_INVERT`. Colours and
+  controller numbers are local only. `PLAYER_AMOUNT` does not need copying: online, the player count comes from
+  `players` in `dronline.ini`. It is set when the network starts, and the patcher turns the mod's reads of
+  `PLAYER_AMOUNT` (new game, loading a save, the config menu) into `dro_ini_player_amount`, which returns the
+  session's count. F1–F3 still change it during play; they travel as input, so every machine applies them.
 - **`true_config.ini`**, which holds the language (`LANG`). English and Japanese text have different lengths, so
   dialogue would end on different frames. Without the file the game picks the language from the OS locale, so a
   Japanese Windows starts in Japanese.
@@ -142,8 +145,9 @@ Clock, audio and fps reads are the real risks; record/replay shows which ones ma
 
 **System clock.** Audio state already goes through the virtual audio clock, but clock reads do not. Of the
 52 clock entries in Chapter 5, 30 are Draw events, which only change the picture. Of the other 22, `scr_save`
-only writes the date into the save file; the remaining **21 are game logic** and need a frame-based clock
-(`frames × 1000 / 30` ms): `scr_screenspace`, `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
+only writes the date into the save file, and `scr_screenspace` only uses the clock as a cache key for the camera
+position and is called from Draw events alone. The remaining **20 are game logic** and need a frame-based clock
+(`frames × 1000 / 30` ms): `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
 `obj_cliff_petalwarp` (and its `_old` copy), `obj_dw_flowerydash`, `obj_dw_post_fountain_close`,
 `obj_flowery_runner`, `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, and the platformer objects `obj_plat_coin`,
 `obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
@@ -155,7 +159,7 @@ only writes the date into the save file; the remaining **21 are game logic** and
 |---|---|---|---|---|
 | random calls | 416 / 113 | 1951 / 524 | 2507 / 660 | 2338 / 519 |
 | system clock | 1 / 1 | 3 / 3 | 23 / 13 | 133 / 63 |
-| (clock outside Draw) | 1 | 3 | 7 | 28 |
+| (clock outside Draw) | 1 | 3 | 7 | 34 |
 | audio state | 2 / 2 | 80 / 45 | 50 / 33 | 74 / 47 |
 | fps / delta time | 2 / 2 | 3 / 3 | 14 / 7 | 21 / 13 |
 | window / display | 14 / 9 | 15 / 9 | 22 / 13 | 20 / 12 |
