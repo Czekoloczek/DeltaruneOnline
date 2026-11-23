@@ -210,6 +210,11 @@ reads in game logic.
 - **No networking at process exit.** A goodbye sent from `DllMain` (`DLL_PROCESS_DETACH`) was logged as sent
   but never arrived (Windows, 2026-11-23), so it is sent from Game End and the chapter change instead, while the
   game still runs.
+- **Same sources, different `data.win`.** `import_code.csx` compiled the files in `Directory.GetFiles` order, which is
+  the file system's own order. The import order decides where new strings, functions and variables land, so the same
+  commit, input and UTMT gave `3ea8870e…` in one work folder and `64eeeb3f…` in another (2026-11-23). The import is
+  now sorted (ordinal). The UTMT version changes the result too (`491b656` gave `96bbf214…`), so every player must
+  build with the same UTMT commit, or use one shared build.
 
 ## Playing over WireGuard
 
