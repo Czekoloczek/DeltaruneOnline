@@ -23,6 +23,16 @@ typedef double (*f_dd)(double, double);
 typedef double (*f_v)(void);
 typedef const char *(*f_s)(void);
 
+/* GetTickCount moves in 15.6 ms steps even after timeBeginPeriod(1), so frame times use the performance counter */
+static double now_ms(void)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+
 static unsigned bits_for(int player, int frame) { return (unsigned)((frame * 2654435761u + player * 40503u) >> 7) & 0x7FF; }
 
 int main(int argc, char **argv)
@@ -62,14 +72,14 @@ int main(int argc, char **argv)
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
     printf("%s: connecting...\n", status());
     if (!connect(30000)) { printf("connect timeout\n"); return 1; }
-    DWORD t0 = GetTickCount(), tblock = t0;
+    double t0 = now_ms(), tblock = t0;
     for (f = 0; f < frames; f++) {
-        DWORD tf = GetTickCount();
+        double tf = now_ms();
         if (f == quit_at) { printf("%s quits at frame %d (drnet_bye, no drnet_stop)\n", role, f); fflush(stdout); bye("test quit"); ExitProcess(0); }
         set_aux(f % 37 == 0 ? 100000 + f * 3 + me : 0);
         double all = exchange(f, bits_for(me, f));
         /* like the game (dronline_step): stop the network, which says goodbye to whoever is still there */
-        if (all == -2) { printf("%s: %s at frame %d, noticed after %lu ms\n", role, status(), f, GetTickCount() - tf); stop(); return 0; }
+        if (all == -2) { printf("%s: %s at frame %d, noticed after %.0f ms\n", role, status(), f, now_ms() - tf); stop(); return 0; }
         if (all < 0) { printf("exchange timeout at frame %d\n", f); stop(); return 1; }
         unsigned long long v = (unsigned long long)all;
         for (p = 1; p <= players; p++) v = v * 1099511628211ull + (unsigned long long)aux(p);
@@ -77,16 +87,16 @@ int main(int argc, char **argv)
         if (f % 30 == 0) hash(f, (double)(f * 7 + 1));
         if (f % 150 == 149) {
             printf("%s frame %4d sum %016llx delay %g pending %g ping %.1f wait %.1f ms frame %.1f ms\n", role, f + 1, sum,
-                   delay(), pending(), ping(), waitms(), (GetTickCount() - tblock) / 150.0);
+                   delay(), pending(), ping(), waitms(), (now_ms() - tblock) / 150.0);
             fflush(stdout);
-            tblock = GetTickCount();
+            tblock = now_ms();
         }
-        DWORD used = GetTickCount() - tf, pace = me == 1 ? 33 : 32;   /* a game frame: work + sleep to 30 fps */
+        double pace = me == 1 ? 33 : 32;   /* a game frame: work + sleep to 30 fps */
         Sleep(5);
-        used = GetTickCount() - tf;
-        if (used < pace) Sleep(pace - used);
+        double used = now_ms() - tf;
+        if (used < pace) Sleep((DWORD)(pace - used + 0.5));
     }
-    printf("%s done: %d frames in %lu ms, final sum %016llx, desync %g\n", role, frames, GetTickCount() - t0, sum, desync());
+    printf("%s done: %d frames in %.0f ms, final sum %016llx, desync %g\n", role, frames, now_ms() - t0, sum, desync());
     stop();
     return 0;
 }
