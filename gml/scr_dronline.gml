@@ -6,7 +6,7 @@
 // Config: dronline.ini in the game's save folder (%LOCALAPPDATA%\DELTARUNE).
 //   [online]
 //   mode   = off | solo | record | replay | host | client
-//   players = 2 | 3                            (host/client) number of players
+//   players = 2 | 3                            (host/client) number of players; also the Local Multiplayer player count
 //   host   = 192.168.1.10                      (client) host address
 //   port   = 7845                              (host/client) UDP port, the host must have it open
 //   delay  = auto                              (host/client) input delay in frames: auto = from the measured ping, so the game
@@ -94,6 +94,9 @@ function dronline_init()
             global.dro_on = false;
             return;
         }
+        // The session decides the Local Multiplayer player count, not each machine's keyconfig_mod.ini
+        // (the game read it at startup; later reads go through dro_ini_player_amount).
+        global.playeramount = global.dro_players;
         // Connect on the next frame: frame 0 runs without input on every machine (so they stay identical)
         // and draws the "waiting" text, then frame 1 blocks until everybody is there.
         global.dro_net = true;
@@ -511,6 +514,16 @@ function dro_randomize()
     if (!dronline_ready())
         return randomize();
     random_set_seed(global.dro_seed);
+}
+
+// Replaces the mod's ini_read_real("PLAYER_AMOUNT", ...) (patcher). Online, every machine uses the session's
+// player count from dronline.ini instead of its own keyconfig_mod.ini, so new game, loading a save and the
+// config menu agree everywhere. The game has the ini open while it calls this, so no other file is touched.
+function dro_ini_player_amount(_section, _key, _default)
+{
+    if (variable_global_exists("dro_net") && global.dro_net)
+        return global.dro_players;
+    return ini_read_real(_section, _key, _default);
 }
 
 // ---- virtual audio clock ----

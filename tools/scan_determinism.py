@@ -14,6 +14,7 @@ HAZARDS = {
     "window/display": r"\b(window_get_\w+|display_get_\w+|window_has_focus)\(",
     "file reads": r"\b(file_text_open_read|ini_open|buffer_load|file_exists)\(",
     "fps/delta": r"\b(fps|fps_real|delta_time)\b",
+    "mouse": r"\b(mouse_x|mouse_y|mouse_check_button(_pressed|_released)?|window_mouse_get_[xy])\b",
 }
 folder = sys.argv[1]
 hits = defaultdict(list)
