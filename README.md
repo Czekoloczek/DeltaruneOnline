@@ -3,7 +3,7 @@
 Online multiplayer for DELTARUNE, built on top of the [Local Multiplayer mod](https://gamebanana.com/mods/601376) by Yomsman.
 Every player runs the game on their own PC, and the games stay in sync by exchanging only controller input each frame.
 
-> **Status:** early planning. Nothing is playable yet.
+> **Status:** Chapter 5 connects and runs in lockstep between two copies on one PC (headless test: 1500 frames, no desync). Not tested yet between two PCs or with players actually playing.
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
@@ -12,26 +12,48 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 - **You build it locally.** The patcher takes files you already have: your copy of DELTARUNE and the Local Multiplayer mod
   downloaded from GameBanana. It applies the changes on your machine. No game or mod files are distributed here.
 - **Input lockstep.** All players run the full game from the same save. Each frame, every game sends the pressed buttons
-  of its local player and waits for the others (with a small input delay to hide latency). Because every game receives
-  the same input, they all compute the same result, so no game objects need to be synchronized over the network.
+  of its local player and receives everyone else's. Because every game receives the same input, they all compute the
+  same result, so no game objects need to be synchronized over the network.
+- **No input lag, no slowdown.** Each game measures its ping and sends its input just early enough that nobody ever
+  waits, so the game keeps its full 30 fps. Your own SOUL is still drawn without delay, and bullets hit it where you
+  see it: your game decides your hits and tells the others, so dodging feels like single player.
 
 ### Roadmap
 
-The full plan, with findings, phases, tasks and risks, is in [ROADMAP.md](ROADMAP.md). In short:
+1. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that returns
+   network input for remote players.
+2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
+3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
+   The virtual audio clock is done; still open are system clock reads in gameplay code (21 entries in Chapter 5)
+   and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
+4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
+5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
-0. **Tools and build pipeline**: rebuild the modded game from the player's own files with one command.
-1. **Spikes**: small experiments that answer the risky questions (networking, waiting for the partner, replays).
-2. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that can take
-   input from the network.
-3. **Session setup**: the host sends the save file, settings, language and random seed.
-4. **Lockstep loop**: GameMaker networking (`network_*`), input delay, waiting for the partner. First playable
-   prototype.
-5. **Determinism**: per-frame shared random seed, no gameplay dependence on audio playback or the system clock,
-   desync detection.
-6. **All chapters** and chapter changes.
-7. **Patcher and release**.
+6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL); next: your
+   character in the overworld and the FIGHT timing bar.
+7. **Online-only quality of life** (planned):
+   - **your own SOUL stands out in battles**: each player's heart is drawn clearly on their own screen and the
+     other players' hearts are dimmed, so several hearts are no longer confused;
+   - **shared camera that splits when players drift apart**: one camera while everyone is close, split
+     screen once a player walks too far away.
+8. **Session start**: send the host's save, mod settings (`keyconfig_mod.ini`) and language to every player
+   automatically; for now they are copied by hand.
+9. **Chapters 1 to 4**: port the patch; the hazard counts per chapter are in [docs/DESIGN.md](docs/DESIGN.md).
 
 The first prototype targets Chapter 5 and is tested with two copies of the game on one PC before going over a network.
+
+## Usage
+
+You need Python 3 and the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI.
+
+```
+python3 patcher/dronline_patch.py --utmt PATH/UndertaleModCli.dll \
+    --data "DELTARUNE/chapter5_windows/data.win" --out chapter5_online.win
+```
+
+Back up your `data.win`, then replace it with `chapter5_online.win`. Without a config file the patched game
+behaves like the original. To enable a mode, copy `config/dronline.ini.example` to the save folder as
+`dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it works and how to test determinism.
 
 ## Requirements
 
@@ -45,8 +67,8 @@ Every player needs:
 From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 
 - random number calls in about 660 code files,
-- about 37 gameplay files that depend on audio state (for example the rhythm minigame),
-- about 27 gameplay files that read the system clock (more in drawing code, where it is harmless),
+- about 36 files that depend on audio state (for example the rhythm minigame),
+- about 52 files that read the system clock,
 - input is read directly in many places of both the game and the mod,
 - every chapter is a separate `data.win`, so changes have to be redone after game and mod updates.
 
