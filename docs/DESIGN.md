@@ -263,7 +263,7 @@ notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client f
 
 `native/test_agent.py` tests the DLL side without the game, on Linux under Wine and on Windows: `test_agent.exe`
 stands in for the game, calls the DLL in the order the GML does and moves a point with the input it gets. The
-script checks the replies and their order, about 40 kinds of refused command, the limits, `clear`, a second
+script checks the replies and their order, about 45 kinds of refused command, the limits, `clear`, a second
 connection, input that ends with its connection, an HTTP request, the port closed and opened again while the
 agent still holds its old connection, replies of 300 KB, and, with a host and a client in lockstep, that `done`
 shows exactly the frames of the input, also while the automatic delay grows and shrinks.

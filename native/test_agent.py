@@ -204,11 +204,12 @@ def test_ids_and_order(port):
     check(replies[0]["frames"] == 10 and replies[1]["frames"] == 15, "'queued' tells the frames", replies[:2])
     check(pos(replies[3]["state"]) == dict(at, x=at["x"] + 10), "'done' of the first input", pos(replies[3]["state"]))
     check(pos(replies[4]["state"]) == dict(at, y=at["y"] - 5), "'done' of the second input", pos(replies[4]["state"]))
-    forms = (b"3e1", b"30.0", b"30", b"0.3E2", b"30.0000000000000000000000", b"0.000000000000000000003e22")
+    forms = (b"3e1", b"30.0", b"30", b"0.3E2", b"30.0000000000000000000000", b"0.000000000000000000003e22",
+             b"30000000000000000000e-18", b"0.03e+3")
     r.send(*[b'{"cmd":"input","steps":[{"frames":' + frames + b',"buttons":[]}]}' for frames in forms])
     replies = [r.read() for _ in range(2 * len(forms))]
     check([m["type"] for m in replies] == ["queued"] * len(forms) + ["done"] * len(forms)
-          and all(m["frames"] == 30 for m in replies[:len(forms)]), "30 frames written in six ways", replies[:len(forms)])
+          and all(m["frames"] == 30 for m in replies[:len(forms)]), "30 frames written in eight ways", replies[:len(forms)])
     r.close()
     print("  ok: ids, reply order, two inputs in a row")
 
@@ -232,6 +233,11 @@ def test_refused(port):
         (one % b'{"buttons":["right"],"frames":1.5}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":1.0000000000000001}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":3599.99999999999999999999}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":10000000000000001e-16}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":30000000000000000001e-18}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":0.36e5}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":0e5}', 5, "frames must be"),
+        (one % b'{"buttons":["right"],"frames":3e-1}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":-3}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":1e99}', 5, "frames must be"),
         (one % b'{"buttons":["right"],"frames":"30"}', 5, "frames must be"),

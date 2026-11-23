@@ -1011,25 +1011,26 @@ static int aj_number(const char **pp, char *out, int cap, int *fit)
 }
 
 /* The value of a JSON number's text when it is a whole number from 1 to `max` (also written as 30.0 or 3e1),
- * 0 otherwise. Done by hand: strtod reads "1.5" as 1 where the system's decimal mark is a comma. */
+ * 0 otherwise. Counted on the digits themselves, so every digit of a number of any length decides: strtod reads
+ * "1.5" as 1 where the system's decimal mark is a comma, and a double has no room for a seventeenth digit. */
 static int aj_whole(const char *s, int max)
 {
-    double v = 0; int scale = 0, e = 0, neg = 0;
+    const char *p = s; long point = 0, i = 0, e = 0, v = 0; int neg = 0;
     if (*s == '-') return 0;
-    for (; *s >= '0' && *s <= '9'; s++) { if (v < 1e15) v = v * 10 + (*s - '0'); else scale++; }
-    if (*s == '.') for (s++; *s >= '0' && *s <= '9'; s++) {
-        if (v < 1e15) { v = v * 10 + (*s - '0'); scale--; }
-        else if (*s != '0') return 0;       /* a digit beyond what v holds: not a whole number in range */
+    while (*p >= '0' && *p <= '9') { p++; point++; }                /* point: the digits that stand before it */
+    if (*p == '.') for (p++; *p >= '0' && *p <= '9'; p++) { }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') neg = *p++ == '-';
+        for (; *p >= '0' && *p <= '9'; p++) if (e < 1000000) e = e * 10 + (*p - '0');
+        point += neg ? -e : e;                                      /* the exponent moves the point */
     }
-    if (*s == 'e' || *s == 'E') {
-        s++;
-        if (*s == '+' || *s == '-') neg = *s++ == '-';
-        for (; *s >= '0' && *s <= '9'; s++) if (e < 1000) e = e * 10 + (*s - '0');
-        scale += neg ? -e : e;
+    for (; (*s >= '0' && *s <= '9') || *s == '.'; s++) {
+        if (*s == '.') continue;
+        if (i++ >= point) { if (*s != '0') return 0; }              /* a digit after the point: not whole */
+        else if ((v = v * 10 + (*s - '0')) > max) return 0;
     }
-    for (; scale > 0 && v <= max; scale--) v *= 10;
-    for (; scale < 0 && v > 0; scale++) { if (v != floor(v)) return 0; v /= 10; }
-    if (v < 1 || v > max || v != floor(v)) return 0;
+    for (; i < point && v > 0; i++) if ((v *= 10) > max) return 0;  /* the point stands past the last digit */
     return (int)v;
 }
 
