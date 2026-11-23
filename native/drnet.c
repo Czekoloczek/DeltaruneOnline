@@ -253,7 +253,7 @@ static void send_window(int p, int32_t last)
     if (last < 0) return;
     if (first < 0) first = 0;
     memset(&k, 0, sizeof(k));
-    fill_hdr(&k.h, T_INPUT, p);
+    fill_hdr(&k.h, gone[p] ? T_BYE : T_INPUT, p);   /* the host keeps relaying a player who left as BYE */
     k.first = (uint32_t)first; k.count = (uint8_t)(last - first + 1);
     for (i = 0; i < k.count; i++) { k.bits[i] = bits_of[p][(first + i) % RING]; k.aux[i] = aux_of[p][(first + i) % RING]; }
     if (is_host) {
