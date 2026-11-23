@@ -1,0 +1,26 @@
+; Copy to the game's save folder as dronline.ini
+;   Windows: %LOCALAPPDATA%\DELTARUNE\dronline.ini
+;   Linux/Proton: <prefix>/drive_c/users/steamuser/AppData/Local/DELTARUNE/dronline.ini
+; No file or mode=off: the patched game behaves like the unpatched one.
+[online]
+; off | solo | record | replay   (host | client come with the network layer)
+mode=record
+; local player: 1, 2 or 3
+player=1
+; shared random seed (all players must use the same one)
+seed=1234
+; local gamepad index, -1 = first connected
+pad=-1
+; (host/client) number of players, host address (client), UDP port (host opens it)
+players=2
+host=192.168.1.10
+port=7845
+; input delay in frames. auto (default): picked from the measured ping so the game never waits;
+; your own SOUL is drawn and hit without delay anyway. A number fixes it (0 = wait for the network
+; every frame, which slows the game down above roughly 30 ms ping).
+delay=auto
+; upper limit for delay=auto
+maxdelay=6
+; testing only: extra latency in ms added to every packet this machine sends, and random extra 0..jitter ms
+lag=0
+jitter=0
