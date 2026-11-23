@@ -1348,6 +1348,7 @@ function dronline_agent_state()
         + ",\"players_pos\":" + dronline_agent_players()
         + ",\"dialogue\":" + dronline_agent_dialogue()
         + ",\"choice\":" + dronline_agent_choice()
+        + ",\"save_menu\":" + dronline_agent_savemenu()
         + ",\"camera\":{\"x\":" + dronline_agent_num(camera_get_view_x(cam)) + ",\"y\":" + dronline_agent_num(camera_get_view_y(cam))
         + ",\"w\":" + dronline_agent_num(camera_get_view_width(cam)) + ",\"h\":" + dronline_agent_num(camera_get_view_height(cam)) + "}"
         + ",\"nearby\":" + dronline_agent_nearby()
@@ -1479,6 +1480,31 @@ function dronline_agent_choice()
         sel = dronline_agent_num(variable_instance_get(c, "mychoice"));
     var can = variable_instance_exists(c, "canchoose") && variable_instance_get(c, "canchoose") == 1;
     return "{\"options\":[" + opts + "],\"selected\":" + sel + ",\"can_choose\":" + (can ? "true" : "false") + "}";
+}
+
+// A variable of an instance as a JSON number; null when the instance does not have it.
+function dronline_agent_ivar(inst, name)
+{
+    if (!variable_instance_exists(inst, name))
+        return "null";
+    return dronline_agent_num(variable_instance_get(inst, name));
+}
+
+// The menu of a save point (obj_savemenu), or null: its stage and where its cursors stand, as the game's own
+// numbers. The menu draws its labels itself, so there is no text to hand over; docs/agent-api.md says what the
+// numbers mean.
+function dronline_agent_savemenu()
+{
+    var sm = asset_get_index("obj_savemenu");
+    if (sm < 0 || !instance_exists(sm))
+        return "null";
+    var m = instance_find(sm, 0);
+    return "{\"stage\":" + dronline_agent_ivar(m, "menuno")
+        + ",\"x\":" + dronline_agent_ivar(m, "xcoord")
+        + ",\"y\":" + dronline_agent_ivar(m, "ycoord")
+        + ",\"slot\":" + dronline_agent_ivar(m, "mpos")
+        + ",\"overwrite\":" + dronline_agent_ivar(m, "overwrite")
+        + ",\"overwrite_x\":" + dronline_agent_ivar(m, "overcoord") + "}";
 }
 
 // Up to 30 instances with a sprite within 240 px of player 1, nearest first, without the players themselves.
