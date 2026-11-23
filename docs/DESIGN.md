@@ -63,13 +63,15 @@ a bullet hits, so the design avoids both:
 (Rollback, the textbook answer, would need saving and restoring the complete GameMaker state every frame:
 instance ids cannot be recreated and data structure ids are plain numbers, so DELTARUNE gives no way to do it.)
 
-**Goodbye.** A game that closes (window closed, Esc held, chapter change) sends a BYE packet with its last
-inputs, from `drnet_stop` or, when the game simply exits, from the DLL's `DllMain`. The others stop waiting for
-it as soon as they run out of its input, then show "the other player left the game" and close, instead of
-freezing for the 10 s timeout. The last inputs inside the BYE let a partner that is a frame behind still reach
-the same last frame. Every machine changes chapter in the same frame, so the patcher rewrites `game_change` to
-`dro_game_change`, which marks the game as leaving: a goodbye that arrives then shows no message. A crash or a
-killed process sends nothing, so the 10 s timeout remains for those.
+**Goodbye.** A game that closes sends a BYE packet with its last inputs: from obj_time's Game End (window
+closed, Esc held, `game_end`) and from `dro_game_change` (chapter change), through `drnet_bye`, and from
+`drnet_stop`. The others stop waiting for it as soon as they run out of its input, then show "the other player
+left the game" and close, instead of freezing for the 10 s timeout. The last inputs inside the BYE let a partner
+that is a frame behind still reach the same last frame. Every machine changes chapter in the same frame, so
+`dro_game_change` also marks the game as leaving: a goodbye that arrives then shows no message. `game_restart`
+fires Game End too, but the game goes on, so `dro_game_restart` suppresses that goodbye, and a player who sends
+input again after a goodbye counts as back. A crash or a killed process sends nothing, so the 10 s timeout
+remains for those.
 
 `delay=<frames>` in `dronline.ini` fixes *D* instead; with a fixed 0 the game waits out the network every
 frame and slows down above roughly 30 ms ping.
@@ -195,6 +197,12 @@ reads in game logic.
   game fails with "Variable drnet_... not set before reading it" (`patcher/utmt/add_extension.csx`).
 - **Do not dispatch window messages while blocking.** Running GameMaker's window procedure in the
   middle of a frame deadlocked both games; peeking (`PM_NOREMOVE`) is enough to keep the window alive.
+- **A chapter change (`game_change()`) starts a new game process that inherits the old one's handles**, and the
+  old process exits without Clean Up. An inherited socket kept the host port bound inside the new process, so
+  hosting again failed. `drnet.c` therefore marks its socket as not inheritable (tested on Windows, 2026-11-23).
+- **No networking at process exit.** A goodbye sent from `DllMain` (`DLL_PROCESS_DETACH`) was logged as sent
+  but never arrived (Windows, 2026-11-23), so it is sent from Game End and the chapter change instead, while the
+  game still runs.
 - **DELTARUNE fires Game End when it restarts itself at chapter start** (`room_gms_debug_failsafe`
   → `ROOM_INITIALIZE`), so nothing in Game End may close the network socket.
 - Under Wine/Proton with two monitors, the game positions its window from the X11 monitor layout, which

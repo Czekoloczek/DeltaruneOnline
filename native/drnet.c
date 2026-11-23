@@ -13,10 +13,11 @@
  * frames themselves are what everybody agrees on. Frames filled ahead of time carry LAG_BIT, so the
  * game knows the local player sees their own SOUL ahead of the shared simulation (see scr_dronline.gml).
  *
- * Goodbye: a game that closes (window closed, Esc held, chapter change) sends BYE with its last inputs, from
- * drnet_stop or, when the game simply exits, from DllMain. The others then stop waiting for it at once
- * instead of after the 10 s timeout, but only once they run out of its input, so a partner that is a frame
- * behind still reaches the same last frame (both sides of a chapter change leave in the same frame).
+ * Goodbye: a game that closes (window closed, Esc held, chapter change) sends BYE with its last inputs, through
+ * drnet_bye (Game End and chapter change, called by scr_dronline.gml) or drnet_stop. The others then stop
+ * waiting for it at once instead of after the 10 s timeout, but only once they run out of its input, so a
+ * partner that is a frame behind still reaches the same last frame (both sides of a chapter change leave in the
+ * same frame). It must be sent while the game still runs: sent from DllMain at process exit it never arrived.
  *
  * GameMaker calling convention: cdecl, numbers are double, strings are char*.
  *
@@ -39,6 +40,7 @@
  *   drnet_hash(frame, hash)                                       -> 1 (sends a state fingerprint)
  *   drnet_desync()                                                -> first frame whose fingerprints differ, -1 none
  *   drnet_status()                                                -> short text for the screen
+ *   drnet_bye(reason)                                             -> 1 sent, 0 not connected (goodbye, socket stays open)
  *   drnet_stop()                                                  -> 1 (says goodbye to the others first)
  *   drnet_log(text)                                               -> 1 (writes to drnet.log)
  *
@@ -318,6 +320,10 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             for (q = 2; q <= players; q++)
                 if (have_peer[q] && q != k->h.player) { stamp(&r, q); send_to(&peer[q], &r, sizeof(r)); }
         }
+        if (h->type == T_INPUT && gone[k->h.player]) {    /* back after a goodbye, e.g. both restarted together */
+            gone[k->h.player] = 0;
+            logm("player %d sends input again", k->h.player);
+        }
         if (h->type == T_BYE && !gone[k->h.player]) {
             gone[k->h.player] = 1;
             logm("player %d said goodbye (last frame %d)", k->h.player, k->count ? (int)(k->first + k->count - 1) : -1);
@@ -411,8 +417,7 @@ static void update_delay(uint64_t now)
 
 /* Goodbye: my last WINDOW frames as a BYE packet, so a partner still gets the input it needs to reach my last
  * frame. Sent three times, because UDP may lose one, and straight out (not through the test latency queue).
- * Called from drnet_stop (with the lock) and from DllMain at process exit, where the network thread is already
- * gone and the lock must not be taken. */
+ * Lock held. */
 static void send_bye(void)
 {
     input_pkt k; int32_t last = next_target - 1, first = last - WINDOW + 1; int i, r, n = 0;
@@ -468,6 +473,10 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); return 0; }
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) return fail("socket");
+    /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
+       process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
+       again fails until that process ends (Phase 1 test, 2026-11-23; this fix passed the Windows test). */
+    SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0);
     ioctlsocket(sock, FIONBIO, &nb);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
@@ -650,6 +659,15 @@ EXPORT double drnet_log(const char *msg) { logm("gml: %s", msg ? msg : ""); retu
 
 EXPORT const char *drnet_status(void) { return status; }
 
+EXPORT double drnet_bye(const char *reason)
+{
+    if (sock == INVALID_SOCKET || !connected) return 0;
+    logm("goodbye: %s", reason ? reason : "");
+    lock(); send_bye(); unlock();
+    Sleep(20);   /* the game usually exits right after this: leave the network stack a moment to send */
+    return 1;
+}
+
 EXPORT double drnet_stop(void)
 {
     if (sock != INVALID_SOCKET) {
@@ -660,13 +678,4 @@ EXPORT double drnet_stop(void)
     }
     connected = 0;
     return 1;
-}
-
-/* The game usually just exits (window closed, Esc held, chapter change) without calling drnet_stop. At process
- * exit the other threads are already gone, so this only sends the goodbye, without the lock. */
-BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
-{
-    (void)inst; (void)reserved;
-    if (reason == DLL_PROCESS_DETACH && sock != INVALID_SOCKET) send_bye();
-    return TRUE;
 }

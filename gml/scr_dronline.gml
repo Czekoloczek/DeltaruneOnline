@@ -68,6 +68,7 @@ function dronline_init()
     global.dro_net = false;
     global.dro_connecting = false;
     global.dro_leaving = false;
+    global.dro_restarting = false;
     global.dro_netframe = 0;
     global.dro_desync = -1;
     global.dro_msg = "";
@@ -245,6 +246,7 @@ function dronline_step()
 {
     if (!dronline_ready())
         return;
+    global.dro_restarting = false;
     dronline_heart_unswap();
     for (var p = 0; p < 4; p++)
         global.dro_bits[p] = 0;
@@ -411,6 +413,11 @@ function dronline_shutdown()
 {
     if (!variable_global_exists("dro_mode"))
         return;
+    // Game End: the window was closed, Esc was held or game_end ran, so tell the others now, while the game still
+    // runs (a goodbye sent by the DLL at process exit never arrived). Not on game_restart: the game goes on.
+    // The socket stays open: DELTARUNE also fires Game End when it restarts itself at chapter start.
+    if (global.dro_net && !global.dro_restarting)
+        drnet_bye("game end");
     dronline_flush();
     if (global.dro_hashlog != -1)
     {
@@ -536,9 +543,21 @@ function dro_game_change(_dir, _params)
     if (variable_global_exists("dro_net") && global.dro_net)
     {
         global.dro_leaving = true;
-        drnet_log("game_change at frame " + string(global.dro_frame));
+        drnet_bye("chapter change at frame " + string(global.dro_frame));
     }
     return game_change(_dir, _params);
+}
+
+// Replaces game_restart (patcher): it fires Game End, but the game goes on, so Game End must not say goodbye.
+// Every machine restarts in the same frame; the flag is cleared again in the next dronline_step.
+function dro_game_restart()
+{
+    if (variable_global_exists("dro_net") && global.dro_net)
+    {
+        global.dro_restarting = true;
+        drnet_log("game_restart at frame " + string(global.dro_frame));
+    }
+    game_restart();
 }
 
 function dro_randomize()
