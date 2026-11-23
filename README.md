@@ -46,6 +46,15 @@ python3 patcher/dronline_patch.py --utmt PATH/UndertaleModCli.dll \
     --data "DELTARUNE/chapter5_windows/data.win" --out chapter5_online.win
 ```
 
+Or let `patcher/build.py` do the whole build from your own files. It checks that your Chapter 5 and the mod are
+exactly the versions it knows, applies the mod with xdelta3, runs `dronline_patch.py`, and prints the SHA-256 of
+the result. All players must get the same SHA-256, or their games will not stay in sync:
+
+```
+python3 patcher/build.py --game "DELTARUNE" --mod "deltarunelocalmultiplayer_v19" \
+    --utmt PATH/UndertaleModCli.dll --out build
+```
+
 Back up your `data.win`, then replace it with `chapter5_online.win`. Without a config file the patched game
 behaves like the original. To enable a mode, copy `config/dronline.ini.example` to the save folder as
 `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it works and how to test determinism.

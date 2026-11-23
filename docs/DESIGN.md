@@ -130,6 +130,11 @@ Clock, audio and fps reads are the real risks; record/replay shows which ones ma
   game fails with "Variable drnet_... not set before reading it" (`patcher/utmt/add_extension.csx`).
 - **Do not dispatch window messages while blocking.** Running GameMaker's window procedure in the
   middle of a frame deadlocked both games; peeking (`PM_NOREMOVE`) is enough to keep the window alive.
+- **A chapter change (`game_change()`) starts a new game process, and the old one exits without Clean Up.**
+  The new process inherits the old one's open handles, so a socket bound to the host port stays bound inside the
+  new process and hosting again fails until that process ends; the partner gets no goodbye and only notices a
+  timeout. Found with GameMaker's own TCP sockets in the Phase 1 spike test (2026-11-23, PR #2). `drnet.c`
+  therefore marks its socket as not inheritable. Reconnecting after a chapter change needs its own handling.
 - **DELTARUNE fires Game End when it restarts itself at chapter start** (`room_gms_debug_failsafe`
   → `ROOM_INITIALIZE`), so nothing in Game End may close the network socket.
 - Under Wine/Proton with two monitors, the game positions its window from the X11 monitor layout, which
