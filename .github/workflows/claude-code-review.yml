@@ -20,6 +20,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
+permissions: {}
+
 jobs:
   claude-review:
     # PR-y Dependabota też przechodzą: dla nich przegląd ocenia, czy podbicie można scalić.
@@ -57,8 +60,13 @@ jobs:
           DELETED: ${{ github.event.pull_request.deletions }}
         run: |
           lines=$((ADDED + DELETED))
-          files="$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only)"
+          # Lista plików z API, a nie z `gh pr diff --name-only`: przy przeniesieniu daje też starą
+          # ścieżkę (gml/a.gml -> docs/a.gml liczy się jako rdzeń), a nazw spoza ASCII nie cytuje.
+          # Commit PR-a, dla którego liczymy pliki; krok wyboru sprawdza, czy nadal jest ostatni.
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha)"
+          files="$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)')"
           core="$(grep -cE '^(gml|native|patcher)/' <<< "$files" || true)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
           if [ "$AUTHOR" = "dependabot[bot]" ]; then
             model=claude-sonnet-5-5; effort=medium; why="podbicie od Dependabota"
           elif [ "$core" -gt 0 ] && [ "$lines" -gt 400 ]; then
@@ -124,14 +132,18 @@ jobs:
       # przeglądu (to tekst od modelu czytającego PR). Uzasadnienie idzie tylko do podsumowania.
       # Haiku nigdy nie przegląda rdzenia: jeśli podagent go wybierze, a PR dotyka gml/, native/
       # albo patcher/ (liczone przez krok zapasowy, nie przez model), przegląd idzie na Sonnecie.
+      # To samo, gdy PR dostał nowy commit po policzeniu plików: wtedy CORE może być nieaktualne.
       - name: Wybór modelu i effort
         id: wybor
         env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
           OUT: ${{ steps.podagent.outputs.structured_output }}
           Z_MODEL: ${{ steps.zapas.outputs.model }}
           Z_EFFORT: ${{ steps.zapas.outputs.effort }}
           Z_WHY: ${{ steps.zapas.outputs.why }}
           CORE: ${{ steps.zapas.outputs.core }}
+          COUNTED_SHA: ${{ steps.zapas.outputs.sha }}
         run: |
           model="$(jq -r '.model // empty' <<< "$OUT" 2>/dev/null || true)"
           effort="$(jq -r '.effort // empty' <<< "$OUT" 2>/dev/null || true)"
@@ -140,9 +152,15 @@ jobs:
           case "$effort" in low|medium|high|xhigh) ;; *) effort="" ;; esac
           if [ -n "$model" ] && [ -n "$effort" ]; then
             src="podagent: $reason"
-            if [ "$model" = claude-haiku-5-5 ] && [ "${CORE:-0}" -gt 0 ]; then
-              model=claude-sonnet-5-5
-              src="$src (Haiku odrzucony: PR dotyka rdzenia, plików: $CORE)"
+            if [ "$model" = claude-haiku-5-5 ]; then
+              now="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .head.sha || true)"
+              if [ "${CORE:-0}" -gt 0 ]; then
+                model=claude-sonnet-5-5
+                src="$src (Haiku odrzucony: PR dotyka rdzenia, plików: $CORE)"
+              elif [ -z "$now" ] || [ "$now" != "$COUNTED_SHA" ]; then
+                model=claude-sonnet-5-5
+                src="$src (Haiku odrzucony: PR zmienił się po policzeniu plików)"
+              fi
             fi
           else
             model="$Z_MODEL"; effort="$Z_EFFORT"; src="zapas, podagent nie zwrócił poprawnego wyboru ($Z_WHY)"
