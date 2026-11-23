@@ -20,13 +20,17 @@ Standard library only. Environment:
 The key only ever goes into the Authorization header of the request to api.deepseek.com. It is never printed,
 and DeepSeek's error messages are redacted before they are logged.
 """
+import contextlib
 import json
 import os
 import re
+import signal
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from http.client import HTTPException
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -390,25 +394,60 @@ API_ERRORS = {
 RETRY = (429, 500, 502, 503, 504)
 
 
-def call_deepseek(key, body, http=http_json, sleep=time.sleep, attempts=3, timeout=600):
+# All DeepSeek attempts together, with their pauses, must end before the job's `timeout-minutes: 15`, so that a
+# failure still gets its comment. A long non-streaming answer keeps the socket busy (DeepSeek sends keep-alive
+# blank lines), so the socket timeout alone cannot cap an attempt; a SIGALRM deadline does.
+DEEPSEEK_BUDGET = 660
+MIN_ATTEMPT = 30                 # do not start (or retry) an attempt with less time than this left
+
+
+@contextlib.contextmanager
+def hard_deadline(seconds):
+    """Raise TimeoutError in the main thread after `seconds` (Unix); a no-op elsewhere."""
+    if not hasattr(signal, "SIGALRM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def expired(signum, frame):
+        raise TimeoutError("deadline")
+
+    old = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.01))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def call_deepseek(key, body, http=http_json, sleep=time.sleep, clock=time.monotonic, attempts=3, timeout=600,
+                  budget=DEEPSEEK_BUDGET):
     """The API's answer as a dict. Raises RuntimeError with a message fit for the PR comment."""
     headers = {"Authorization": f"Bearer {key}", "Accept": "application/json", "User-Agent": "deepseek-review"}
+    end = clock() + budget
     for attempt in range(1, attempts + 1):
+        left = end - clock()
+        if left < MIN_ATTEMPT:
+            raise RuntimeError(f"DeepSeek nie odpowiedział w {budget} s.")
         try:
-            status, data = http("POST", API_URL, headers, body, timeout)
+            with hard_deadline(left):
+                status, data = http("POST", API_URL, headers, body, min(timeout, left))
         except TimeoutError:
-            raise RuntimeError(f"DeepSeek nie odpowiedział w {timeout} s.")
-        except OSError as e:
+            raise RuntimeError(f"DeepSeek nie odpowiedział w {int(min(timeout, left))} s.")
+        except (OSError, HTTPException) as e:      # HTTPException: IncompleteRead and other broken responses
             status, data = None, f"{type(e).__name__}: {e}"
         if status == 200 and isinstance(data, dict):
             return data
+        if status == 200:                          # 200 without a JSON body: a broken transfer, never published
+            status, data = None, "odpowiedź 200 bez poprawnego JSON-a"
         detail = data.get("error", {}).get("message", "") if isinstance(data, dict) else str(data or "")
         print(f"DeepSeek, próba {attempt}: HTTP {status} {redact(detail[:500], key)}")
-        if attempt < attempts and (status is None or status in RETRY):
-            sleep(10 * attempt)
+        pause = 10 * attempt
+        if attempt < attempts and (status is None or status in RETRY) and end - clock() - pause >= MIN_ATTEMPT:
+            sleep(pause)
             continue
         if status is None:
-            raise RuntimeError("Nie udało się połączyć z api.deepseek.com.")
+            raise RuntimeError("Nie udało się połączyć z api.deepseek.com albo odpowiedź przyszła niepełna.")
         raise RuntimeError(API_ERRORS.get(status, f"DeepSeek zwrócił HTTP {status}."))
     raise RuntimeError("DeepSeek nie odpowiedział.")
 
@@ -465,7 +504,19 @@ def run(env, http=http_json, sleep=time.sleep, design_path=os.path.join(ROOT, "d
         summary("PR z forka; przegląd pominięty.")
         return 0
 
-    files = gh.files(number)
+    # The files endpoint always lists the PR's current state, so a push between the two reads would pair the
+    # new diff with the old commit. Read the PR again after the files and start over while it keeps moving.
+    for _ in range(3):
+        files = gh.files(number)
+        again = gh.pr(number)
+        if again["head"]["sha"] == pr["head"]["sha"]:
+            break
+        pr = again
+    else:
+        gh.comment(number, f"{MARKER}\nPrzegląd DeepSeek pominięty: do PR-a ciągle przychodzą nowe commity. "
+                           "Zamów przegląd jeszcze raz, gdy się uspokoi.")
+        summary("PR zmieniał się w trakcie pobierania diffu; przegląd pominięty.")
+        return 0
     diff, notes, sent, full = build_diff(files)
     try:
         with open(design_path, encoding="utf-8") as f:

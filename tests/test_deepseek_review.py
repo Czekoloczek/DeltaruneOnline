@@ -1,8 +1,9 @@
 """tools/deepseek_review.py: options from the /deepseek-review comment, diff trimming, and the whole run against
 fake GitHub and DeepSeek APIs (no network, no key)."""
-import json
+import http.client
 import os
 import sys
+import time
 import unittest
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -114,9 +115,10 @@ class Output(unittest.TestCase):
 class FakeAPI:
     """GitHub and DeepSeek in one; records every call."""
 
-    def __init__(self, fork=False, deepseek=None, files=None):
+    def __init__(self, fork=False, deepseek=None, files=None, shas=None):
         self.calls, self.comments, self.deepseek_bodies = [], [], []
         self.fork = fork
+        self.shas = list(shas or ["abcdef1234"])  # head.sha per read of the PR; the last one stays
         self.deepseek = deepseek or [(200, {"choices": [{"message": {"content": "- **ważne** `gml/a.gml:3`: x"},
                                                           "finish_reason": "stop"}],
                                              "usage": {"prompt_tokens": 1200, "completion_tokens": 300,
@@ -128,11 +130,15 @@ class FakeAPI:
         self.calls.append((method, url, headers))
         if url == r.API_URL:
             self.deepseek_bodies.append(body)
-            return self.deepseek.pop(0)
+            answer = self.deepseek.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
         if url.endswith("/pulls/7"):
             head_repo = {"full_name": "someone/fork" if self.fork else "o/r"}
+            sha = self.shas.pop(0) if len(self.shas) > 1 else self.shas[0]
             return 200, {"number": 7, "title": "T", "body": "B", "additions": 2, "deletions": 2,
-                         "user": {"login": "dev"}, "head": {"ref": "feat", "sha": "abcdef1234", "repo": head_repo},
+                         "user": {"login": "dev"}, "head": {"ref": "feat", "sha": sha, "repo": head_repo},
                          "base": {"ref": "main", "repo": {"full_name": "o/r"}}}
         if "/pulls/7/files" in url:
             return 200, self.files
@@ -232,6 +238,53 @@ class Run(unittest.TestCase):
         api = FakeAPI(deepseek=[(200, {"choices": [{"message": {"content": "  "}, "finish_reason": "length"}]})])
         self.assertEqual(self.run_review(api), 1)
         self.assertIn("myślenie", api.comments[0])
+
+    def test_broken_responses_are_retried_and_never_posted(self):
+        ok = FakeAPI().deepseek[0]
+        api = FakeAPI(deepseek=[http.client.IncompleteRead(b'{"choices": [{"message": {"content": "half'), ok])
+        self.assertEqual(self.run_review(api), 0)
+        self.assertEqual(len(api.deepseek_bodies), 2)
+        self.assertNotIn("half", api.comments[0])
+        api = FakeAPI(deepseek=[(200, '{"choices": [{"message"'), (200, "<html>oops</html>"),
+                                http.client.IncompleteRead(b"")])
+        self.assertEqual(self.run_review(api), 1)
+        self.assertEqual(len(api.deepseek_bodies), 3)
+        self.assertIn("niepełna", api.comments[0])
+        self.assertNotIn("choices", api.comments[0])
+
+    def test_attempts_stop_within_the_budget(self):
+        """Retries never start once the remaining budget is too short, so the job's timeout is not reached."""
+        now = [0.0]
+        def http_(method, url, headers, body=None, timeout=60):
+            self.assertLessEqual(now[0] + timeout, r.DEEPSEEK_BUDGET)
+            now[0] += 400                                   # a slow 503
+            return 503, {"error": {"message": "busy"}}
+        def sleep(s):
+            now[0] += s
+        with self.assertRaises(RuntimeError):
+            r.call_deepseek(KEY, {}, http=http_, sleep=sleep, clock=lambda: now[0])
+        self.assertLessEqual(now[0], r.DEEPSEEK_BUDGET + 400)   # 2 attempts, not 3
+        self.assertEqual(now[0], 400 + 10 + 400)
+
+    def test_hard_deadline(self):
+        start = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            with r.hard_deadline(0.2):
+                time.sleep(3)
+        self.assertLess(time.monotonic() - start, 2)
+        time.sleep(0.3)                                      # the timer is off again: nothing fires here
+
+    def test_new_commit_during_fetch_uses_the_new_commit(self):
+        api = FakeAPI(shas=["1111111aaa", "2222222bbb", "2222222bbb"])
+        self.assertEqual(self.run_review(api), 0)
+        self.assertIn("commit `2222222`", api.comments[0])
+        self.assertIn("commit 2222222", api.deepseek_bodies[0]["messages"][1]["content"])
+
+    def test_pr_that_keeps_moving_is_skipped(self):
+        api = FakeAPI(shas=["a1", "b2", "c3", "d4", "e5"])
+        self.assertEqual(self.run_review(api), 0)
+        self.assertIn("nowe commity", api.comments[0])
+        self.assertFalse(api.deepseek_bodies)
 
     def test_bad_pr_number(self):
         self.assertEqual(self.run_review(FakeAPI(), PR="7; rm -rf /"), 1)

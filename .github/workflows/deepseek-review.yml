@@ -78,6 +78,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' ||
        (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))
     runs-on: ubuntu-latest
+    # Skrypt kończy wszystkie próby DeepSeek w 11 minut (DEEPSEEK_BUDGET), żeby zdążyć z komentarzem o błędzie.
     timeout-minutes: 15
     permissions:
       contents: read         # checkout skryptu i docs/DESIGN.md
