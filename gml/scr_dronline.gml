@@ -30,8 +30,11 @@
 //                                              file, to replay it later with script=. An existing file is kept: the
 //                                              recording then goes to <name>.2, <name>.3, ... With DRONLINE_ROLE
 //                                              the role goes into the name: dronline_rec_host.bin
-//   agent   = 0                                (host/client/solo) TCP port for the Agent API on 127.0.0.1; 0/off.
-//                                              The agent may read state and send input. Untested draft.
+//   agent  = 0                                 (host/client/solo) TCP port of the Agent API, 0 = off: a program on this
+//                                              PC connects to 127.0.0.1:<port>, reads the game state as JSON and
+//                                              sends input for the local player (docs/agent-api.md). Never open to
+//                                              the network; any program on this PC can connect, so leave it off
+//                                              unless you use it
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -49,6 +52,7 @@ function dronline_init()
     global.dro_script_end = "idle";
     global.dro_srec_file = "";
     global.dro_agent_port = 0;
+    global.dro_agent_on = false;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -297,9 +301,9 @@ function dronline_script_frame(mine)
                 mine = 0;
         }
     }
-    // Agent input is OR'ed with the real or scripted local bits, so a person can still step in.
-    // This is before script_record, so recordings include the agent's input.
-    mine |= dronline_agent_step();
+    // The agent's buttons join the keyboard's or the script's, so a person can still step in. This comes before
+    // script_record, so a recording holds the agent's input too.
+    mine |= dronline_agent_bits();
     if (global.dro_srec != -1)
         buffer_write(global.dro_srec, buffer_u16, mine);
     return mine;
@@ -452,9 +456,6 @@ function dronline_step()
         dronline_flush();
     if ((global.dro_frame % 300) == 150)
         dro_aud_prune();
-    // Agent done replies are sent after this frame's input was applied, but before the frame counter
-    // advances, so `done.state.frame` is the frame in which the last agent step took effect.
-    dronline_agent_done_check();
     // Do not close the network here: DELTARUNE fires Game End when it restarts itself at chapter start
     // (room_gms_debug_failsafe -> ROOM_INITIALIZE), which closed the socket before the first connect.
     // The socket is closed by the system when the game really exits.
@@ -1210,573 +1211,302 @@ function dronline_heart_unswap()
     global.dro_swap = 0;
 }
 
-// ---- Agent API (untested draft) ----
-// A local TCP agent can read the game state as JSON and queue input steps. The game polls the DLL
-// once per frame, so the DLL thread never touches game state. Array/string only: no ds_* or buffer
-// creation here, so this stays safe for lockstep.
+// ---- Agent API: a program on this PC reads the game state and plays (docs/agent-api.md) ----
+// agent=<port> makes drnet.dll listen on 127.0.0.1:<port>. The DLL does the talking: it reads the agent's commands,
+// keeps the input the agent queued and writes the replies (drnet.c, "Agent API"). The game side is two calls:
+//   dronline_agent_poll   first thing in dronline_step: the DLL runs the commands that came in. When a reply needs
+//                         the game state (a "state" command, or an input that is done), the state is built here,
+//                         before this frame changes anything.
+//   dronline_agent_bits   in dronline_script_frame: the agent's buttons for this input frame, added to the local
+//                         player's own, so they travel like key presses (through drnet_exchange when online).
+// The state is only read. The agent runs on one machine, and anything it changed in the game there would be a
+// desync: no random calls, no instances, data structures, buffers or surfaces created, no game variable written,
+// no events run. Strings and arrays only, and globals of its own (global.dro_agent_*).
 
 function dronline_agent_init()
 {
-    if (global.dro_agent_port <= 0 || global.dro_agent_port > 65535)
+    var port = floor(global.dro_agent_port);
+    if (port <= 0)
         return;
-    global.dro_agent_on = false;
-    global.dro_agent_frames = [];
-    global.dro_agent_frame_pos = 0;
-    global.dro_agent_ends = [];
-    global.dro_agent_end_pos = 0;
-    global.dro_agent_done = [];
-    global.dro_agent_was_connected = false;
-    if (!drnet_agent_start(global.dro_agent_port))
+    if (!drnet_agent_start(port))
     {
-        drnet_log("agent API: could not listen on 127.0.0.1:" + string(global.dro_agent_port));
+        drnet_log("agent API off: could not listen on 127.0.0.1:" + string(port));
         return;
     }
+    // control characters and what JSON writes for them, for dronline_agent_str
+    var hex = "0123456789abcdef";
+    global.dro_agent_ctl = array_create(32, "");
+    global.dro_agent_esc = array_create(32, "");
+    for (var i = 1; i < 32; i++)
+    {
+        global.dro_agent_ctl[i] = chr(i);
+        global.dro_agent_esc[i] = "\\u00" + string_char_at(hex, (i div 16) + 1) + string_char_at(hex, (i mod 16) + 1);
+    }
     global.dro_agent_on = true;
-    drnet_log("agent API: listening on 127.0.0.1:" + string(global.dro_agent_port) + " (untested draft)");
-}
-
-function dronline_agent_clear()
-{
-    global.dro_agent_frames = [];
-    global.dro_agent_frame_pos = 0;
-    global.dro_agent_ends = [];
-    global.dro_agent_end_pos = 0;
-    global.dro_agent_done = [];
-}
-
-function dronline_agent_apply_delay()
-{
-    if (global.dro_net)
-        return max(drnet_delay(), 0);
-    return 0;
+    drnet_log("agent API on 127.0.0.1:" + string(port));
 }
 
 function dronline_agent_poll()
 {
-    if (!variable_global_exists("dro_agent_on") || !global.dro_agent_on)
-        return;
-    var was = global.dro_agent_was_connected;
-    var conn = drnet_agent_connected();
-    global.dro_agent_was_connected = conn;
-    if (was && !conn)
-    {
-        dronline_agent_clear();
-        return;
-    }
-    var n;
-    for (n = 0; n < 8; n++)
-    {
-        var cmd = drnet_agent_command();
-        if (cmd == 0)
-            break;
-        var id_is_string = drnet_agent_id_is_string();
-        var id = drnet_agent_id();
-        if (cmd == 1)
-        {
-            drnet_agent_send(dronline_agent_reply_state(id, id_is_string));
-        }
-        else if (cmd == 3)
-        {
-            dronline_agent_clear();
-            drnet_agent_send(dronline_agent_reply_cleared(id, id_is_string));
-        }
-        else if (cmd == 2)
-        {
-            dronline_agent_input_command(id, id_is_string);
-        }
-        else
-        {
-            drnet_agent_send(dronline_agent_reply_error(id, id_is_string, "unknown command"));
-        }
-    }
+    if (global.dro_agent_on && drnet_agent_frame())
+        drnet_agent_state(dronline_agent_state());
 }
 
-function dronline_agent_input_command(id, id_is_string)
+// The agent's action bits for this input frame: bit 0 down, 1 right, 2 up, 3 left, 4 confirm, 5 cancel, 6 menu.
+function dronline_agent_bits()
 {
-    var invalid = "";
-    var steps = drnet_agent_steps_count();
-    var active = array_length(global.dro_agent_ends) - global.dro_agent_end_pos;
-    var total = 0;
-    if (steps < 1 || steps > 60)
-        invalid = "at most 60 steps per command";
-    else if (active >= 10)
-        invalid = "at most 10 queued commands";
-    if (invalid == "")
-    {
-        var s;
-        for (s = 0; s < steps; s++)
-        {
-            var f = drnet_agent_step_frames(s);
-            var b = drnet_agent_step_buttons(s);
-            if (f < 1 || f > 3600)
-            {
-                invalid = "a step must be 1..3600 frames";
-                break;
-            }
-            if (b < 0 || b > 2047)
-            {
-                invalid = "a step can only use the seven action buttons";
-                break;
-            }
-            total += f;
-        }
-    }
-    if (invalid == "")
-    {
-        var s2;
-        for (s2 = 0; s2 < steps; s2++)
-        {
-            var f2 = drnet_agent_step_frames(s2);
-            var b2 = drnet_agent_step_buttons(s2);
-            var k;
-            for (k = 0; k < f2; k++)
-                array_push(global.dro_agent_frames, b2);
-        }
-        array_push(global.dro_agent_ends, [id, array_length(global.dro_agent_frames), id_is_string]);
-        drnet_agent_send(dronline_agent_reply_queued(id, id_is_string, total));
-    }
-    else
-    {
-        drnet_agent_send(dronline_agent_reply_error(id, id_is_string, invalid));
-    }
-}
-
-function dronline_agent_step()
-{
-    if (!variable_global_exists("dro_agent_on") || !global.dro_agent_on)
+    if (!global.dro_agent_on)
         return 0;
-    if (global.dro_agent_frame_pos >= array_length(global.dro_agent_frames))
-        return 0;
-    var bits = global.dro_agent_frames[global.dro_agent_frame_pos];
-    global.dro_agent_frame_pos++;
-    while (global.dro_agent_end_pos < array_length(global.dro_agent_ends))
-    {
-        var e = global.dro_agent_ends[global.dro_agent_end_pos];
-        if (e[1] > global.dro_agent_frame_pos)
-            break;
-        var done_frame = global.dro_frame + dronline_agent_apply_delay();
-        array_push(global.dro_agent_done, [e[0], done_frame, e[2]]);
-        global.dro_agent_end_pos++;
-    }
-    return bits;
+    return drnet_agent_bits() & 127;
 }
 
-function dronline_agent_done_check()
+function dronline_agent_isnum(v)
 {
-    if (!variable_global_exists("dro_agent_on") || !global.dro_agent_on)
-        return;
-    var next = [];
-    var i;
-    for (i = 0; i < array_length(global.dro_agent_done); i++)
-    {
-        var d = global.dro_agent_done[i];
-        if (global.dro_frame >= d[1])
-            drnet_agent_send(dronline_agent_reply_done(d[0], d[2]));
-        else
-            array_push(next, d);
-    }
-    global.dro_agent_done = next;
+    return is_real(v) || is_int32(v) || is_int64(v) || is_bool(v);
 }
 
-function dronline_agent_hex(n)
+// A number as JSON; null for anything else (a missing variable, text, NaN, infinity).
+function dronline_agent_num(v)
 {
-    var hx = "0123456789abcdef";
-    n = n mod 256;
-    return string_char_at(hx, (n div 16) + 1) + string_char_at(hx, (n mod 16) + 1);
-}
-
-function dronline_agent_json_string(s)
-{
-    var _s = string(s);
-    var out = "\"";
-    var i;
-    for (i = 1; i <= string_length(_s); i++)
-    {
-        var c = string_char_at(_s, i);
-        if (c == "\"") out += "\\\"";
-        else if (c == "\\") out += "\\\\";
-        else if (c == "\n") out += "\\n";
-        else if (c == "\r") out += "\\r";
-        else if (c == "\t") out += "\\t";
-        else
-        {
-            var code = ord(c);
-            if (code < 32)
-                out += "\\u00" + dronline_agent_hex(code);
-            else
-                out += c;
-        }
-    }
-    return out + "\"";
-}
-
-function dronline_agent_json_id(id, is_string)
-{
-    if (is_string)
-        return dronline_agent_json_string(id);
-    if (id == "")
+    if (!dronline_agent_isnum(v))
         return "null";
-    return string(id);
+    if (is_bool(v))
+        return v ? "1" : "0";
+    var s = string(v);
+    var last = ord(string_char_at(s, string_length(s)));
+    if (last < 48 || last > 57)
+        return "null";
+    return s;
 }
 
-function dronline_agent_reply_error(id, is_string, text)
+// Text as a JSON string. string_replace_all runs inside the runner, so long text costs no GML loop.
+function dronline_agent_str(v)
 {
-    return "{\"type\":\"error\",\"id\":" + dronline_agent_json_id(id, is_string) + ",\"error\":" + dronline_agent_json_string(text) + "}";
+    var s = string(v);
+    s = string_replace_all(s, "\\", "\\\\");
+    s = string_replace_all(s, "\"", "\\\"");
+    for (var i = 1; i < 32; i++)
+        s = string_replace_all(s, global.dro_agent_ctl[i], global.dro_agent_esc[i]);
+    return "\"" + s + "\"";
 }
 
-function dronline_agent_reply_state(id, is_string)
+// A global of the game as a JSON number; null when this chapter does not have it.
+function dronline_agent_global(name)
 {
-    return "{\"type\":\"state\",\"id\":" + dronline_agent_json_id(id, is_string) + ",\"state\":" + dronline_agent_state_json() + "}";
+    if (!variable_global_exists(name))
+        return "null";
+    return dronline_agent_num(variable_global_get(name));
 }
 
-function dronline_agent_reply_queued(id, is_string, frames)
+// The game state as one JSON object. Keys and their meaning: docs/agent-api.md.
+function dronline_agent_state()
 {
-    return "{\"type\":\"queued\",\"id\":" + dronline_agent_json_id(id, is_string) + ",\"frames\":" + string(frames) + "}";
-}
-
-function dronline_agent_reply_cleared(id, is_string)
-{
-    return "{\"type\":\"cleared\",\"id\":" + dronline_agent_json_id(id, is_string) + "}";
-}
-
-function dronline_agent_reply_done(id, is_string)
-{
-    return "{\"type\":\"done\",\"id\":" + dronline_agent_json_id(id, is_string) + ",\"state\":" + dronline_agent_state_json() + "}";
-}
-
-function dronline_agent_state_json()
-{
-    var out = "{";
-    var battle_missing = !variable_global_exists("fighting");
-    var interact_missing = !variable_global_exists("interact");
-    var battle = 0;
-    out += "\"frame\":" + string(global.dro_frame) + ",";
-    if (variable_global_exists("chapter"))
-        out += "\"chapter\":" + string(global.chapter) + ",";
-    else
-        out += "\"chapter\":null,";
-    out += "\"room\":" + dronline_agent_json_string(room_get_name(room)) + ",";
-    out += "\"mode\":" + dronline_agent_json_string(global.dro_mode) + ",";
-    out += "\"player\":" + string(global.dro_player) + ",";
-    out += "\"players\":" + string(global.dro_players) + ",";
-    if (global.dro_net)
-        out += "\"online\":true,";
-    else
-        out += "\"online\":false,";
-    if (variable_global_exists("dro_desync"))
-        out += "\"desync\":" + string(global.dro_desync) + ",";
-    else
-        out += "\"desync\":null,";
-    if (interact_missing)
-        out += "\"interact\":null,";
-    else
-        out += "\"interact\":" + string(global.interact) + ",";
-    if (variable_global_exists("menuno"))
-        out += "\"menuno\":" + string(global.menuno) + ",";
-    else
-        out += "\"menuno\":null,";
-    if (variable_global_exists("submenu"))
-        out += "\"submenu\":" + string(global.submenu) + ",";
-    else
-        out += "\"submenu\":null,";
-    if (battle_missing)
-        out += "\"battle\":null,";
-    else
+    var battle = "null";
+    var can_move = "null";
+    if (variable_global_exists("fighting"))
     {
-        battle = (global.fighting == 1);
-        if (battle)
-            out += "\"battle\":true,";
-        else
-            out += "\"battle\":false,";
+        battle = (global.fighting == 1) ? "true" : "false";
+        if (variable_global_exists("interact"))
+            can_move = (global.interact == 0 && global.fighting != 1) ? "true" : "false";
     }
-    if (interact_missing || battle_missing)
-        out += "\"can_move\":null,";
-    else
-    {
-        if (global.interact == 0 && !battle)
-            out += "\"can_move\":true,";
-        else
-            out += "\"can_move\":false,";
-    }
-    out += "\"players_pos\":";
-    out += dronline_agent_players_pos();
-    out += ",";
-    out += "\"dialogue\":";
-    out += dronline_agent_dialogue();
-    out += ",";
-    out += "\"choice\":";
-    out += dronline_agent_choice();
-    out += ",";
-    out += "\"camera\":";
-    out += dronline_agent_camera();
-    out += ",";
-    out += "\"nearby\":";
-    out += dronline_agent_nearby();
-    out += "}";
-    return out;
+    var cam = view_camera[0];
+    return "{\"frame\":" + string(global.dro_frame)
+        + ",\"chapter\":" + dronline_agent_global("chapter")
+        + ",\"room\":" + dronline_agent_str(room_get_name(room))
+        + ",\"mode\":" + dronline_agent_str(global.dro_mode)
+        + ",\"player\":" + dronline_agent_num(global.dro_player)
+        + ",\"players\":" + dronline_agent_num(global.dro_players)
+        + ",\"online\":" + (global.dro_net ? "true" : "false")
+        + ",\"desync\":" + dronline_agent_num(global.dro_desync)
+        + ",\"interact\":" + dronline_agent_global("interact")
+        + ",\"menuno\":" + dronline_agent_global("menuno")
+        + ",\"submenu\":" + dronline_agent_global("submenu")
+        + ",\"battle\":" + battle
+        + ",\"can_move\":" + can_move
+        + ",\"players_pos\":" + dronline_agent_players()
+        + ",\"dialogue\":" + dronline_agent_dialogue()
+        + ",\"choice\":" + dronline_agent_choice()
+        + ",\"camera\":{\"x\":" + dronline_agent_num(camera_get_view_x(cam)) + ",\"y\":" + dronline_agent_num(camera_get_view_y(cam))
+        + ",\"w\":" + dronline_agent_num(camera_get_view_width(cam)) + ",\"h\":" + dronline_agent_num(camera_get_view_height(cam)) + "}"
+        + ",\"nearby\":" + dronline_agent_nearby()
+        + "}";
 }
 
-function dronline_agent_players_pos()
+// One entry of players_pos. `facing` is the name of the global that holds this character's direction.
+function dronline_agent_player(p, inst, facing)
 {
-    var out = "[";
-    var first = true;
-    var obj = asset_get_index("obj_mainchara");
-    if (obj >= 0)
-    {
-        var inst = instance_find(obj, 0);
-        if (inst != noone)
-        {
-            var nm = "null";
-            if (variable_instance_exists(inst, "name"))
-                nm = dronline_agent_json_string(variable_instance_get(inst, "name"));
-            var face = "null";
-            if (variable_global_exists("facing"))
-                face = string(global.facing);
-            out += (first ? "" : ",") + "{\"player\":1,\"object\":\"obj_mainchara\",\"name\":" + nm + ",\"x\":" + string(variable_instance_get(inst, "x")) + ",\"y\":" + string(variable_instance_get(inst, "y")) + ",\"facing\":" + face + "}";
-            first = false;
-        }
-    }
+    var nm = "null";
+    if (variable_instance_exists(inst, "name"))
+        nm = dronline_agent_str(variable_instance_get(inst, "name"));
+    return "{\"player\":" + string(p)
+        + ",\"object\":" + dronline_agent_str(object_get_name(inst.object_index))
+        + ",\"name\":" + nm
+        + ",\"x\":" + dronline_agent_num(inst.x)
+        + ",\"y\":" + dronline_agent_num(inst.y)
+        + ",\"facing\":" + dronline_agent_global(facing) + "}";
+}
+
+// Player 1 is obj_mainchara. In the Local Multiplayer mod, players 2 and 3 are the obj_caterpillarchara
+// instances with controls == 1 and controls == 2. A player without an instance is left out.
+function dronline_agent_players()
+{
+    var out = "";
+    var main = asset_get_index("obj_mainchara");
+    if (main >= 0 && instance_exists(main))
+        out = dronline_agent_player(1, instance_find(main, 0), "facing");
     var cat = asset_get_index("obj_caterpillarchara");
     if (cat >= 0)
     {
         var n = instance_number(cat);
-        var i;
-        for (i = 0; i < n; i++)
+        for (var p = 2; p <= 3; p++)
         {
-            var cinst = instance_find(cat, i);
-            if (cinst == noone)
-                continue;
-            var ctrl = variable_instance_get(cinst, "controls");
-            if (ctrl == 1 || ctrl == 2)
+            for (var i = 0; i < n; i++)
             {
-                var p = ctrl + 1;
-                var nm2 = "null";
-                if (variable_instance_exists(cinst, "name"))
-                    nm2 = dronline_agent_json_string(variable_instance_get(cinst, "name"));
-                var fname = (p == 2 ? "facing2" : "facing3");
-                var face2 = "null";
-                if (variable_global_exists(fname))
-                    face2 = string(variable_global_get(fname));
-                out += (first ? "" : ",") + "{\"player\":" + string(p) + ",\"object\":" + dronline_agent_json_string(object_get_name(cinst.object_index)) + ",\"name\":" + nm2 + ",\"x\":" + string(variable_instance_get(cinst, "x")) + ",\"y\":" + string(variable_instance_get(cinst, "y")) + ",\"facing\":" + face2 + "}";
-                first = false;
+                var c = instance_find(cat, i);
+                if (c != noone && variable_instance_exists(c, "controls") && variable_instance_get(c, "controls") == p - 1)
+                {
+                    out += ((out == "") ? "" : ",") + dronline_agent_player(p, c, "facing" + string(p));
+                    break;
+                }
             }
         }
     }
-    return out + "]";
+    return "[" + out + "]";
 }
 
-function dronline_agent_clean_text(s)
+// The text of a dialogue box without the writer's control codes: & is a line break, ` keeps the next character
+// as it is, / % | are dropped, ^ takes one more character with it and \ two more (\E2, \cR, \M1, ...).
+function dronline_agent_clean(s)
 {
-    var _s = string(s);
     var out = "";
+    var len = string_length(s);
     var i = 1;
-    var len = string_length(_s);
     while (i <= len)
     {
-        var c = string_char_at(_s, i);
+        var c = string_char_at(s, i);
         if (c == "&")
-        {
             out += "\n";
-            i++;
-        }
         else if (c == "`")
         {
-            if (i < len)
-            {
-                out += string_char_at(_s, i + 1);
-                i += 2;
-            }
-            else
-            {
-                i++;
-            }
-        }
-        else if (c == "/" || c == "%" || c == "|")
-        {
             i++;
+            if (i <= len)
+                out += string_char_at(s, i);
         }
         else if (c == "^")
-        {
-            i += 2;
-        }
-        else if (c == "\\")
-        {
-            if (i + 1 <= len && string_char_at(_s, i + 1) == "n")
-            {
-                out += "\n";
-                i += 2;
-            }
-            else
-            {
-                i += 3;
-            }
-        }
-        else
-        {
-            out += c;
             i++;
-        }
+        else if (c == "\\")
+            i += 2;
+        else if (c != "/" && c != "%" && c != "|")
+            out += c;
+        i++;
     }
     return out;
 }
 
+// Every obj_writer (a dialogue box that types its text): what it says and how far it is.
 function dronline_agent_dialogue()
 {
-    var out = "[";
-    var first = true;
-    var wobj = asset_get_index("obj_writer");
-    if (wobj >= 0)
+    var out = "";
+    var wr = asset_get_index("obj_writer");
+    if (wr < 0)
+        return "[]";
+    var n = min(instance_number(wr), 8);
+    for (var i = 0; i < n; i++)
     {
-        var n = instance_number(wobj);
-        var i;
-        for (i = 0; i < n; i++)
-        {
-            var w = instance_find(wobj, i);
-            if (w == noone)
-                continue;
-            var raw = "";
-            if (variable_instance_exists(w, "mystring"))
-                raw = variable_instance_get(w, "mystring");
-            var text = dronline_agent_clean_text(raw);
-            var len = string_length(string(raw));
-            var pos = 1;
-            if (variable_instance_exists(w, "pos"))
-                pos = variable_instance_get(w, "pos");
-            var shown = max(0, min(pos - 1, len));
-            var halt = 0;
-            if (variable_instance_exists(w, "halt"))
-                halt = variable_instance_get(w, "halt");
-            out += (first ? "" : ",") + "{\"raw\":" + dronline_agent_json_string(raw) + ",\"text\":" + dronline_agent_json_string(text) + ",\"shown\":" + string(shown) + ",\"length\":" + string(len) + ",\"waiting\":";
-            if (halt != 0)
-                out += "true";
-            else
-                out += "false";
-            out += ",\"x\":" + string(variable_instance_get(w, "x")) + ",\"y\":" + string(variable_instance_get(w, "y")) + "}";
-            first = false;
-        }
+        var w = instance_find(wr, i);
+        if (w == noone)
+            continue;
+        var raw = "";
+        if (variable_instance_exists(w, "mystring"))
+            raw = string(variable_instance_get(w, "mystring"));
+        var len = string_length(raw);
+        var pos = 1;
+        if (variable_instance_exists(w, "pos") && dronline_agent_isnum(variable_instance_get(w, "pos")))
+            pos = variable_instance_get(w, "pos");
+        // halt: 0 while the text is typed, anything else when the box waits for confirm
+        var waiting = variable_instance_exists(w, "halt") && dronline_agent_isnum(variable_instance_get(w, "halt"))
+            && variable_instance_get(w, "halt") != 0;
+        out += ((out == "") ? "" : ",") + "{\"raw\":" + dronline_agent_str(raw)
+            + ",\"text\":" + dronline_agent_str(dronline_agent_clean(raw))
+            + ",\"shown\":" + dronline_agent_num(clamp(pos - 1, 0, len))
+            + ",\"length\":" + string(len)
+            + ",\"waiting\":" + (waiting ? "true" : "false")
+            + ",\"x\":" + dronline_agent_num(w.x)
+            + ",\"y\":" + dronline_agent_num(w.y) + "}";
     }
-    return out + "]";
+    return "[" + out + "]";
 }
 
+// The choice on screen (obj_choicer_neo), or null. Its options are global.choicemsg[0..choicetotal].
 function dronline_agent_choice()
 {
-    var cho = asset_get_index("obj_choicer_neo");
-    if (cho < 0)
+    var ch = asset_get_index("obj_choicer_neo");
+    if (ch < 0 || !instance_exists(ch))
         return "null";
-    var inst = instance_find(cho, 0);
-    if (inst == noone)
-        return "null";
-    var opts = "[]";
-    if (variable_global_exists("choicemsg") && variable_global_exists("choicetotal"))
+    var c = instance_find(ch, 0);
+    var opts = "";
+    if (variable_global_exists("choicemsg") && variable_global_exists("choicetotal")
+        && is_array(global.choicemsg) && dronline_agent_isnum(global.choicetotal))
     {
-        var total = global.choicetotal;
-        var arr = global.choicemsg;
-        opts = "[";
-        var i;
-        for (i = 0; i <= total; i++)
-        {
-            var msg = "";
-            if (i < array_length(arr))
-                msg = string(arr[i]);
-            var clean = string_hash_to_newline(msg);
-            if (i > 0)
-                opts += ",";
-            opts += dronline_agent_json_string(clean);
-        }
-        opts += "]";
+        var n = min(global.choicetotal + 1, array_length(global.choicemsg), 8);
+        for (var i = 0; i < n; i++)
+            opts += ((i > 0) ? "," : "") + dronline_agent_str(string_hash_to_newline(string(global.choicemsg[i])));
     }
-    var selected = -1;
-    if (variable_instance_exists(inst, "mychoice"))
-        selected = variable_instance_get(inst, "mychoice");
-    var can = 0;
-    if (variable_instance_exists(inst, "canchoose"))
-        can = variable_instance_get(inst, "canchoose");
-    var out = "{\"options\":" + opts + ",\"selected\":" + string(selected) + ",\"can_choose\":";
-    if (can == 1)
-        out += "true";
-    else
-        out += "false";
-    out += "}";
-    return out;
+    var sel = "-1";
+    if (variable_instance_exists(c, "mychoice"))
+        sel = dronline_agent_num(variable_instance_get(c, "mychoice"));
+    var can = variable_instance_exists(c, "canchoose") && variable_instance_get(c, "canchoose") == 1;
+    return "{\"options\":[" + opts + "],\"selected\":" + sel + ",\"can_choose\":" + (can ? "true" : "false") + "}";
 }
 
-function dronline_agent_camera()
-{
-    var cam = view_camera[0];
-    return "{\"x\":" + string(camera_get_view_x(cam)) + ",\"y\":" + string(camera_get_view_y(cam)) + ",\"w\":" + string(camera_get_view_width(cam)) + ",\"h\":" + string(camera_get_view_height(cam)) + "}";
-}
-
+// Up to 30 instances with a sprite within 240 px of player 1, nearest first, without the players themselves.
 function dronline_agent_nearby()
 {
-    var out = "[";
-    var px = 0;
-    var py = 0;
-    var has = false;
-    var obj = asset_get_index("obj_mainchara");
-    if (obj >= 0)
-    {
-        var inst = instance_find(obj, 0);
-        if (inst != noone)
-        {
-            px = variable_instance_get(inst, "x");
-            py = variable_instance_get(inst, "y");
-            has = true;
-        }
-    }
-    if (!has)
+    var main = asset_get_index("obj_mainchara");
+    if (main < 0 || !instance_exists(main))
         return "[]";
     var cat = asset_get_index("obj_caterpillarchara");
-    var cands = [];
+    var me = instance_find(main, 0);
+    var px = me.x;
+    var py = me.y;
+    var names = [];
+    var xs = [];
+    var ys = [];
+    var flags = [];
+    var dist = [];
+    var n = 0;
     with (all)
     {
-        if (sprite_index >= 0)
+        if (sprite_index >= 0 && object_index != main && object_index != cat)
         {
-            if (object_index != obj && (cat < 0 || object_index != cat))
+            var d = (x - px) * (x - px) + (y - py) * (y - py);
+            if (d <= 57600)
             {
-                var dx = x - px;
-                var dy = y - py;
-                if (dx * dx + dy * dy <= 240 * 240)
-                    array_push(cands, [object_get_name(object_index), x, y, solid, visible, dx * dx + dy * dy]);
+                names[n] = object_get_name(object_index);
+                xs[n] = x;
+                ys[n] = y;
+                flags[n] = (solid ? 1 : 0) + (visible ? 2 : 0);
+                dist[n] = d;
+                n++;
             }
         }
     }
-    var sorted = [];
-    var cands_len = array_length(cands);
-    while (cands_len > 0 && array_length(sorted) < 30)
+    var out = "";
+    var count = min(n, 30);
+    for (var k = 0; k < count; k++)
     {
-        var best = 0;
-        var i;
-        for (i = 1; i < cands_len; i++)
+        var best = -1;
+        for (var i = 0; i < n; i++)
         {
-            if (cands[i][5] < cands[best][5])
+            if (dist[i] >= 0 && (best < 0 || dist[i] < dist[best]))
                 best = i;
         }
-        array_push(sorted, cands[best]);
-        var rest = [];
-        for (i = 0; i < cands_len; i++)
-        {
-            if (i != best)
-                array_push(rest, cands[i]);
-        }
-        cands = rest;
-        cands_len = array_length(cands);
+        out += ((k > 0) ? "," : "") + "{\"object\":" + dronline_agent_str(names[best])
+            + ",\"x\":" + dronline_agent_num(xs[best])
+            + ",\"y\":" + dronline_agent_num(ys[best])
+            + ",\"solid\":" + ((flags[best] & 1) ? "true" : "false")
+            + ",\"visible\":" + ((flags[best] & 2) ? "true" : "false") + "}";
+        dist[best] = -1;
     }
-    for (i = 0; i < array_length(sorted); i++)
-    {
-        var c = sorted[i];
-        if (i > 0)
-            out += ",";
-        out += "{\"object\":" + dronline_agent_json_string(c[0]) + ",\"x\":" + string(c[1]) + ",\"y\":" + string(c[2]) + ",\"solid\":";
-        if (c[3])
-            out += "true";
-        else
-            out += "false";
-        out += ",\"visible\":";
-        if (c[4])
-            out += "true";
-        else
-            out += "false";
-        out += "}";
-    }
-    return out + "]";
+    return "[" + out + "]";
 }

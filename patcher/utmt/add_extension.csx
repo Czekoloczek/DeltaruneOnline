@@ -56,15 +56,11 @@ Fn("drnet_pending", D, D);
 Fn("drnet_delay", D);
 Fn("drnet_ping", D);
 Fn("drnet_wait", D);
+// Agent API (docs/agent-api.md): the protocol lives in the DLL, the game only supplies its state and takes input.
 Fn("drnet_agent_start", D, D);
-Fn("drnet_agent_connected", D);
-Fn("drnet_agent_command", D);
-Fn("drnet_agent_id", S);
-Fn("drnet_agent_id_is_string", D);
-Fn("drnet_agent_steps_count", D);
-Fn("drnet_agent_step_frames", D, D);
-Fn("drnet_agent_step_buttons", D, D);
-Fn("drnet_agent_send", D, S);
+Fn("drnet_agent_frame", D);
+Fn("drnet_agent_state", D, S);
+Fn("drnet_agent_bits", D);
 var ext = new UndertaleExtension
 {
     Name = Data.Strings.MakeString("drnet"),

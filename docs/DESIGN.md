@@ -129,9 +129,9 @@ why the settings live in `dronline.ini`.
 ## Automated tests (no game needed)
 
 `bash tools/verify.sh` runs all of them in one go, with the lockstep test in four variants: 0 and 30 ms with 2
-players, 3 players, and 3 players of whom the last joins 12 s late. The lockstep test needs Wine on Linux (Git
-Bash on Windows runs it natively); without Wine, or with `SKIP_LOCKSTEP=1`, `verify.sh` skips it, says so, and
-still ends with OK, so read its output.
+players, 3 players, and 3 players of whom the last joins 12 s late, and then the Agent API test. Both need Wine on
+Linux (Git Bash on Windows runs them natively); without Wine, or with `SKIP_LOCKSTEP=1`, `verify.sh` skips them,
+says so, and still ends with OK, so read its output.
 `bash tools/setup_env.sh` installs the tools with apt, dnf or pacman, and only warns when no Wine package is
 available. Cloud agents such as CodeRabbit run `setup_env.sh` as their setup script and are told to check
 changes with `verify.sh`.
@@ -153,6 +153,10 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
+- `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
+  in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
+  `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network
+  and checks that its limits and button names are the DLL's.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
@@ -215,29 +219,49 @@ position) never finishes. Online that is a desync as soon as the other machine's
 frame 90). A sound that fails to play online is logged in `drnet.log`, and the first 2400 frames log the parts of
 every state hash (room, instance count, summed x and y, plot), so the first differing checkpoint shows what differs.
 
-## Agent API (untested draft)
+## Agent API
 
-`agent=<port>` in `[online]` (host, client and solo) opens a separate TCP listener on **127.0.0.1 only**.
-One agent connection is accepted at a time; a second one is refused with an error. Messages are JSON objects,
-one per UTF-8 line, in both directions. An agent can:
+`agent=<port>` in `[online]` (host, client and solo) lets a program on the same PC, such as an AI agent, read the
+game state as JSON and send input for the local player. The protocol, the keys of the state and the security
+notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module.
+**Not yet tested in the game:** the GML below has never been compiled by UndertaleModTool or run.
 
-- `{"cmd":"state"}` → `{"type":"state","id":…,"state":{…}}`, built in the next game frame.
-- `{"cmd":"input","steps":[{"buttons":["right"],"frames":30}, …]}` → queued frames. The game replies with
-  `queued` immediately and with `done` plus a state object once the last frame was applied (online that is
-  `drnet_delay()` frames later). At most 60 steps, 3600 frames per step and 10 queued input commands.
-- `{"cmd":"clear"}` drops all queued input and replies `cleared`.
-- Invalid JSON, unknown commands and lines over 64 KB are answered with an `error` object.
+- **The DLL holds the protocol.** `drnet.dll` listens on 127.0.0.1 only, on a TCP socket of its own (the lockstep
+  UDP socket is open to the network on the host and does not exist in `mode=solo`). A thread accepts one
+  connection, reads the JSON lines and parses them; the input queue, the limits and the replies live in the DLL
+  too. The thread never touches the game. Keeping all of that out of the GML means it can be tested without the
+  game, and the GML that cannot be tested here stays small.
+- **The game side is three calls.** `dronline_step` starts with `drnet_agent_frame()`: the DLL runs the commands
+  that came in. When a reply needs the game state (a `state` command, or an input that is done), it returns 1 and
+  the GML hands the state over with `drnet_agent_state(json)`. `dronline_script_frame` adds
+  `drnet_agent_bits()`, the agent's buttons for this input frame, to the local player's own, before
+  `script_record` writes the frame. From there they travel like key presses: through `drnet_exchange` when online,
+  so the lockstep and the desync detection are unchanged.
+- **The state code only reads.** The agent runs on one machine, and whatever its code changed in the game there
+  would be a desync: no random calls, no instances, data structures, buffers or surfaces created (ids are plain
+  numbers and would shift), no game variable written, no events run. The JSON is built with plain string
+  functions instead of structs and `json_stringify`, to stay with what UndertaleModTool's compiler is known to
+  take. Game variables are read by name (`variable_global_exists`,
+  `variable_instance_exists`), so a chapter without one of them gives `null` instead of an error.
+- **When `done` is sent.** An input is done when the game has applied its last frame. The DLL knows the frame:
+  `assign()` notes in `sample_frame` where the sample of the last `drnet_exchange` went, up to `delay` frames
+  ahead. `done` goes out at the start of the first frame after it, so its state shows what the input did.
+- **A changing delay.** With `delay=auto`, `assign()` holds a sample back when the delay shrinks (it goes out merged
+  with the next one) and repeats it when the delay grows. Two taps one frame apart could become one press that
+  way. `assign()` notes in `sample_put` how many frames the last sample went into, and `drnet_agent_bits()` gives
+  the same buttons again after a held sample and leaves out the repeated frames of the step being played. So no
+  press is lost or merged; a step can only get a frame or two longer.
+- **Who may connect.** Any program on the PC: there is no password, which is why the key is off by default. A
+  browser is kept out by the first line: a connection that does not start with a JSON object, as every HTTP
+  request does not, gets one error and is closed. The socket is not inheritable (see "The socket must not be
+  inheritable" below), so the process of the next chapter can listen on the same port.
 
-The state JSON contains `frame`, `chapter`, `room`, `mode`, `player`, `players`, `online`, `desync`,
-`interact`, `menuno`, `submenu`, `battle`, `can_move`, `players_pos`, `dialogue`, `choice`, `camera` and
-`nearby`. It is built from plain GML strings and arrays only, with every global read guarded by
-`variable_global_exists` and missing values returned as `null`. The DLL thread never touches game state; GML
-pulls one parsed command per frame.
-
-`tools/agent_client.py` is a small standard-library client and module for the API. Its `do "<steps>"` command
-accepts the `tools/input_script.py` text syntax and converts it to input steps.
-
-**This draft has not been tested against the game yet.**
+`native/test_agent.py` tests the DLL side without the game, on Linux under Wine and on Windows: `test_agent.exe`
+stands in for the game, calls the DLL in the order the GML does and moves a point with the input it gets. The
+script checks the replies and their order, about 40 kinds of refused command, the limits, `clear`, a second
+connection, input that ends with its connection, an HTTP request, replies of 300 KB, and, with a host and a
+client in lockstep, that `done` shows exactly the frames of the input, also while the automatic delay grows and
+shrinks.
 
 ## Determinism hazards
 

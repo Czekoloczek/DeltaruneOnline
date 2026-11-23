@@ -6,7 +6,9 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > **Status:** Chapter 5 runs in lockstep between two PCs over the internet (a Windows host and a Linux client under
 > Proton, about 14 ms ping): over 5 minutes on the file menu without a desync, and when one player quits, the other
 > game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
-> A local JSON Agent API (`agent=<port>`) for AI agents is included as an untested draft; see `docs/DESIGN.md`.
+> With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
+> input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, in the game it is
+> not tested yet.
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
@@ -115,8 +117,9 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 - Update the docs your change affects in the same pull request (README, `docs/DESIGN.md`, the ini example, script
   help), and list the wiki pages that need an update in its description. The rules for AI agents and reviewers,
   this one included, are in [CLAUDE.md](CLAUDE.md).
-- Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build and the lockstep test,
-  all without game files. The lockstep test needs Wine on Linux; without it `verify.sh` skips that test and says so.
+- Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build, the lockstep test
+  and the Agent API test, all without game files. The last two need Wine on Linux; without it `verify.sh` skips
+  them and says so.
   `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
 - Claude reviews every pull request on its own. For a second opinion from DeepSeek, PolskiKapsel or Czekoloczek

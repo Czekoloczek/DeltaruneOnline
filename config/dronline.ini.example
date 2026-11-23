@@ -42,5 +42,8 @@ debug=0
 ; write the local player's input of every frame to this file (an existing file is kept, the new one gets .2, .3, ...;
 ; with DRONLINE_ROLE the role goes into the name: dronline_rec_host.bin)
 ;script_record=dronline_rec.bin
-; (host/client/solo) TCP port for the Agent API, JSON lines on 127.0.0.1 only. 0/off. Untested draft.
+; (host/client/solo) Agent API: with a port here, a program on this PC (an AI agent, tools/agent_client.py) connects
+; to 127.0.0.1:<port>, reads the game state as JSON and sends input for the local player (docs/agent-api.md).
+; 0 or no key = off. Never reachable from the network, but any program on this PC can connect, so leave it off
+; unless you use it. Not tested in the game yet.
 ;agent=8765
