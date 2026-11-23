@@ -102,6 +102,8 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 - Express changes as code and rules that the patcher applies to the user's local files, not as copies of modified
   game or mod code.
 - Say which chapter, game version and mod version a change targets.
+- Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build and the lockstep test,
+  all without game files. `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
 
 ## Credits
