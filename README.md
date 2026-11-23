@@ -27,7 +27,8 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
 3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
-   The virtual audio clock is done; still open are system clock reads in gameplay code (20 entries in Chapter 5)
+   The virtual audio clock is done, and `get_timer()` uses a frame clock online; still open are the other system
+   clock reads in gameplay code (`current_time`, about 20 entries in Chapter 5)
    and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
@@ -118,6 +119,24 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
   all without game files. The lockstep test needs Wine on Linux; without it `verify.sh` skips that test and says so.
   `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
+- Claude reviews every pull request on its own. For a second opinion from DeepSeek, PolskiKapsel or Czekoloczek
+  (the only logins on the workflow's list) comments `/deepseek-review` on the pull request (options:
+  `model=flash|pro`, `reasoning=none|low|high|max`). A manual run of DeepSeek Review with scope `repo` reviews the
+  whole repository instead, in five parts, and puts the report on the run's page (`parts`, such as `1,2`, repeats
+  only some of them). See
+  [the workflow](.github/workflows/deepseek-review.yml).
+
+## License
+
+DeltaruneOnline's own code (the patcher, the GML, `drnet.dll`, the tools and the tests) is free software under the
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later). If you give someone a changed
+version, you must also give them its source code under the same license; it does not have to be published for
+everyone. If you run a changed version that other people use over a network (for example a server they connect
+to), that version must clearly offer each of those users its source code, free of charge, from a network server,
+for example with a link to its repository (section 13 of the license).
+
+The license does not cover DELTARUNE or the Local Multiplayer mod: they keep their own licenses (the mod's is
+CC BY-NC-ND). A `data.win` you build combines this code with the game's, so never share it: everyone builds their own.
 
 ## Credits
 

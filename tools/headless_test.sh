@@ -1,7 +1,8 @@
 #!/bin/sh
 # Starts a host and a client of the patched chapter directly (no launcher) inside invisible
 # gamescope instances (--backend headless), lets them run for SECONDS, stops them and prints
-# both drnet.log files. Uses the prefixes and save copies prepared by tools/local_test.sh.
+# both drnet.log files. Uses the Proton prefixes and save copies prepared by tools/local_test.sh, so it needs
+# Proton too: GE-Proton in ~/.local/share/Steam/compatibilitytools.d, or DRONLINE_PROTON=<Proton folder>.
 #
 # Usage: tools/headless_test.sh "<game folder>" [chapter=5] [seconds=40]
 # HOST_RES / CLIENT_RES="2560x1440": screen size of each side (default 1280x960).
@@ -17,15 +18,22 @@ GAME="$1"; CH="${2:-5}"; SECS="${3:-40}"
 BASE="${XDG_CACHE_HOME:-$HOME/.cache}/dronline-test"
 STEAM_ROOT="${STEAM_ROOT:-$HOME/.local/share/Steam}"
 PROTON="${DRONLINE_PROTON:-$(ls -d "$STEAM_ROOT"/compatibilitytools.d/GE-Proton* 2>/dev/null | sort -V | tail -1)}"
+[ -x "$PROTON/proton" ] || { echo "Proton not found: install GE-Proton or set DRONLINE_PROTON=<Proton folder>"; exit 1; }
 export STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_ROOT"
 for r in host client; do
     LOG="$BASE/proton-$r/pfx/drive_c/users/steamuser/AppData/Local/DELTARUNE/drnet.log"
-    [ -d "$(dirname "$LOG")" ] || { echo "run tools/local_test.sh once first (prefix $r missing)"; exit 1; }
+    if [ ! -d "$(dirname "$LOG")" ]; then
+        if [ -d "$BASE/wine-$r" ]; then
+            echo "only a Wine prefix for $r: this script runs Proton, so run tools/local_test.sh once with Proton"
+        else
+            echo "run tools/local_test.sh once first (prefix $r missing)"
+        fi
+        exit 1
+    fi
     : > "$LOG"
     D="$(dirname "$LOG")"; rm -f "$D/dronline_state.txt"
-    grep -q '^debug=' "$D/dronline.ini" || echo 'debug=1' >> "$D/dronline.ini"
-    sed -i '/^lag=/d; /^delay=/d; /^script=/d; /^script_end=/d' "$D/dronline.ini"
-    printf 'lag=%s\ndelay=%s\n' "${LAG:-0}" "${DELAY:-auto}" >> "$D/dronline.ini"
+    sed -i '/^debug=/d; /^lag=/d; /^delay=/d; /^script=/d; /^script_end=/d' "$D/dronline.ini"
+    printf 'debug=1\nlag=%s\ndelay=%s\n' "${LAG:-0}" "${DELAY:-auto}" >> "$D/dronline.ini"
     if [ "$r" = host ]; then SCRIPT="${HOST_SCRIPT:-}"; else SCRIPT="${CLIENT_SCRIPT:-}"; fi
     if [ -n "$SCRIPT" ]; then
         case "$SCRIPT" in

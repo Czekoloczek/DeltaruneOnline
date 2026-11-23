@@ -17,7 +17,7 @@ if [ "${SKIP_LOCKSTEP:-0}" = 1 ] || [ -z "$runner" ]; then
     echo "verify: skipping the lockstep test (SKIP_LOCKSTEP=1 or no Wine)"
 else
     [ "$runner" = native ] || export WINE="$runner"
-    for args in "0 450 2" "30 450 2" "0 450 3"; do
+    for args in "0 450 2" "30 450 2" "0 450 3" "0 150 3 12"; do
         # shellcheck disable=SC2086
         sh native/test_pair.sh $args
     done

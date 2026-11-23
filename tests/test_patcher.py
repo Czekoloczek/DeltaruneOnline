@@ -34,6 +34,13 @@ class RewriteRules(unittest.TestCase):
     def test_randomize_with_spaces(self):
         self.check("randomize( );", "dro_randomize();", 1)
 
+    def test_clock(self):
+        # a made-up Draw-style line: an instance position that follows the clock must use the frame clock
+        self.check("offset = sin(phase + (get_timer() / 400000)) * 2;",
+                   "offset = sin(phase + (dro_get_timer() / 400000)) * 2;", 1)
+        self.check("t = get_timer( );", "t = dro_get_timer();", 1)
+        self.check("t = my_get_timer() + get_timerx();", "t = my_get_timer() + get_timerx();", 0)
+
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",
                    "snd = dro_audio_play_sound_on(em, mus, 1, 0); dro_audio_play_sound(snd_x, 1, 0);", 2)
@@ -85,6 +92,21 @@ def heart_texts(**over):
     return {k: v for k, v in t.items() if v is not None}
 
 
+class ExportCheck(unittest.TestCase):
+    def test_all_entries(self):
+        self.assertEqual(dp.export_check("noise\nEXPORT_OK 12345 entries, failed 0\n"), 12345)
+
+    def test_failed_entry_stops(self):
+        out = "DECOMPILE_FAIL gml_Object_obj_x_Step_0: oops\nEXPORT_OK 10 entries, failed 1\n"
+        with self.assertRaises(SystemExit) as e:
+            dp.export_check(out)
+        self.assertIn("1 of 10 code entries could not be decompiled", str(e.exception))
+
+    def test_no_report_stops(self):
+        with self.assertRaises(SystemExit):
+            dp.export_check("something else\n")
+
+
 class HeartHooks(unittest.TestCase):
     def test_applied(self):
         t = heart_texts()
@@ -105,18 +127,14 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("_dro_b.damage", gen)
         self.assertNotRegex(gen.split("function dro_heart_collide_p1")[1], r"\bother\b")
 
-    def test_draw_with_exit_is_not_wrapped(self):
-        draw = "if (!visible)\n    exit;\n" + DRAW
-        t = heart_texts(**{dp.HEART_DRAW: draw})
-        gen, note = dp.heart_hooks(t)
-        self.assertEqual(t[dp.HEART_DRAW], draw)
-        self.assertNotIn("drawn ahead", note)
-        self.assertIn("return true", gen)
+    def test_draw_with_exit_turns_the_hooks_off(self):
+        # the wrap would be skipped, and hits would land where the owner does not see the heart
+        for draw in ("if (!visible)\n    exit;\n" + DRAW, DRAW + "return;\n"):
+            with self.subTest(draw=draw):
+                self.assert_off(heart_texts(**{dp.HEART_DRAW: draw}))
 
-    def test_missing_draw_is_fine(self):
-        t = heart_texts(**{dp.HEART_DRAW: None})
-        gen, _ = dp.heart_hooks(t)
-        self.assertIn("return true", gen)
+    def test_missing_draw_turns_the_hooks_off(self):
+        self.assert_off(heart_texts(**{dp.HEART_DRAW: None}))
 
     def assert_off(self, t):
         before = copy.deepcopy(t)

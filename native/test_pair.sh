@@ -3,12 +3,15 @@
 # on this machine and checks that every side received exactly the same input (same running checksum, no
 # desync). On Linux it runs them under Wine (WINE=path picks another Wine, e.g. Proton's files/bin/wine);
 # on Windows (Git Bash) it runs them natively. Used by .github/workflows/tests.yml.
-#   sh native/test_pair.sh [lag_ms] [frames] [players]      defaults: 0 450 2
+#   sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]      defaults: 0 450 2 0
+# late_s: the last client starts that many seconds after the others, as when a friend joins late. The others must
+# wait for it (test_drnet connects with a 30 s timeout) instead of giving up after the 10 s exchange timeout.
 # Needs native/build/drnet.dll and native/build/test_drnet.exe (sh native/build.sh).
 set -eu
 lag=${1:-0}
 frames=${2:-450}
 players=${3:-2}
+late=${4:-0}
 cd "$(dirname "$0")/build"
 [ -f drnet.dll ] && [ -f test_drnet.exe ] || { echo "build first: sh native/build.sh"; exit 2; }
 case "$(uname -s)" in
@@ -31,7 +34,7 @@ if timeout --version >/dev/null 2>&1; then to="timeout 180"; else to=""; fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 
-echo "== $players players, $frames frames, ${lag} ms test latency each way, $where"
+echo "== $players players, $frames frames, ${lag} ms test latency each way$([ "$late" -gt 0 ] && echo ", the last one ${late} s late"), $where"
 start_side() {   # role player outfile
     if [ "$native" = 1 ]; then
         $to ./test_drnet.exe "$1" "$players" "$2" "$frames" "$lag" > "$3" 2>&1 &
@@ -44,6 +47,7 @@ pids=$!
 sleep 1
 p=2
 while [ "$p" -le "$players" ]; do
+    [ "$p" -eq "$players" ] && [ "$late" -gt 0 ] && sleep "$late"
     start_side client "$p" "$out/$p.txt"
     pids="$pids $!"
     p=$((p + 1))

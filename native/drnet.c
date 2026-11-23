@@ -27,6 +27,7 @@
  *   drnet_start(is_host, port, players, my_player, delay)         -> 1 ok, 0 error (delay -1 = automatic)
  *   (GameMaker refuses DLL functions with more than 4 arguments unless all are numbers.)
  *   drnet_connect(timeout_ms)                                     -> 1 all players connected, 0 timeout
+ *                                                                    (the host welcomes clients once all are in)
  *   drnet_set_aux(value)                                          -> 1 (event sent with the next input, e.g. a hit)
  *   drnet_exchange(frame, my_bits)                                -> bits of all players for `frame`
  *                                                                    (p1 | p2 << 16 | p3 << 32), -1 on timeout,
@@ -297,17 +298,23 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
 {
     const hdr_t *h = (const hdr_t *)buf;
     if (len < (int)sizeof(hdr_t) || h->magic != MAGIC) return;
-    if (h->type == T_HELLO || h->type == T_WELCOME) logm("got %s from %s:%d player %d", h->type == T_HELLO ? "HELLO" : "WELCOME", inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
+    /* a client repeats HELLO until it is welcomed: log the first one from each address */
+    if (h->type == T_WELCOME || (h->type == T_HELLO && h->player >= 1 && h->player <= MAXP &&
+        (!have_peer[h->player] || peer[h->player].sin_addr.s_addr != from->sin_addr.s_addr || peer[h->player].sin_port != from->sin_port)))
+        logm("got %s from %s:%d player %d", h->type == T_HELLO ? "HELLO" : "WELCOME", inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
     if (h->proto != PROTO) {
         static int warned;
         if (!warned++) { snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version"); logm("%s (protocol %d, mine %d)", status, h->proto, PROTO); }
         return;
     }
     if (h->type == T_HELLO && is_host && h->player >= 2 && h->player <= players) {
-        hdr_t w;
+        hdr_t w; int q, all = 1;
         peer[h->player] = *from; have_peer[h->player] = 1;
-        fill_hdr(&w, T_WELCOME, 1);
-        send_to(from, &w, sizeof(w));
+        /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
+           exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
+           HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. */
+        for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
+        if (all) { fill_hdr(&w, T_WELCOME, 1); send_to(from, &w, sizeof(w)); }
     } else if (h->type == T_WELCOME && !is_host) {
         connected = 1;
     } else if ((h->type == T_INPUT || h->type == T_BYE) && len >= (int)sizeof(input_pkt)) {
@@ -473,8 +480,8 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     is_host = host_flag != 0;
     players = (int)nplayers; me = (int)my_player;
     delay_auto = dly < 0; delay = delay_auto ? 0 : (int)dly;
-    if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); return 0; }
-    if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); return 0; }
+    if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); WSACleanup(); return 0; }
+    if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); WSACleanup(); return 0; }
     /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
        process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
        again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
@@ -484,14 +491,14 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     if (sock == INVALID_SOCKET) {               /* Windows older than 7 SP1 does not know the flag */
         logm("WSASocketW failed (WSA %d), using socket()", WSAGetLastError());
         sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-        if (sock == INVALID_SOCKET) return fail("socket");
+        if (sock == INVALID_SOCKET) { int r = fail("socket"); WSACleanup(); return r; }
         if (!SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0))
             logm("SetHandleInformation failed (%lu): a chapter change may keep port %g busy", GetLastError(), port);
     }
     ioctlsocket(sock, FIONBIO, &nb);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
-    if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; return r; }
+    if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
     for (p = 0; p <= MAXP; p++) {
         have_peer[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
         for (i = 0; i < RING; i++) frame_of[p][i] = -1;
@@ -500,14 +507,14 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     if (!is_host) {
         memset(&peer[1], 0, sizeof(peer[1])); peer[1].sin_family = AF_INET;
         peer[1].sin_port = htons((u_short)port);
-        if (inet_pton(AF_INET, host_ip, &peer[1].sin_addr) != 1) { snprintf(status, sizeof(status), "bad host address %s", host_ip); logm("%s", status); closesocket(sock); sock = INVALID_SOCKET; return 0; }
+        if (inet_pton(AF_INET, host_ip, &peer[1].sin_addr) != 1) { snprintf(status, sizeof(status), "bad host address %s", host_ip); logm("%s", status); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return 0; }
         have_peer[1] = 1;
     }
     connected = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = -1; desync_at = -1; qcount = 0;
     srand((unsigned)now_us());
     running = 1;
     thr = CreateThread(NULL, 0, net_thread, NULL, 0, NULL);
-    if (!thr) { running = 0; closesocket(sock); sock = INVALID_SOCKET; return fail("CreateThread"); }
+    if (!thr) { int r = fail("CreateThread"); running = 0; closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
     update_status();
     logm("socket ready: %s", status);
     return 1;
@@ -638,8 +645,11 @@ EXPORT double drnet_delay(void) { return delay; }
 EXPORT double drnet_ping(void)
 {
     double ms = -1; int q;
-    if (is_host) { for (q = 2; q <= players; q++) if (srtt[q] > ms) ms = srtt[q]; }
+    if (!cs_ready) return ms;
+    lock();
+    if (is_host) { for (q = 2; q <= players; q++) if (srtt[q] > 0 && srtt[q] > ms) ms = srtt[q]; }   /* 0 = not measured */
     else if (srtt[1] > 0) ms = srtt[1];
+    unlock();
     return ms;
 }
 

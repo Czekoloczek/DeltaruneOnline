@@ -18,6 +18,9 @@
 //   player = 1 | 2 | 3                         local player
 //   seed   = 1234                              shared random seed
 //   pad    = -1                                local gamepad index, -1 = first connected
+//   debug  = 0 | 1                             (testing) 1: also write dronline_state.txt (the instances at every
+//                                              checkpoint up to frame 2400, for tools/diff_state.py) and log every
+//                                              state hash after that frame
 //   script = dronline_script.bin               (host/client/solo) take the local player's input from this file instead of
 //                                              the keyboard and gamepad: one little-endian u16 of action bits per input
 //                                              frame, written by script_record or by tools/input_script.py from a text script
@@ -438,10 +441,17 @@ function dronline_step()
     dronline_apply_bits();
     if (global.dro_net && (global.dro_frame % 300) == 0 && global.dro_frame > 0)
         drnet_log("frame " + string(global.dro_frame) + " room " + room_get_name(room) + " desync " + string(global.dro_desync) + " ping " + string(round(drnet_ping())) + " delay " + string(drnet_delay()) + " wait " + string_format(drnet_wait(), 1, 1));
+    // Game End closes the hash log, and DELTARUNE fires Game End when it restarts itself at chapter start. The
+    // game goes on, but dronline_init runs only once per process, so the log is opened again here; otherwise
+    // record and replay would both stop at the chapter start and compare_hashes.py would have little to check.
+    if (global.dro_hashlog == -1 && (global.dro_mode == "record" || global.dro_mode == "replay"))
+        global.dro_hashlog = file_text_open_append((global.dro_mode == "record") ? "dronline_hash_record.txt" : "dronline_hash_replay.txt");
     if ((global.dro_hashlog != -1 || global.dro_net) && (global.dro_frame % 30) == 0)
         dronline_write_hash();
     if ((global.dro_mode == "record" || global.dro_srec != -1) && (global.dro_frame % 300) == 299)
         dronline_flush();
+    if ((global.dro_frame % 300) == 150)
+        dro_aud_prune();
     // Agent done replies are sent after this frame's input was applied, but before the frame counter
     // advances, so `done.state.frame` is the frame in which the last agent step took effect.
     dronline_agent_done_check();
@@ -693,6 +703,16 @@ function dro_randomize()
     random_set_seed(global.dro_seed);
 }
 
+// Replaces get_timer() (patcher). Online every machine must read the same clock, so it counts lockstep frames:
+// microseconds at the game's 30 fps since the session started. Offline it is the real timer. Draw events use it
+// too, and some of them move instances with it (obj_spin_petal sets x), which changes the game state.
+function dro_get_timer()
+{
+    if (!dronline_ready())
+        return get_timer();
+    return global.dro_frame * (1000000 / 30);
+}
+
 // Replaces the mod's ini_read_real("PLAYER_AMOUNT", ...) (patcher). Online, every machine uses the session's
 // player count from dronline.ini instead of its own keyconfig_mod.ini, so new game, loading a save and the
 // config menu agree everywhere. The game has the ini open while it calls this, so no other file is touched.
@@ -744,6 +764,29 @@ function dro_aud_playing(e)
     if (e[5])
         return true;
     return dro_aud_pos(e) < e[6];
+}
+
+// A sound that ends on its own stays in the table, and the game plays thousands of short sounds (text, steps).
+// Every 300 frames, the ones that ended more than 10 s ago go, so that a query by sound asset neither scans
+// them nor answers with one of them. It runs in the same frame on every machine and looks only at the
+// shared clock, never at what the audio device did.
+function dro_aud_prune()
+{
+    if (!variable_global_exists("dro_aud"))
+        return;
+    var m = global.dro_aud;
+    var spd = game_get_speed(gamespeed_fps);
+    var old = [];
+    var k = ds_map_find_first(m);
+    while (!is_undefined(k))
+    {
+        var e = ds_map_find_value(m, k);
+        if (!e[5] && e[3] < 0 && e[2] + ((global.dro_frame - e[1]) / spd) * e[7] >= max(e[6], 0) + 10)
+            array_push(old, k);
+        k = ds_map_find_next(m, k);
+    }
+    for (var i = 0; i < array_length(old); i++)
+        ds_map_delete(m, old[i]);
 }
 
 // keys of the entries matching an instance id, or of every instance of a sound asset
@@ -1087,11 +1130,12 @@ function dronline_predict(p)
             px = ceil(px * 0.5);
             py = ceil(py * 0.5);
         }
+        // steps of 1 towards 0, as obj_heart does: with a fractional speed (stealth) the last step goes to 0
         while (px != 0 && place_meeting(hx + px, hy, global.dro_obj_solid))
-            px -= sign(px);
+            px = (abs(px) < 1) ? 0 : px - sign(px);
         hx += px;
         while (py != 0 && place_meeting(hx, hy + py, global.dro_obj_solid))
-            py -= sign(py);
+            py = (abs(py) < 1) ? 0 : py - sign(py);
         hy += py;
     }
     global.dro_px = hx;
