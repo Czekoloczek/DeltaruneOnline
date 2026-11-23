@@ -4,6 +4,7 @@
 # Supports apt (Debian, Ubuntu), dnf (Fedora) and pacman (Arch, CachyOS).
 # Game and mod files are never needed or downloaded: they must not leave the players' own PCs.
 set -eu
+HERE="$(cd "$(dirname "$0")" && pwd)"
 SUDO=""
 [ "$(id -u)" -eq 0 ] || SUDO="sudo"
 # Wine goes in a separate step everywhere: without it only the lockstep test is skipped, so a missing Wine package
@@ -13,6 +14,9 @@ if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         python3 gcc-mingw-w64-x86-64 xdelta3
+    # Ubuntu 22.04 and Debian 11 ship Python 3.10 or older as python3; add the separate python3.11 there.
+    sh "$HERE/find_python.sh" >/dev/null 2>&1 \
+        || $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3.11
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends wine wine64 \
         || echo "$NO_WINE"
 elif command -v dnf >/dev/null 2>&1; then
@@ -25,7 +29,8 @@ else
     echo "Unknown package manager. Install by hand: Python 3.11+, x86_64-w64-mingw32-gcc, Wine, xdelta3."
     exit 1
 fi
-python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11 or newer is needed, found " + sys.version'
+PY="$(sh "$HERE/find_python.sh")"
+echo "Python for the checks: $("$PY" --version) ($PY)"
 x86_64-w64-mingw32-gcc --version | head -1
 command -v wine >/dev/null 2>&1 || command -v wine64 >/dev/null 2>&1 || echo "Wine missing: tools/verify.sh will skip the lockstep test"
 echo "setup_env: OK"

@@ -6,7 +6,8 @@
 # SKIP_LOCKSTEP=1 skips step 3. The game itself needs the players' own files and is tested on their PCs.
 set -eu
 cd "$(dirname "$0")/.."
-python3 -m unittest discover -s tests -v
+PY="$(sh tools/find_python.sh)"
+"$PY" -m unittest discover -s tests -v
 sh native/build.sh
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) runner=native ;;
