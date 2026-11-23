@@ -3,7 +3,9 @@
 Online multiplayer for DELTARUNE, built on top of the [Local Multiplayer mod](https://gamebanana.com/mods/601376) by Yomsman.
 Every player runs the game on their own PC, and the games stay in sync by exchanging only controller input each frame.
 
-> **Status:** Chapter 5 connects and runs in lockstep between two copies on one PC (headless test: 1500 frames, no desync). Not tested yet between two PCs or with players actually playing.
+> **Status:** Chapter 5 runs in lockstep between two PCs over the internet (a Windows host and a Linux client under
+> Proton, about 14 ms ping): over 5 minutes on the file menu without a desync, and when one player quits, the other
+> game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
@@ -44,8 +46,12 @@ The first prototype targets Chapter 5 and is tested with two copies of the game 
 
 ## Usage
 
+Step-by-step guides for players (building, playing with a friend, settings, troubleshooting) are in the
+[wiki](https://github.com/Czekoloczek/DeltaruneOnline/wiki).
+
 You need Python 3.11 or newer, the [UndertaleModTool](https://github.com/UnderminersTeam/UndertaleModTool) CLI
-and `drnet.dll` (build it with `native/build.sh`).
+and `drnet.dll` (build it with `native/build.sh`). Every player must build UndertaleModTool from the same commit:
+a different version writes a different `data.win` from the same files.
 
 The easiest way is `patcher/build.py`. It checks that your Chapter 5 and the mod are exactly the versions it knows,
 applies the mod with xdelta3, runs `dronline_patch.py`, and writes `data.win` and `drnet.dll` to
@@ -72,7 +78,7 @@ To install, whichever way you built it:
    `chapter5_online.win` if you ran the patcher yourself) and `drnet.dll` next to it.
 3. Compare the SHA-256 of that `data.win` with every other player's. `build.py` prints it; otherwise run
    `certutil -hashfile data.win SHA256` on Windows or `sha256sum data.win`. If they differ, the games will not stay
-   in sync.
+   in sync: check that everyone started from the same game, mod and UndertaleModTool versions.
 
 Without a config file the patched game behaves like the original. To enable a mode, copy
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it

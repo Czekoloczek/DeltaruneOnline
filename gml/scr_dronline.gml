@@ -18,6 +18,15 @@
 //   player = 1 | 2 | 3                         local player
 //   seed   = 1234                              shared random seed
 //   pad    = -1                                local gamepad index, -1 = first connected
+//   script = dronline_script.bin               (host/client/solo) take the local player's input from this file instead of
+//                                              the keyboard and gamepad: one little-endian u16 of action bits per input
+//                                              frame, written by script_record or by tools/input_script.py from a text script
+//   script_end = idle | keys | quit            what follows the last scripted frame: no input (default), the real
+//                                              keyboard and gamepad, or closing the game (the others see "left")
+//   script_record = dronline_rec.bin           (host/client/solo) write the local player's input of every frame to this
+//                                              file, to replay it later with script=. An existing file is kept: the
+//                                              recording then goes to <name>.2, <name>.3, ... With DRONLINE_ROLE
+//                                              the role goes into the name: dronline_rec_host.bin
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -31,13 +40,20 @@ function dronline_init()
     global.dro_maxdelay = 6;
     global.dro_lag = 0;
     global.dro_jitter = 0;
+    global.dro_script_file = "";
+    global.dro_script_end = "idle";
+    global.dro_srec_file = "";
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
     global.dro_ini = "dronline.ini";
+    global.dro_role = "";
     var role = environment_get_variable("DRONLINE_ROLE");
     if (role != "" && string_length(role) <= 16 && string_lettersdigits(role) == role && file_exists("dronline_" + role + ".ini"))
+    {
         global.dro_ini = "dronline_" + role + ".ini";
+        global.dro_role = role;
+    }
     if (file_exists(global.dro_ini))
     {
         ini_open(global.dro_ini);
@@ -54,6 +70,9 @@ function dronline_init()
         global.dro_lag = ini_read_real("online", "lag", 0);
         global.dro_jitter = ini_read_real("online", "jitter", 0);
         global.dro_debug = ini_read_real("online", "debug", 0);
+        global.dro_script_file = ini_read_string("online", "script", "");
+        global.dro_script_end = string_lower(ini_read_string("online", "script_end", "idle"));
+        global.dro_srec_file = ini_read_string("online", "script_record", "");
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -64,6 +83,10 @@ function dronline_init()
     global.dro_bits = array_create(4, 0);
     global.dro_rec = -1;
     global.dro_rec_pos = 0;
+    global.dro_script = -1;
+    global.dro_script_pos = 0;
+    global.dro_script_done = false;
+    global.dro_srec = -1;
     global.dro_hashlog = -1;
     global.dro_net = false;
     global.dro_connecting = false;
@@ -125,6 +148,8 @@ function dronline_init()
         global.dro_msg = drnet_status();
     }
     random_set_seed(global.dro_seed);
+    if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
+        dronline_script_init();
     if (global.dro_mode == "record")
     {
         global.dro_rec = buffer_create(4096, buffer_grow, 1);
@@ -191,6 +216,81 @@ function dronline_local_bits()
         if (ax < -0.5) b |= 8;
     }
     return b;
+}
+
+// ---- scripted input: unattended tests, and replaying a recorded session ----
+// A script covers one launch of the chapter: after a chapter change the new game process starts it again.
+function dronline_script_init()
+{
+    if (global.dro_script_file != "")
+    {
+        if (file_exists(global.dro_script_file))
+        {
+            global.dro_script = buffer_load(global.dro_script_file);
+            drnet_log("script " + global.dro_script_file + ": " + string(buffer_get_size(global.dro_script) div 2) + " frames, then " + global.dro_script_end);
+        }
+        else
+        {
+            drnet_log("script " + global.dro_script_file + " not found, using the keyboard and gamepad");
+        }
+    }
+    if (global.dro_srec_file != "")
+    {
+        // Copies on one PC (DRONLINE_ROLE) share the save folder and can start at the same moment, before either
+        // has written its file: the role goes into the name (dronline_rec.bin -> dronline_rec_host.bin), so two
+        // copies never pick the same file.
+        if (global.dro_role != "")
+        {
+            var ext = filename_ext(global.dro_srec_file);
+            global.dro_srec_file = string_copy(global.dro_srec_file, 1, string_length(global.dro_srec_file) - string_length(ext))
+                + "_" + global.dro_role + ext;
+        }
+        var f = global.dro_srec_file;
+        for (var n = 2; file_exists(f) && n < 100; n++)
+            f = global.dro_srec_file + "." + string(n);
+        if (file_exists(f))
+        {
+            drnet_log("not recording: " + global.dro_srec_file + " and .2 to .99 all exist, and recordings are never overwritten");
+        }
+        else
+        {
+            global.dro_srec_file = f;
+            global.dro_srec = buffer_create(4096, buffer_grow, 1);
+            drnet_log("recording the local input to " + f);
+        }
+    }
+    if ((global.dro_script != -1 || global.dro_srec != -1) && (global.dro_mode == "host" || global.dro_mode == "client") && global.dro_delay < 0)
+        drnet_log("delay=auto: a script replays a recording frame for frame only with the same delay, so set delay=<frames> on every machine");
+}
+
+// The local input of one frame (devices or replay bits in, the bits to use out). Called once per input frame:
+// every frame offline, every exchanged frame online.
+function dronline_script_frame(mine)
+{
+    if (global.dro_script != -1)
+    {
+        if (global.dro_script_pos + 2 <= buffer_get_size(global.dro_script))
+        {
+            mine = buffer_peek(global.dro_script, global.dro_script_pos, buffer_u16) & 2047;
+            global.dro_script_pos += 2;
+        }
+        else
+        {
+            if (!global.dro_script_done)
+            {
+                global.dro_script_done = true;
+                drnet_log("script finished at frame " + string(global.dro_frame) + " (input frame " + string(global.dro_script_pos div 2) + "), then " + global.dro_script_end);
+                // the normal way out: Game End says goodbye (dronline_shutdown), so the others see "left" at once
+                if (global.dro_script_end == "quit")
+                    game_end();
+            }
+            if (global.dro_script_end != "keys")
+                mine = 0;
+        }
+    }
+    if (global.dro_srec != -1)
+        buffer_write(global.dro_srec, buffer_u16, mine);
+    return mine;
 }
 
 // P1 slots 7..9 are the alternate confirm/cancel/menu keys
@@ -264,6 +364,8 @@ function dronline_step()
     {
         buffer_write(global.dro_rec, buffer_u16, mine);
     }
+    if (!global.dro_net)
+        mine = dronline_script_frame(mine);
     global.dro_bits[global.dro_player] = mine;
     if (global.dro_net && global.dro_frame < 5)
         drnet_log("step frame " + string(global.dro_frame) + " room " + room_get_name(room) + " connecting " + string(global.dro_connecting));
@@ -290,6 +392,8 @@ function dronline_step()
     }
     if (global.dro_net && !global.dro_connecting)
     {
+        // the script and the recording count exchanged frames, so waiting for the others does not use them up
+        mine = dronline_script_frame(mine);
         drnet_set_aux(dronline_detect_hit());
         var _all = drnet_exchange(global.dro_netframe, mine);
         global.dro_netframe++;
@@ -326,7 +430,7 @@ function dronline_step()
         drnet_log("frame " + string(global.dro_frame) + " room " + room_get_name(room) + " desync " + string(global.dro_desync) + " ping " + string(round(drnet_ping())) + " delay " + string(drnet_delay()) + " wait " + string_format(drnet_wait(), 1, 1));
     if ((global.dro_hashlog != -1 || global.dro_net) && (global.dro_frame % 30) == 0)
         dronline_write_hash();
-    if (global.dro_mode == "record" && (global.dro_frame % 300) == 299)
+    if ((global.dro_mode == "record" || global.dro_srec != -1) && (global.dro_frame % 300) == 299)
         dronline_flush();
     // Do not close the network here: DELTARUNE fires Game End when it restarts itself at chapter start
     // (room_gms_debug_failsafe -> ROOM_INITIALIZE), which closed the socket before the first connect.
@@ -356,6 +460,9 @@ function dronline_write_hash()
     {
         var h = abs(((global.dro_frame * 31 + room * 131 + instance_count * 7 + sx * 3 + sy + plot * 17) mod 2147483647));
         drnet_hash(global.dro_frame, h);
+        // the parts, so that after a desync the two logs show at once whether the room, the instances or a position differ
+        if (global.dro_debug || global.dro_frame <= 2400)
+            drnet_log("hash frame " + string(global.dro_frame) + " " + room_get_name(room) + " instances " + string(instance_count) + " x " + string(sx) + " y " + string(sy) + " plot " + string(plot) + " = " + string(h));
         if (global.dro_desync < 0)
             global.dro_desync = drnet_desync();
     }
@@ -393,6 +500,10 @@ function dronline_draw()
     var txt = "ONLINE " + global.dro_mode;
     if (global.dro_net)
         txt += " | " + drnet_status();
+    if (global.dro_script != -1)
+        txt += global.dro_script_done ? " | script done" : (" | script " + string(global.dro_script_pos div 2) + "/" + string(buffer_get_size(global.dro_script) div 2));
+    if (global.dro_srec != -1)
+        txt += " | REC";
     if (global.dro_desync >= 0)
         txt += " | DESYNC at frame " + string(global.dro_desync);
     draw_set_alpha(0.8);
@@ -407,6 +518,8 @@ function dronline_flush()
 {
     if (global.dro_mode == "record" && global.dro_rec != -1)
         buffer_save_ext(global.dro_rec, "dronline_input.bin", 0, buffer_tell(global.dro_rec));
+    if (global.dro_srec != -1)
+        buffer_save_ext(global.dro_srec, global.dro_srec_file, 0, buffer_tell(global.dro_srec));
 }
 
 function dronline_shutdown()
@@ -642,7 +755,10 @@ function dro_audio_play_sound(snd, prio, loop, gain = 1, offset = 0, pitch = 1)
 {
     var sid = audio_play_sound(snd, prio, loop, gain, offset, pitch);
     if (dronline_ready())
+    {
         dro_aud_add(sid, snd, loop, offset, pitch);
+        dro_aud_failed(sid, snd);
+    }
     return sid;
 }
 
@@ -650,8 +766,21 @@ function dro_audio_play_sound_on(emitter, snd, loop, prio, gain = 1, offset = 0,
 {
     var sid = audio_play_sound_on(emitter, snd, loop, prio, gain, offset, pitch);
     if (dronline_ready())
+    {
         dro_aud_add(sid, snd, loop, offset, pitch);
+        dro_aud_failed(sid, snd);
+    }
     return sid;
+}
+
+// A sound that does not play on this machine (no audio device, or a music file not found) returns -1, and game
+// logic that waits for its position stops here but not elsewhere. Example: Chapter 5 started without the
+// "launcher" parameter looks for its music in chapter5_windows/mus/, and the logo never finishes.
+function dro_aud_failed(sid, snd)
+{
+    if (sid >= 0 || !global.dro_net)
+        return;
+    drnet_log("sound " + string(snd) + " did not play at frame " + string(global.dro_frame) + " (audio device, or music file not found), so the game can go out of sync");
 }
 
 function dro_audio_get_pos(idx)
