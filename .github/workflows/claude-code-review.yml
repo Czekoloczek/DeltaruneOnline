@@ -188,8 +188,18 @@ jobs:
             odpala Game End przy restarcie na starcie rozdziału, więc Game End nie może
             zamykać gniazda; `begin` to słowo kluczowe GML.
 
-            Testów automatycznych w repo nie ma, a gry nie da się tu uruchomić: oceniasz
-            z lektury kodu i docs/DESIGN.md.
+            Gry nie da się tu uruchomić. Możesz za to uruchomić testy bez gry (reguły patchera,
+            haki serca, spójność GML z drnet.c i add_extension.csx):
+
+                python3 -m unittest discover -s tests -v
+
+            Test lockstepu drnet.dll pod Wine robi workflow „Testy”; jego wynik odczytasz
+            narzędziami CI. Wnioski poparte uruchomieniem są warte więcej niż z samej lektury.
+            Diff PR-a bierz z `gh pr diff` (checkout nie ma historii main).
+
+            Uwagi do konkretnych linii dodawaj jako komentarze inline
+            (mcp__github_inline_comment__create_inline_comment), a podsumowanie w komentarzu
+            śledzącym.
 
             AUTOR PR-a: ${{ github.event.pull_request.user.login }}.
 
@@ -223,6 +233,15 @@ jobs:
           # na tokeny i reguła nie powstaje. --allowedTools sumuje się z zestawem trybu tag,
           # więc Read/Grep/Glob nie trzeba tu wymieniać. gh release list/view służą ocenie
           # PR-ów Dependabota (informacje o wydaniach podbijanych akcji).
+          #
+          # Skill(code-review:code-review): bez tego prompt zaczynający się od
+          # /code-review:code-review nie uruchamia wtyczki (przeglądy PR 3 i 4 to zgłosiły).
+          # Komentarze inline idą przez serwer MCP akcji (mcp__github_inline_comment__...),
+          # który akcja włącza tylko, gdy narzędzie jest na liście. Celowo NIE `Bash(gh api:*)`,
+          # o które prosił przegląd: pozwala na niemal każde wywołanie API z tokenem przebiegu.
+          # `python3 -m unittest` wykonuje kod testów z PR-a; to hartowanie przeciw
+          # wstrzyknięciu, nie sandbox.
+          #
           # Model i effort z kroku „Wybór modelu i effort” (podagent albo zapas), zawsze z listy
           # dozwolonych wartości, a nie domyślne akcji, które zmieniałyby się z jej wersją.
-          claude_args: '--model ${{ steps.wybor.outputs.model }} --effort ${{ steps.wybor.outputs.effort }} --allowedTools "Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh release list:*),Bash(gh release view:*)"'
+          claude_args: '--model ${{ steps.wybor.outputs.model }} --effort ${{ steps.wybor.outputs.effort }} --allowedTools "Skill(code-review:code-review),mcp__github_inline_comment__create_inline_comment,Bash(gh issue list:*),Bash(gh issue create:*),Bash(gh issue view:*),Bash(gh search issues:*),Bash(gh label list:*),Bash(gh label create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh release list:*),Bash(gh release view:*),Bash(python3 -m unittest:*)"'

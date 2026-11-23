@@ -5,4 +5,6 @@ set -e
 cd "$(dirname "$0")"
 mkdir -p build
 x86_64-w64-mingw32-gcc -O2 -shared -static-libgcc -Wall -o build/drnet.dll drnet.c -lws2_32 -luser32
-echo "built native/build/drnet.dll"
+# Standalone lockstep test (native/test_pair.sh runs it under Wine)
+x86_64-w64-mingw32-gcc -O2 -static-libgcc -Wall -o build/test_drnet.exe test_drnet.c
+echo "built native/build/drnet.dll and native/build/test_drnet.exe"
