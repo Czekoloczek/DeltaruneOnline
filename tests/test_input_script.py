@@ -98,6 +98,13 @@ class MatchesTheGame(unittest.TestCase):
     def test_game_reads_and_records_u16(self):
         self.assertIn("buffer_write(global.dro_srec, buffer_u16, mine);", GML)
 
+    def test_recording_name_has_the_role(self):
+        # copies on one PC share the save folder: the role keeps their recordings apart (dronline_rec_host.bin)
+        self.assertIn("global.dro_role = role;", GML)
+        self.assertIn('+ "_" + global.dro_role + ext;', GML)
+        init = GML[GML.index("function dronline_script_init()"):]
+        self.assertLess(init.index("global.dro_role + ext"), init.index("var f = global.dro_srec_file;"))
+
     def test_ini_keys_are_documented(self):
         with open(os.path.join(ROOT, "config", "dronline.ini.example"), encoding="utf-8") as f:
             example = f.read()

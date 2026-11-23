@@ -25,7 +25,8 @@
 //                                              keyboard and gamepad, or closing the game (the others see "left")
 //   script_record = dronline_rec.bin           (host/client/solo) write the local player's input of every frame to this
 //                                              file, to replay it later with script=. An existing file is kept: the
-//                                              recording then goes to <name>.2, <name>.3, ...
+//                                              recording then goes to <name>.2, <name>.3, ... With DRONLINE_ROLE
+//                                              the role goes into the name: dronline_rec_host.bin
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -46,9 +47,13 @@ function dronline_init()
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
     global.dro_ini = "dronline.ini";
+    global.dro_role = "";
     var role = environment_get_variable("DRONLINE_ROLE");
     if (role != "" && string_length(role) <= 16 && string_lettersdigits(role) == role && file_exists("dronline_" + role + ".ini"))
+    {
         global.dro_ini = "dronline_" + role + ".ini";
+        global.dro_role = role;
+    }
     if (file_exists(global.dro_ini))
     {
         ini_open(global.dro_ini);
@@ -231,6 +236,15 @@ function dronline_script_init()
     }
     if (global.dro_srec_file != "")
     {
+        // Copies on one PC (DRONLINE_ROLE) share the save folder and can start at the same moment, before either
+        // has written its file: the role goes into the name (dronline_rec.bin -> dronline_rec_host.bin), so two
+        // copies never pick the same file.
+        if (global.dro_role != "")
+        {
+            var ext = filename_ext(global.dro_srec_file);
+            global.dro_srec_file = string_copy(global.dro_srec_file, 1, string_length(global.dro_srec_file) - string_length(ext))
+                + "_" + global.dro_role + ext;
+        }
         var f = global.dro_srec_file;
         for (var n = 2; file_exists(f) && n < 100; n++)
             f = global.dro_srec_file + "." + string(n);

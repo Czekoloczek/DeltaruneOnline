@@ -36,5 +36,6 @@ jitter=0
 ;script=dronline_script.bin
 ; after the last scripted frame: idle (no input), keys (keyboard and gamepad again) or quit (close the game)
 ;script_end=idle
-; write the local player's input of every frame to this file (an existing file is kept, the new one gets .2, .3, ...)
+; write the local player's input of every frame to this file (an existing file is kept, the new one gets .2, .3, ...;
+; with DRONLINE_ROLE the role goes into the name: dronline_rec_host.bin)
 ;script_record=dronline_rec.bin

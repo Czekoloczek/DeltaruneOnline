@@ -178,6 +178,8 @@ keyboard and gamepad. Settings in `[online]` (host, client and solo):
   closing the game the normal way, so the others see "the other player left the game" (test G4 without a person).
 - `script_record=<file>`: writes the input this machine used, frame by frame, in the same format. An existing file
   is kept and the recording goes to `<file>.2`, `<file>.3`, ..., because a chapter change starts a new game process.
+  Copies on one PC share the save folder, so with `DRONLINE_ROLE` the role goes into the name
+  (`dronline_rec.bin` becomes `dronline_rec_host.bin`) and two copies never write the same file.
 
 `tools/input_script.py compile <script.txt> <out.bin>` turns a text script into that file
 (`wait 3s`, `tap confirm 2 15`, `20 right`, `10 up+cancel`; see the tool's help), `dump` turns a recording back into
