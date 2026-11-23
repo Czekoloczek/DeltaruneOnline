@@ -111,8 +111,8 @@ From a review of the Chapter 5 code (game patch 0.253 + Local Multiplayer v19):
 - Before opening a pull request, run `bash tools/verify.sh`: unit tests, the `drnet.dll` build and the lockstep test,
   all without game files. `bash tools/setup_env.sh` installs what it needs (Python 3.11+, mingw-w64, Wine).
 - Test with two copies of the game on one PC before testing over a network.
-- Claude reviews every pull request on its own. For a second opinion from DeepSeek, a collaborator comments
-  `/deepseek-review` on the pull request (options: `model=flash|pro`, `reasoning=none|low|high|max`; see
+- Claude reviews every pull request on its own. For a second opinion from DeepSeek, PolskiKapsel or Czekoloczek
+  (the only logins on the workflow's list) comments `/deepseek-review` on the pull request (options: `model=flash|pro`, `reasoning=none|low|high|max`; see
   [the workflow](.github/workflows/deepseek-review.yml)).
 
 ## Credits

@@ -3,7 +3,7 @@ name: DeepSeek Review
 # Przegląd PR-a przez DeepSeek, tylko NA ŻĄDANIE (automatyczny przegląd każdego PR-a robi Claude,
 # claude-code-review.yml). Dwa sposoby:
 #
-#   1. Komentarz pod PR-em (tylko właściciel, członkowie i współpracownicy repo):
+#   1. Komentarz pod PR-em (tylko loginy z listy niżej: PolskiKapsel i Czekoloczek):
 #          /deepseek-review
 #          /deepseek-review model=pro reasoning=max
 #          /deepseek-review reasoning=none sprawdź głównie haki serca
@@ -11,7 +11,8 @@ name: DeepSeek Review
 #      reasoning: none (bez myślenia), low, high (domyślny), max. To parametr reasoning_effort API;
 #                 none wyłącza tryb myślenia ({"thinking": {"type": "disabled"}}).
 #      Reszta pierwszej linii i kolejne linie idą do recenzenta jako uwaga.
-#   2. Ręcznie: Actions > DeepSeek Review > Run workflow (numer PR-a, model, reasoning, uwaga).
+#   2. Ręcznie: Actions > DeepSeek Review > Run workflow (numer PR-a, model, reasoning, uwaga); też tylko te
+#      dwa loginy, choć uruchomić workflow może każdy z prawem zapisu.
 #
 # Skrypt: tools/deepseek_review.py (sama biblioteka standardowa Pythona). Wynik to jeden komentarz pod PR-em.
 #
@@ -47,12 +48,23 @@ on:
         type: string
         required: false
 
+# KTO MOŻE ZAMÓWIĆ PRZEGLĄD: tylko loginy z listy ["PolskiKapsel", "Czekoloczek"] (klucz DeepSeek należy do
+# Kuby i to on płaci). Lista jest w dwóch miejscach, w `group` i w `if` joba, i musi być w obu identyczna
+# (pilnuje tego test w tests/test_deepseek_review.py). Sprawdzane są dwie osoby i obie muszą być na liście:
+# - autor komentarza (`github.event.comment.user.login`), a przy ręcznym uruchomieniu ten, kto je uruchomił
+#   (`github.actor`). Boty (dependabot[bot], claude[bot], coderabbitai[bot]) nie są na liście, więc ich
+#   komentarze nic nie uruchamiają;
+# - `github.triggering_actor`, czyli ten, kto uruchomił TEN przebieg. Przy „Re-run” to osoba klikająca, a nie
+#   autor komentarza, więc nikt spoza listy nie powtórzy cudzego przeglądu na koszt klucza.
+# Edycja komentarza niczego nie uruchamia (`types: [created]`), więc nie da się dopisać polecenia do starego
+# komentarza. Zmiana loginu na GitHubie wymaga poprawienia listy.
+#
 # Każdy komentarz pod każdym PR-em i issue uruchamia ten workflow (job niżej zwykle się pomija). Grupa per PR
-# tylko dla żądań, które job naprawdę wykona (ten sam warunek co `if` joba, z author_association); inne
-# komentarze dostają własną grupę, żeby ani komentarz bota, ani `/deepseek-review` od kogoś bez uprawnień
-# nie anulował trwającego przeglądu. Nowe uprawnione żądanie pod tym samym PR-em anuluje poprzednie.
+# tylko dla żądań, które job naprawdę wykona (ten sam warunek co `if` joba); inne komentarze dostają własną
+# grupę, żeby ani komentarz bota, ani `/deepseek-review` od kogoś spoza listy nie anulował trwającego przeglądu.
+# Nowe żądanie z listy pod tym samym PR-em anuluje poprzednie.
 concurrency:
-  group: "${{ github.workflow }}-${{ (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review') && contains(fromJSON('[\"OWNER\", \"MEMBER\", \"COLLABORATOR\"]'), github.event.comment.author_association))) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
+  group: "${{ github.workflow }}-${{ (contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.event.comment.user.login || github.actor) && contains(fromJSON('[\"PolskiKapsel\", \"Czekoloczek\"]'), github.triggering_actor) && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))) && format('pr-{0}', github.event.issue.number || inputs.pr) || github.run_id }}"
   cancel-in-progress: true
 
 # Domyślnie żadnych uprawnień; job niżej prosi tylko o to, czego potrzebuje.
@@ -61,10 +73,10 @@ permissions: {}
 jobs:
   deepseek-review:
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '/deepseek-review') &&
-       contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), github.event.comment.user.login || github.actor) &&
+      contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), github.triggering_actor) &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.issue.pull_request && startsWith(github.event.comment.body, '/deepseek-review')))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

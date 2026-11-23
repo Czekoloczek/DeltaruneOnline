@@ -252,8 +252,8 @@ class Run(unittest.TestCase):
         self.assertIn(r.COMMAND, wf)
 
     def test_only_real_requests_share_a_concurrency_group(self):
-        """A /deepseek-review comment from someone without access must not join (and cancel) the PR's group,
-        so the group uses the job's own condition, author_association included."""
+        """A /deepseek-review comment from someone off the list must not join (and cancel) the PR's group,
+        so the group uses the job's own condition, allowlist included."""
         import re
         with open(os.path.join(ROOT, ".github", "workflows", "deepseek-review.yml"), encoding="utf-8") as fh:
             wf = fh.read()
@@ -261,7 +261,20 @@ class Run(unittest.TestCase):
         job_if = re.search(r"^    if: >-\n((?:      .+\n)+)", wf, re.M).group(1)
         job_if = " ".join(job_if.split())
         self.assertIn(job_if, " ".join(group.split()))
-        self.assertIn("author_association", job_if)
+        self.assertNotIn("author_association", job_if)
+
+    def test_only_listed_people_can_request(self):
+        """The job runs only for the two listed logins, checked for the comment's author (or whoever started the
+        manual run) and for whoever started this very run (a Re-run), and only for newly created comments."""
+        import re
+        with open(os.path.join(ROOT, ".github", "workflows", "deepseek-review.yml"), encoding="utf-8") as fh:
+            wf = fh.read()
+        job_if = " ".join(re.search(r"^    if: >-\n((?:      .+\n)+)", wf, re.M).group(1).split())
+        allow = """contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), """
+        self.assertIn(allow + "github.event.comment.user.login || github.actor)", job_if)
+        self.assertIn(allow + "github.triggering_actor)", job_if)
+        self.assertEqual(job_if.count("fromJSON("), 2)  # no second, wider list (e.g. author_association)
+        self.assertRegex(wf, r"issue_comment:\n\s+types: \[created\]\n")
 
 
 if __name__ == "__main__":

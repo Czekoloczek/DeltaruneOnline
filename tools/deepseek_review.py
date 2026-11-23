@@ -5,7 +5,7 @@ Reads the PR's changed files through the GitHub API, trims the diff to a fixed b
 patcher/ first), adds the lockstep context from docs/DESIGN.md, asks DeepSeek's OpenAI-compatible chat
 completions endpoint for a review and posts the answer as one PR comment.
 
-Requested with a PR comment (collaborators only):
+Requested with a PR comment, only by the logins on the workflow's list (PolskiKapsel, Czekoloczek):
 
     /deepseek-review [model=flash|pro] [reasoning=none|low|high|max] [anything else: a note for the reviewer]
 
