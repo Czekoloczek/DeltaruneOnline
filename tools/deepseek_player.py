@@ -11,11 +11,12 @@ run. Version 1 of the Agent API covers the overworld and dialogue; in a battle t
 A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece), and the
 rest is dropped as soon as the screen changes: a dialogue, choice, menu or room appears, changes or closes. So a
 model that sends "tap confirm 4 10" sees each new screen instead of running through it. A dialogue box that is
-still typing is waited for, and one that waits for confirm is confirmed, without asking the model
-(--no-auto-confirm turns both off).
+still typing is waited for (until it waits, or its text has not grown for 3 s), and one that waits for confirm is
+confirmed, without asking the model (--no-auto-confirm turns both off).
 
 Saving is guarded: unless --allow-save is given, confirm is refused while the save point menu's cursor is on a
-file slot or on "Save" in the overwrite question, so the model cannot save over a file. The guard needs the
+file slot or on "Save" in the overwrite question, so the model cannot save over a file; after the second refusal
+the run ends with exit code 1. The guard needs the
 save_menu key of the state; a game build without it shows no save menu, and then nothing stops a save.
 
 The key comes from the environment variable DEEPSEEK_API_KEY, or else from a file (--key-file, default
@@ -29,7 +30,8 @@ Limits (each ends the run with exit code 3):
   --max-usd <usd>     spending on DeepSeek, default 0.05. Counted from the tokens the API reports, at the peak
                       prices, so the real cost is the same or lower. The run stops before a call that could pass it
   --max-minutes <m>   wall time, default 20
-  --max-frames <n>    input frames a turn, default 150 (5 s); a longer answer is cut there
+  --max-frames <n>    input frames a turn, 30 to 3600, default 150 (5 s); a longer answer is cut there, and one
+                      of more than 3600 frames is refused
 
 Other options:
   --until <cond>      end the run (exit 0) as soon as the state meets this, without asking the model: a key that is
@@ -59,8 +61,9 @@ Two players online: run one player on each PC, each against its own game, with i
 waits for the lockstep, so both games must be running.
 
 Tested without the game and without a key (tests/test_deepseek_player.py; native/test_agent.py solo, against
-drnet.dll). One run in the game (2026-11-23, deepseek-flash) reached the save point but ran through its menu and
-saved; the pieces, the save guard, --until and the walking hints came from it and are not yet tried in the game.
+drnet.dll). In the game (2026-11-23, solo, deepseek-flash): the first run ran through the save menu and saved,
+which the pieces, the save guard, --until and the walking hints came from; with them two runs reached their goal
+and a third, asked to save, was stopped by the guard, with nothing saved, for 0.0008 to 0.0019 USD each.
 """
 import argparse
 import datetime
@@ -73,6 +76,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent_client  # noqa: E402
 import deepseek_review  # noqa: E402
+import input_script  # noqa: E402
 
 MODELS = {"flash": "deepseek-flash", "deepseek-flash": "deepseek-flash", "deepseek-v4-flash": "deepseek-flash",
           "pro": "deepseek-v4-pro", "deepseek-v4-pro": "deepseek-v4-pro"}
@@ -86,6 +90,10 @@ HISTORY = 6             # turns the model is reminded of
 MAX_NEARBY = 12         # objects of the state's nearby list in the prompt
 MAX_TEXT = 300          # characters of one dialogue box in the prompt
 MAX_BAD = 3             # unusable answers in a row before the run gives up
+MAX_REFUSED = 2         # confirms refused by the save guard before the run gives up
+WAIT_STEP, WAIT_QUIET, WAIT_MAX = 5, 90, 300    # waiting for a typing box: frames a step, without progress, in all
+MAX_ANSWER_FRAMES = 3600    # an answer whose steps make more frames than this is refused, not cut
+TEMPLATE_TOKENS = 20    # tokens of the chat template around each message (role, separators), at most
 AUTO_PER_STEP = 5       # turns without the model allowed per --max-steps
 CONFIRM, PRESSES, DIRECTIONS = 16, 16 | 32 | 64, 1 | 2 | 4 | 8      # action bits (agent_client.AGENT_BUTTONS)
 
@@ -311,8 +319,31 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
 # ---------------------------------------------------------------------------------------------- the answer
 
 
+def frames_in(text):
+    """How many frames steps written as text make, counted without building them (a model could answer
+    "999999999 right"). Steps that do not parse count 0: text_to_frames says what is wrong with them."""
+    total = 0
+    for line in text.splitlines():
+        for step in line.split("#", 1)[0].split(";"):
+            w = step.split()
+            try:
+                if not w:
+                    continue
+                if w[0].lower() == "wait" and len(w) == 2:
+                    total += input_script.parse_frames(w[1])
+                elif w[0].lower() == "tap" and 2 <= len(w) <= 4:
+                    times = input_script.parse_frames(w[2], "times") if len(w) > 2 else 1
+                    gap = input_script.parse_frames(w[3], "gap", allow_zero=True) if len(w) > 3 else 1
+                    total += times * (1 + gap)
+                elif len(w) == 2:
+                    total += input_script.parse_frames(w[0])
+            except (ValueError, OverflowError):
+                pass
+    return total
+
+
 def parse_answer(content, max_frames):
-    """The model's text -> (why, steps text as given, per-frame bits cut to max_frames, done).
+    """The model's text -> (why, steps text as given, per-frame bits cut to max_frames, done, frames asked for).
     Raises ValueError with what is wrong."""
     text = (content or "").strip()
     try:
@@ -332,9 +363,12 @@ def parse_answer(content, max_frames):
     if not isinstance(do, str):
         raise ValueError('"do" must be a string of steps, not %r' % (do,))
     done = obj.get("done") is True
+    asked = frames_in(do)
+    if asked > max(MAX_ANSWER_FRAMES, max_frames):
+        raise ValueError("the steps make %d frames; send at most %d a turn" % (asked, max_frames))
     frames = agent_client.text_to_frames(do)        # ScriptError is a ValueError
     agent_client.frames_to_steps(frames)            # only the seven buttons of the agent
-    return why, do.strip(), frames[:max_frames], done
+    return why, do.strip(), frames[:max_frames], done, len(frames)
 
 
 # ---------------------------------------------------------------------------------------------- models
@@ -358,17 +392,24 @@ class DeepSeek:
         self.key, self.model, self.reasoning, self.http, self.sleep = key, model, reasoning, http, sleep
         self.max_tokens = MAX_TOKENS[reasoning]
 
-    def ask(self, msgs):
-        """(the answer's text, usage). Raises RuntimeError with a message without the key."""
+    def ask(self, msgs, seconds=120):
+        """(the answer's text, usage), within `seconds` with the retries. Raises RuntimeError with a message
+        without the key."""
         body = deepseek_review.request_body(self.model, self.reasoning, msgs, MAX_TOKENS)
         body["response_format"] = {"type": "json_object"}
         try:
             answer = deepseek_review.call_deepseek(self.key, body, self.http, self.sleep, attempts=2, timeout=60,
-                                                   budget=120)
+                                                   budget=min(seconds, 120))
         except RuntimeError as e:
             raise RuntimeError(deepseek_review.redact(str(e), self.key))
-        choice = (answer.get("choices") or [{}])[0]
-        return (choice.get("message") or {}).get("content") or "", answer.get("usage") or {}
+        choices = answer.get("choices")
+        message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(
+            choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, str):
+            raise RuntimeError("DeepSeek answered without a message")
+        usage = answer.get("usage")
+        return content, usage if isinstance(usage, dict) else {}
 
 
 class FakeModel:
@@ -391,7 +432,7 @@ class FakeModel:
                     out.append(line if line.startswith("{") else json.dumps({"why": "fake", "do": line}))
         return cls(out)
 
-    def ask(self, msgs):
+    def ask(self, msgs, seconds=120):
         self.asked.append(msgs)
         text = self.answers.pop(0) if self.answers else '{"why": "fake answers ran out", "do": "", "done": true}'
         chars = sum(len(m["content"]) for m in msgs)
@@ -476,7 +517,21 @@ def auto_action(state):
     None when something needs a decision (a choice, a menu, a battle, nothing to read)."""
     if state.get("choice") or state.get("save_menu") or state.get("battle") or not boxes(state):
         return None
-    return "tap confirm; wait 4" if any(d.get("waiting") for d in boxes(state)) else "wait 15"
+    return "tap confirm; wait 4" if any(d.get("waiting") for d in boxes(state)) else "wait"
+
+
+def wait_typing(game, state):
+    """Waits in short steps until a box waits for confirm, the screen changes, or the text has not grown for
+    WAIT_QUIET frames (a box with pauses in its text shows "typing" for seconds). Returns (state, frames waited)."""
+    start, waited, quiet = state, 0, 0
+    while waited < WAIT_MAX and quiet < WAIT_QUIET:
+        before = state
+        state = game.do("wait %d" % WAIT_STEP)
+        waited += WAIT_STEP
+        if screen(state) != screen(start) or any(d.get("waiting") for d in boxes(state)):
+            break
+        quiet = quiet + WAIT_STEP if progress(state) == progress(before) else 0
+    return state, waited
 
 
 def progress(state):
@@ -503,7 +558,8 @@ def play_turn(game, frames, state, allow_save, until):
     for i, part in enumerate(parts):
         risk = save_risk(state)
         if risk and part[0] & CONFIRM and not allow_save:
-            return state, played, "refused: %s, and saving is not allowed in this run (Return or cancel)" % risk
+            return state, played, ("refused: %s, and saving is not allowed in this run. Do not try again: if the "
+                                   "goal needs saving, give up" % risk)
         before = state
         state = game.send_steps(agent_client.frames_to_steps(part))
         played += len(part)
@@ -523,7 +579,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
     start = clock()
     last_call = None
     history = []
-    bad = calls = autos = auto_stuck = 0
+    bad = calls = autos = auto_stuck = refused = 0
     walk = None                 # (frames a direction was held, px) of the longest walk so far
     state = game.state()
     log.write({"event": "start", "goal": goal, "state": summarize(state)},
@@ -541,7 +597,11 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             if autos > AUTO_PER_STEP * max_steps:
                 raise Stop(3, "%d turns without the model" % (autos - 1))
             before = state
-            state = game.do(do)
+            if do == "wait":
+                state, waited = wait_typing(game, state)
+                do = "wait %d" % waited
+            else:
+                state = game.do(do)
             what = change(before, state)
             auto_stuck = auto_stuck + 1 if progress(before) == progress(state) else 0
             said = " / ".join(" ".join(str(d.get("text") or "").split()) for d in boxes(before))
@@ -558,16 +618,20 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         auto_stuck = 0
         speed = walk[1] / walk[0] if walk else None
         msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed)
-        # The next call costs at most: the whole prompt at the cache-miss price (about 3 characters a token) and
-        # the whole output cap.
-        worst = (sum(len(m["content"]) for m in msgs) / 3 * prices[1] + model.max_tokens * prices[2]) / 1e6
+        # The next call costs at most: the whole prompt at the cache-miss price, a token for every byte (a token
+        # of the byte-level tokenizer holds at least one) plus the chat template, and the whole output cap.
+        prompt = sum(len(m["content"].encode("utf-8")) + TEMPLATE_TOKENS for m in msgs)
+        worst = (prompt * prices[1] + model.max_tokens * prices[2]) / 1e6
         if spent + worst > max_usd:
             raise Stop(3, "spending limit: %.4f of %.4f USD spent, the next call could cost %.4f" % (
                 spent, max_usd, worst))
         if last_call is not None and clock() - last_call < pause:
             sleep(pause - (clock() - last_call))
+        left = max_minutes * 60 - (clock() - start)
+        if left < deepseek_review.MIN_ATTEMPT:
+            raise Stop(3, "time limit (%g min): too little left for a call" % max_minutes)
         last_call = clock()
-        content, usage = model.ask(msgs)
+        content, usage = model.ask(msgs, left)
         cost = usage_cost(usage, prices)
         spent += cost
         tally["usd"] = spent
@@ -575,7 +639,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
                   "state": msgs[1]["content"].split("State now:\n", 1)[1],
                   "answer": content, "usage": usage, "usd": round(cost, 6), "usd_total": round(spent, 6)}
         try:
-            why, do, frames, done = parse_answer(content, max_frames)
+            why, do, frames, done, asked = parse_answer(content, max_frames)
         except ValueError as e:
             bad += 1
             history.append("turn %d: your answer was unusable (%s); answer only the JSON object" % (turn, e))
@@ -586,6 +650,10 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             continue
         bad = 0
         record.update(why=why, do=do, done=done, frames=len(frames))
+        if clock() - start > max_minutes * 60:
+            log.write(record, "%3d  %-34s  %s | %s (not played: time is up)  [%.4f USD]" % (
+                turn, short(state)[:34], why, do or "-", spent))
+            raise Stop(3, "time limit (%g min)" % max_minutes)
         if done:
             log.write(record, "%3d  %-34s  %s  [%.4f USD]" % (turn, short(state)[:34], why or "done", spent))
             if why.lower().startswith("give up"):
@@ -596,16 +664,19 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             state, played, note = play_turn(game, frames, state, allow_save, until)
         else:
             state, played, note = game.state(), 0, ""
+        refused += note.startswith("refused")
         w = walked(frames[:played], before, state)
         if w and (walk is None or w[0] >= walk[0]):
             walk = w
         what = change(before, state)
-        if len(agent_client.text_to_frames(do)) > max_frames:
+        if asked > max_frames:
             note = (note + "; " if note else "") + "cut to %d frames" % max_frames
         history.append("turn %d: %s -> %s%s" % (turn, do or "(nothing)", what, " (%s)" % note if note else ""))
         record.update(result=what, played=played, note=note)
         log.write(record, "%3d  %-34s  %s | %s -> %s%s  [%.4f USD]" % (
             turn, short(before)[:34], why, do or "-", what, " (%s)" % note if note else "", spent))
+        if refused >= MAX_REFUSED:
+            raise Stop(1, "the save guard refused confirm %d times: this goal needs --allow-save" % refused)
 
 
 def parse_args(argv):
@@ -632,8 +703,8 @@ def parse_args(argv):
     if args.model.lower() not in MODELS:
         ap.error("unknown model %s: flash or pro" % args.model)
     args.model = MODELS[args.model.lower()]
-    if args.max_steps < 1 or args.max_usd <= 0 or args.max_minutes <= 0 or not 1 <= args.max_frames <= 3600:
-        ap.error("--max-steps, --max-usd and --max-minutes must be above 0, --max-frames 1 to 3600")
+    if args.max_steps < 1 or args.max_usd <= 0 or args.max_minutes <= 0 or not 30 <= args.max_frames <= 3600:
+        ap.error("--max-steps, --max-usd and --max-minutes must be above 0, --max-frames 30 to 3600")
     if not args.goal.strip():
         ap.error("the goal is empty")
     try:

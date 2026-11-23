@@ -195,16 +195,25 @@ class Prompt(unittest.TestCase):
 
 class Answers(unittest.TestCase):
     def test_plain_json(self):
-        why, do, frames, done = p.parse_answer(answer("20 right; tap z", "walk"), 150)
-        self.assertEqual((why, do, done), ("walk", "20 right; tap z", False))
+        why, do, frames, done, asked = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        self.assertEqual((why, do, done, asked), ("walk", "20 right; tap z", False, 22))
         self.assertEqual(len(frames), 22)
 
     def test_json_inside_other_words(self):
-        why, do, frames, done = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)
+        why, do, frames, done, _ = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)
         self.assertEqual((do, done, len(frames)), ("5 up", True, 5))
 
     def test_frames_are_cut(self):
         self.assertEqual(len(p.parse_answer(answer("10s right"), 150)[2]), 150)
+        self.assertEqual(p.parse_answer(answer("10s right"), 150)[4], 300)
+
+    def test_huge_answers_are_refused_before_they_are_built(self):
+        for do in ("999999999 right", "wait 99999999", "tap z 100000 100000", "1 right; 2000000s left"):
+            with self.assertRaises(ValueError, msg=do) as cm:
+                p.parse_answer(answer(do), 150)
+            self.assertIn("send at most 150", str(cm.exception))
+        self.assertEqual(p.frames_in("20 right; tap z 2 3 # 9 up\nwait 1.5s; tap x"), 20 + 8 + 45 + 2)
+        self.assertEqual(p.frames_in("20 rihgt; nonsense here too"), 20)
 
     def test_unusable(self):
         for text in ("walk right", "[1, 2]", answer("20 teleport"), answer("20 rihgt"), '{"do": 5}', ""):
@@ -288,10 +297,10 @@ class Loop(unittest.TestCase):
         self.assertIsNone(self.game.menu)
         turns = [r for r in records if r["event"] == "turn"]
         self.assertEqual([r["do"] for r in turns],
-                         ["30 right", "tap confirm", "wait 15", "wait 15", "tap confirm; wait 4", "tap confirm",
+                         ["30 right", "tap confirm", "wait 20", "tap confirm; wait 4", "tap confirm",
                           "tap confirm", "tap confirm", ""])
         self.assertEqual(turns[0]["result"], "moved (+90,+0)")
-        self.assertIn("save point menu appeared", turns[4]["result"])
+        self.assertIn("save point menu appeared", turns[3]["result"])
         self.assertEqual(records[-1]["event"], "end")
         self.assertIn("goal is reached: saved", out)
         self.assertEqual(self.game.cleared, 1)          # the queued input is dropped at the end
@@ -320,6 +329,29 @@ class Loop(unittest.TestCase):
         self.assertIn("saves to file slot 0", refused[0]["note"])
         self.assertIn("refused: confirm here saves to file slot 0", http.requests[4][3]["messages"][1]["content"])
         self.assertIn("Saving to a file is not allowed", http.requests[0][3]["messages"][0]["content"])
+
+    def test_second_refusal_ends_the_run(self):
+        self.game.menu = {"stage": 1, "x": 0, "y": 0, "slot": 2, "overwrite": 0, "overwrite_x": 0}
+        http = Http([answer("tap confirm", "save"), answer("tap confirm", "save again"), answer("", "x", True)])
+        code, out, _ = run_main(self.game, ["save the game"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 1)
+        self.assertIn("refused confirm 2 times: this goal needs --allow-save", out)
+        self.assertIn("Do not try again", http.requests[1][3]["messages"][1]["content"])
+        self.assertIsNone(self.game.saved)
+
+    def test_a_box_with_a_long_pause_is_waited_for_in_one_turn(self):
+        self.game.TYPING = 60
+        self.game.x = 90
+        self.game.apply(16)
+        self.game.apply(0)
+        with agent_client.AgentClient(port=self.game.port) as game:
+            state, waited = p.wait_typing(game, game.state())
+            self.assertTrue(state["dialogue"][0]["waiting"])
+            self.assertEqual(waited, 60)
+            self.game.apply = lambda bits: None     # the text stops growing: give up after WAIT_QUIET frames
+            self.game.dialogue[1] = 5
+            state, waited = p.wait_typing(game, game.state())
+            self.assertEqual(waited, p.WAIT_QUIET)
 
     def test_overwrite_question_is_guarded_too(self):
         self.assertIn("overwrite", p.save_risk({"save_menu": {"stage": 1, "slot": 3, "overwrite": 1,
@@ -400,10 +432,10 @@ class Loop(unittest.TestCase):
 
     def test_spending_limit_stops_before_the_call(self):
         http = Http([answer("wait 1")] * 10)
-        code, out, records = run_main(self.game, ["go", "--max-usd", "0.0008"], {"DEEPSEEK_API_KEY": KEY}, http)
+        code, out, records = run_main(self.game, ["go", "--max-usd", "0.002"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 3)
         self.assertIn("spending limit", out)
-        self.assertLessEqual(records[-1]["usd_total"], 0.0008)
+        self.assertLessEqual(records[-1]["usd_total"], 0.002)
         self.assertGreater(len(http.requests), 0)
 
     def test_unusable_answers_and_giving_up(self):
@@ -423,11 +455,42 @@ class Loop(unittest.TestCase):
         self.assertIn("your answer was unusable", http.requests[1][3]["messages"][1]["content"])
 
     def test_long_answer_is_cut(self):
-        code, _, records = run_main(self.game, ["go", "--max-frames", "10"], {"DEEPSEEK_API_KEY": KEY},
+        code, _, records = run_main(self.game, ["go", "--max-frames", "30"], {"DEEPSEEK_API_KEY": KEY},
                                     Http([answer("100 right"), answer("", "ok", True)]))
         self.assertEqual(code, 0)
-        self.assertEqual(self.game.x, 30)
-        self.assertEqual(records[1]["frames"], 10)
+        self.assertEqual(self.game.x, 90)
+        self.assertEqual(records[1]["frames"], 30)
+        self.assertIn("cut to 30 frames", records[1]["note"])
+
+    def test_answer_without_a_message(self):
+        for body in ({"choices": [None]}, {"choices": []}, {"choices": [{"message": {"content": None}}]}):
+            code, out, _ = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, Http([(200, body)]))
+            self.assertEqual(code, 1, body)
+            self.assertIn("without a message", out)
+
+    def test_time_limit_around_the_call(self):
+        now = [0.0]
+        model = p.FakeModel([answer("20 right")])
+        slow = model.ask
+
+        def ask(msgs, seconds=120):
+            self.assertLessEqual(seconds, 60)
+            now[0] += 61                # the answer comes after the time is up
+            return slow(msgs, seconds)
+        model.ask = ask
+        with agent_client.AgentClient(port=self.game.port) as game:
+            with self.assertRaises(p.Stop) as cm:
+                p.play(game, model, "go", max_minutes=1, clock=lambda: now[0])
+        self.assertEqual(cm.exception.code, 3)
+        self.assertEqual(self.game.x, 0)            # its steps were not played
+        times = iter([0.0] + [40.0] * 10)         # 20 s left: too little for a call
+        model = p.FakeModel([answer("20 right")])
+        with agent_client.AgentClient(port=self.game.port) as game:
+            with self.assertRaises(p.Stop) as cm:
+                p.play(game, model, "go", max_minutes=1, clock=lambda: next(times))
+        self.assertEqual(cm.exception.code, 3)
+        self.assertIn("too little left", cm.exception.why)
+        self.assertEqual(model.asked, [])
 
     def test_dialogue_that_does_not_go_away_goes_to_the_model(self):
         self.game.dialogue = ["* Stuck.", 0]
@@ -446,7 +509,7 @@ class Loop(unittest.TestCase):
         code, _, records = run_main(self.game, ["go", "--until", "interact=7"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 0)
         self.assertEqual([r["do"] for r in records if r["event"] == "turn"],
-                         ["wait 15", "wait 15", "tap confirm; wait 4", ""])
+                         ["wait 20", "tap confirm; wait 4", ""])
         self.assertEqual(self.game.menu["stage"], 0)
 
     def test_prompt_only(self):
