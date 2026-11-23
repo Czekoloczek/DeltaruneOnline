@@ -32,6 +32,42 @@ python3 tools/agent_client.py do "20 right; tap confirm 2 15"
 `tools/input_script.py`. Scripts of any length work: the client cuts them into commands and keeps the game's
 queue filled.
 
+## DeepSeek as a player
+
+`tools/deepseek_player.py` lets a DeepSeek model play through this API, toward a goal given in plain words:
+
+```
+python3 tools/deepseek_player.py "walk to the save point and save"
+```
+
+Every turn it reads the state, sends DeepSeek a few lines about it (room, where the player is, the dialogue, a
+choice, the nearest objects with their offset), the goal and the last six turns, and plays the steps the model
+answers with (the text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s). A dialogue box
+that only waits for confirm is answered without asking the model, unless confirm changed nothing last time; its
+text still goes into the turns the model is shown. The run ends when the model says the goal is reached (exit 0)
+or gives up (1), or at a limit (3).
+
+- **Key.** The environment variable `DEEPSEEK_API_KEY`, or else the file `~/.config/deltarune-online/deepseek.env`
+  (`--key-file` picks another) with the line `DEEPSEEK_API_KEY=<key>`; `chmod 600` it, and never put it in the
+  repository. The key goes only into the requests to api.deepseek.com and is never printed or logged.
+- **Cost.** The default is `deepseek-flash` without thinking (`--model pro`, `--reasoning low|high|max` change
+  that). The system prompt is the same in every turn, so DeepSeek's context cache bills it at the cache-hit price
+  after the first call. Limits: `--max-steps` (default 40), `--max-usd` (default 0.05, counted at the peak prices,
+  and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause` (0.5 s) between calls.
+  A turn of `deepseek-flash` without thinking is about 0.0001 USD at peak prices (about 800 tokens in, 50 out),
+  so the 40 default turns cost about half a cent.
+- **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, the money spent so
+  far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`): the state as sent, the model's
+  answer, the tokens and their price.
+- **Without the game or a key.** `--prompt` prints the first turn's prompt and calls nothing; `--fake <file>`
+  takes the answers from a file instead of DeepSeek. `tests/test_deepseek_player.py` runs the loop against a small
+  game written in Python and against a fake API, and `native/test_agent.py solo` runs it against `drnet.dll`.
+- **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
+  the lockstep, so both games must be running.
+
+**Not yet tested** in the game or against the real API: the prompt has not been tuned on real states, and
+whether a cheap model can find its way through a room from these few lines is open.
+
 ## Protocol
 
 Messages are JSON objects, one per line (`\n`, a `\r` before it is ignored), UTF-8, in both directions. Every

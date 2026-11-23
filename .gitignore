@@ -13,6 +13,10 @@ code_*/
 build/
 out/
 *.gml.orig
+# klucze i logi gracza DeepSeek (tools/deepseek_player.py)
+deepseek.env
+*.env
+deepseek-player-*.jsonl
 # Python
 __pycache__/
 *.pyc
