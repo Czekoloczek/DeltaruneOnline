@@ -1,0 +1,34 @@
+name: DeepSeek full review (one-off)
+
+# TYMCZASOWY plik: jednorazowy przegląd całego repozytorium z tej gałęzi (PR #29), o który prosił Kuba, zanim
+# deepseek-review.yml trafi na main. Ręczne uruchomienie (workflow_dispatch, zakres repo) działa dopiero po
+# scaleniu, a ten workflow startuje sam przy pushu, który go dodaje. Następny commit go usuwa.
+
+on:
+  push:
+    branches: [claude/project-thread-53x0yb]
+    paths: [.github/workflows/deepseek-full-review-once.yml]
+
+permissions: {}
+
+jobs:
+  review:
+    if: contains(fromJSON('["PolskiKapsel", "Czekoloczek"]'), github.triggering_actor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Przegląd DeepSeek całego repozytorium (Flash, reasoning max)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          SCOPE: repo
+          INPUT_MODEL: deepseek-flash
+          INPUT_REASONING: max
+          REQUESTER: ${{ github.triggering_actor }}
+        run: python3 -I tools/deepseek_review.py
