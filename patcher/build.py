@@ -15,6 +15,7 @@ Example (Windows):
   py patcher\\build.py --game "C:\\Program Files (x86)\\Steam\\steamapps\\common\\DELTARUNE" ^
       --mod "C:\\Downloads\\deltarunelocalmultiplayer_v19" --utmt "C:\\Tools\\UTMT_CLI\\UndertaleModCli.exe" ^
       --xdelta3 "C:\\Tools\\xdelta3.exe" --out build
+(--xdelta3 also takes just a program name on PATH, such as xdelta3.)
 """
 
 import argparse
@@ -52,9 +53,11 @@ def sha256(path: Path) -> str:
 
 def find_xdelta(given):
     if given:
-        if not Path(given).exists():
-            fail(f"xdelta3 not found at {given}")
-        return given
+        # a path to the program, or just its name when it is on PATH (e.g. --xdelta3 xdelta3)
+        found = given if Path(given).is_file() else shutil.which(given)
+        if not found:
+            fail(f"xdelta3 not found: {given} is neither a file nor a program on PATH")
+        return found
     for name in ("xdelta3", "xdelta3.exe", "xdelta"):
         found = shutil.which(name)
         if found:
@@ -68,7 +71,7 @@ def main() -> None:
     ap.add_argument("--mod", help="Local Multiplayer folder or its Chapter 5 .xdelta file")
     ap.add_argument("--modded", help="an already modded Chapter 5 data.win, instead of --game and --mod")
     ap.add_argument("--utmt", required=True, help="UndertaleModCli.exe, or UndertaleModCli.dll (run with dotnet)")
-    ap.add_argument("--xdelta3", help="xdelta3 program (default: search PATH)")
+    ap.add_argument("--xdelta3", help="xdelta3 program: a path, or a name on PATH (default: search PATH)")
     ap.add_argument("--dll", help="drnet.dll (default: native/build/drnet.dll, see dronline_patch.py)")
     ap.add_argument("--out", default="build", help="output folder (default: build)")
     a = ap.parse_args()
@@ -124,7 +127,8 @@ def main() -> None:
     print(f"\nDone: {out_file}")
     print(f"sha256 {sha256(out_file)}")
     print("Compare this sha256 with your partner's. If they differ, your games will not stay in sync.")
-    print("Copy chapter5_windows/ (data.win + drnet.dll) into a COPY of your DELTARUNE folder, never the Steam folder.")
+    print("Copy chapter5_windows/ (data.win + drnet.dll) into a COPY of your DELTARUNE folder, never the Steam folder")
+    print("(README.md, Usage).")
 
 
 if __name__ == "__main__":

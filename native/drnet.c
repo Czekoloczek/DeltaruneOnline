@@ -407,10 +407,6 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); return 0; }
     sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock == INVALID_SOCKET) return fail("socket");
-    /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
-       process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
-       again fails until that process ends (seen with GameMaker's own sockets in the Phase 1 test, 2026-11-23). */
-    SetHandleInformation((HANDLE)sock, HANDLE_FLAG_INHERIT, 0);
     ioctlsocket(sock, FIONBIO, &nb);
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
