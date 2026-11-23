@@ -14,9 +14,14 @@ if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         python3 gcc-mingw-w64-x86-64 xdelta3
-    # Ubuntu 22.04 and Debian 11 ship Python 3.10 or older as python3; add the separate python3.11 there.
-    sh "$HERE/find_python.sh" >/dev/null 2>&1 \
-        || $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3.11
+    # Ubuntu 22.04 ships Python 3.10 as python3; add the separate python3.11 there. Releases without any Python 3.11
+    # package (Debian 11, out of support since 2026-08) stop here with a hint instead of a bare apt error.
+    if ! sh "$HERE/find_python.sh" >/dev/null 2>&1; then
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3.11 || {
+            echo "No Python 3.11+ package on this system: install Python 3.11 or newer yourself and set PYTHON=/path/to/it"
+            exit 1
+        }
+    fi
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends wine wine64 \
         || echo "$NO_WINE"
 elif command -v dnf >/dev/null 2>&1; then
