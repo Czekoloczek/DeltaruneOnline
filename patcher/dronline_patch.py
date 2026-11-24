@@ -129,7 +129,7 @@ def heart_hooks(texts):
 # the same on every machine (obj_heart's Draw advances image_index2/3 itself, obj_grazebox's counts its timer).
 ALPHA_ARG = {"draw_sprite_ext": (2, 3, 8), "draw_sprite_part_ext": (6, 7, 11), "draw_surface_ext": (1, 2, 7)}
 SPRITES = ("draw_sprite_ext", "draw_sprite_part_ext")
-DRAW_SELF_RX = re.compile(r"\bdraw_self\(\s*\)")
+DRAW_SELF_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(\bdraw_self\(\s*\))', re.S)
 DRAW_SELF = "dronline_draw_self({})"
 WITH_HEART_RX = re.compile(r"\bwith\s*\(\s*obj_heart\s*\)\s*\{")
 # Objects that draw one player's SOUL, with the instance variable that says whose (1-based or 0-based) and the
@@ -143,6 +143,27 @@ SOUL_OWNERS = {
 PURPLE_DRAW = "gml_Object_obj_purplecontrols_Draw_0"
 CALL_IN_RX = re.compile(r"\b[A-Za-z_]\w*\s*\(")
 WRITE_IN_RX = re.compile(r"\+\+|--|(?<![=!<>])=(?!=)")
+COMMENT_RX = re.compile(r"//[^\n]*|/\*.*?\*/", re.S)
+DRAW_CALL_TOKEN_RX = re.compile(
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|\b(draw_sprite_ext|draw_sprite_part_ext|draw_surface_ext)\s*\(',
+    re.S,
+)
+
+
+def _skip_ignored(text, i, end):
+    """If a string or comment starts at text[i], returns the index just past it (at most end); else -1."""
+    if text[i] == '"':
+        i += 1
+        while i < end and text[i] != '"':
+            i += 2 if text[i] == "\\" else 1
+        return min(i + 1, end)
+    if text.startswith("//", i):
+        nl = text.find("\n", i + 2, end)
+        return end if nl < 0 else nl + 1
+    if text.startswith("/*", i):
+        stop = text.find("*/", i + 2, end)
+        return end if stop < 0 else stop + 2
+    return -1
 
 
 def _close(text, i):
@@ -151,15 +172,12 @@ def _close(text, i):
     stack = []
     n = len(text)
     while i < n:
+        skip = _skip_ignored(text, i, n)
+        if skip > 0:
+            i = skip
+            continue
         c = text[i]
-        if c == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-        elif text.startswith("//", i):
-            while i < n and text[i] != "\n":
-                i += 1
-        elif c in pairs:
+        if c in pairs:
             stack.append(pairs[c])
         elif c in ")]}":
             if not stack or stack.pop() != c:
@@ -173,13 +191,15 @@ def _close(text, i):
 def draw_calls(text, names, lo=0, hi=None):
     """The top-level calls of the functions in `names` in text[lo:hi]: (start, end, name, [(arg start, arg end)])."""
     hi = len(text) if hi is None else hi
-    rx = re.compile(r"\b(" + "|".join(map(re.escape, names)) + r")\s*\(")
     out = []
     pos = lo
     while True:
-        m = rx.search(text, pos, hi)
+        m = DRAW_CALL_TOKEN_RX.search(text, pos, hi)
         if not m:
             return out
+        if not m.group(1) or m.group(1) not in names:
+            pos = m.end()
+            continue
         op = m.end() - 1
         end = _close(text, op)
         if end < 0 or end >= hi:
@@ -188,13 +208,15 @@ def draw_calls(text, names, lo=0, hi=None):
         args = []
         a = i = op + 1
         while 0 < i < end:
+            skip = _skip_ignored(text, i, end)
+            if skip > 0:
+                i = skip
+                continue
             c = text[i]
-            if c == '"':
-                i += 1
-                while i < end and text[i] != '"':
-                    i += 2 if text[i] == "\\" else 1
-            elif c in "([{":
+            if c in "([{":
                 i = _close(text, i)
+                if i < 0:
+                    break
             elif c == ",":
                 args.append((a, i))
                 a = i + 1
@@ -208,13 +230,14 @@ def draw_calls(text, names, lo=0, hi=None):
 def heart_factor(xa, ya):
     """Factor for a draw in obj_heart at (xa, ya): the heart its position names (x/y, x2/y2 or x3/y3), else the
     heart nearest to that point, or None when the position can't be evaluated a second time without effects."""
-    ids = set(re.findall(r"(?<![\w.])[A-Za-z_]\w*", xa + " " + ya))
+    clean = COMMENT_RX.sub(" ", xa + " " + ya)
+    ids = set(re.findall(r"(?<![\w.])[A-Za-z_]\w*", clean))
     hearts = {k for k, names in ((1, {"x", "y"}), (2, {"x2", "y2"}), (3, {"x3", "y3"})) if ids & names}
     if len(hearts) == 1:
         return f"dronline_heart_alpha({hearts.pop()})", False
-    if hearts or CALL_IN_RX.search(xa + ya) or WRITE_IN_RX.search(xa + ya):
+    if hearts or CALL_IN_RX.search(clean) or WRITE_IN_RX.search(clean):
         return None, False
-    return f"dronline_heart_alpha_at({xa.strip()}, {ya.strip()})", True
+    return f"dronline_heart_alpha_at({xa.strip(' \t')}, {ya.strip(' \t')})", True
 
 
 def dim_calls(text, factor, names, lo=0, hi=None):
@@ -222,7 +245,7 @@ def dim_calls(text, factor, names, lo=0, hi=None):
     Returns the new text and the counts (dimmed, of them by the nearest heart, left as they are)."""
     calls = draw_calls(text, names, lo, hi)
     done = near = left = 0
-    for start, end, name, args in reversed(calls):
+    for _start, _end, name, args in reversed(calls):
         xi, yi, ai = ALPHA_ARG[name]
         if len(args) != ai + 1:
             left += 1
@@ -232,7 +255,7 @@ def dim_calls(text, factor, names, lo=0, hi=None):
             left += 1
             continue
         a0, a1 = args[ai]
-        alpha = text[a0:a1].strip()
+        alpha = text[a0:a1].strip(" \t")
         text = text[:a0] + (" " if text[a0:a0 + 1] == " " else "") + f"({alpha}) * {f}" + text[a1:]
         done += 1
         near += by_near
@@ -247,8 +270,13 @@ def soul_alpha(texts):
     def dim(code, factor, names, lo=0, hi=None, self_factor=None):
         code, (done, near, left) = dim_calls(code, factor, names, lo, hi)
         if self_factor is not None:
-            done += len(DRAW_SELF_RX.findall(code))
-            code = DRAW_SELF_RX.sub(lambda m: DRAW_SELF.format(self_factor), code)
+            def _sub_self(m):
+                nonlocal done
+                if not m.group(1):
+                    return m.group(0)
+                done += 1
+                return DRAW_SELF.format(self_factor)
+            code = DRAW_SELF_RX.sub(_sub_self, code)
         return code, done, near, left
 
     draw = texts.get(HEART_DRAW)
@@ -274,7 +302,7 @@ def soul_alpha(texts):
     for name, (factor, names) in SOUL_OWNERS.items():
         code = texts.get(name)
         if code is not None:
-            texts[name], done, _, _ = dim(code, lambda xa, ya: (factor, False), names,
+            texts[name], done, _, _ = dim(code, lambda _xa, _ya, f=factor: (f, False), names,
                                           self_factor=factor if "draw_sprite_ext" in names else None)
             notes.append(f"{name[len('gml_Object_'):-len('_Draw_0')]} {done}")
     return ", ".join(notes)

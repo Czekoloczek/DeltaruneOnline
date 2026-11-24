@@ -155,7 +155,6 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("function dro_heart_collide_p1(_dro_b)", dp.HEART_OFF)
 
 
-
 # Made-up draw code in the shape of the SOUL draws (no game code): what the other_souls rewrite must do.
 SOUL_DRAW = """if (color == 2)
 {
@@ -210,8 +209,11 @@ class SoulAlpha(unittest.TestCase):
         slime = ("surface_set_target(s);\ndraw_sprite_ext(spr_white, 0, 10, 10, 1, 1, 0, c_white, 1);\nsurface_reset_target();\n"
                  "draw_surface_ext(s, x, y, 1, 1, 0, c_gray, 1);\n")
         orange = "draw_sprite_ext(sprite_index, image_index, x, y, 1, 1, 0, image_blend, image_alpha);\ndraw_self();\n"
-        t, note = self.run_on(**{"gml_Object_obj_grazebox_Draw_0": graze, "gml_Object_obj_heart_slime_Draw_0": slime,
-                                 "gml_Object_obj_orangeheart_Draw_0": orange})
+        t, note = self.run_on(
+            gml_Object_obj_grazebox_Draw_0=graze,
+            gml_Object_obj_heart_slime_Draw_0=slime,
+            gml_Object_obj_orangeheart_Draw_0=orange,
+        )
         self.assertIn("c_white, (grazetimer / 6) * dronline_soul_alpha_controls(1));\ngrazetimer -= 1;", t["gml_Object_obj_grazebox_Draw_0"])
         # the slime is drawn into a surface first: only the surface on the screen is dimmed
         self.assertIn("c_white, 1);\nsurface_reset_target", t["gml_Object_obj_heart_slime_Draw_0"])
@@ -232,6 +234,32 @@ class SoulAlpha(unittest.TestCase):
         self.assertEqual(p.count("c_white, 1);"), 2, "the purple SOUL's own drawing is not a heart")
         self.assertIn("purple SOUL 1", note)
 
+    def test_comments_in_and_around_draw_calls(self):
+        src = (
+            "// draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1);\n"
+            "// draw_self();\n"
+            "/* draw_sprite_ext(s, 0, x3, y3, 1, 1, 0, c_white, 1); */\n"
+            "draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1 // alpha\n"
+            ");\n"
+            "draw_sprite_ext(s, 0, x3, y3, 1, 1, /* a, ) */ 0, c_white, // color, alpha\n"
+            "    image_alpha // end\n"
+            "    );\n"
+            "draw_sprite_ext(spr_tail, 0, tx // x2 in comment\n"
+            "    , ty, 1, 1, 0, c_orange, 0.5);\n"
+        )
+        t, note = self.run_on(**{dp.HEART_DRAW: src})
+        d = t[dp.HEART_DRAW]
+        # commented-out calls stay untouched
+        self.assertIn("// draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1);\n", d)
+        self.assertIn("// draw_self();\n", d)
+        self.assertIn("/* draw_sprite_ext(s, 0, x3, y3, 1, 1, 0, c_white, 1); */\n", d)
+        # trailing newline after // in alpha is kept so the closing paren and factor are not commented out
+        self.assertIn("c_white, (1 // alpha\n) * dronline_heart_alpha(2));\n", d)
+        self.assertIn("c_white, (// color, alpha\n    image_alpha // end\n) * dronline_heart_alpha(3));\n", d)
+        # comment mentioning x2 does not misclassify a tail draw, and newline after // in xa is preserved
+        self.assertIn("(0.5) * dronline_heart_alpha_at(tx // x2 in comment\n, ty));\n", d)
+        self.assertEqual(note, "obj_heart 3 draws (1 by the nearest heart, 0 left as they are)")
+
     def test_missing_entries(self):
         t, note = self.run_on()
         self.assertEqual(t, {})
@@ -246,6 +274,7 @@ class SoulAlpha(unittest.TestCase):
         self.assertTrue(d.startswith("dronline_heart_draw(true);\n"))
         self.assertTrue(d.rstrip().endswith("dronline_heart_draw(false);"))
         self.assertIn("dronline_heart_alpha(3)", d)
+
 
 if __name__ == "__main__":
     unittest.main()
