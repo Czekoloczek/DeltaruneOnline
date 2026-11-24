@@ -79,10 +79,11 @@ refused before it is built).
 - **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
   refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
   the state as sent, the model's answer, the frames played, the tokens and their price.
-- **Without the game or a key.** `--prompt` prints the first turn's prompt and calls nothing; `--fake <file>`
-  takes the answers from a file instead of DeepSeek. `tests/test_deepseek_player.py` runs the loop against a small
-  game written in Python, shaped like the save point, and against a fake API, and `native/test_agent.py solo`
-  runs it against `drnet.dll`.
+- **Without a key, or without the game.** `--prompt` prints the first turn's prompt and calls no DeepSeek API, and
+  `--fake <file>` takes the answers from a file instead of DeepSeek; both avoid needing an API key, but still
+  connect to the Agent API of a running game (or `native/test_agent.exe`). Without the game,
+  `tests/test_deepseek_player.py` runs the loop against a small game written in Python, shaped like the save point,
+  and against a fake API, and `native/test_agent.py solo` runs it against `drnet.dll`.
 - **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
   the lockstep, so both games must be running.
 
