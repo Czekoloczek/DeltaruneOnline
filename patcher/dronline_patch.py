@@ -71,7 +71,7 @@ HOOK_GUI = "gml_Object_obj_time_Draw_64"       # Draw GUI: status line, arrows t
 # shared camera back before the next Step. Both calls go first, so an exit in the game's own code can't skip them.
 HOOK_PREDRAW = "gml_Object_obj_time_Draw_76"
 HOOK_POSTDRAW = "gml_Object_obj_time_Draw_77"
-DLL =os.path.join(REPO, "native", "build", "drnet.dll")
+DLL = os.path.join(REPO, "native", "build", "drnet.dll")
 
 # Own SOUL (see "own SOUL" in scr_dronline.gml): hits on a heart are decided by its owner while the
 # owner's input is delayed. Heart 1 is hit through obj_heart's collision event, hearts 2 and 3 through

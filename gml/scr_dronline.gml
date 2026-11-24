@@ -131,9 +131,14 @@ function dronline_init()
     global.dro_obj_kris = asset_get_index("obj_mainchara");
     global.dro_obj_cater = asset_get_index("obj_caterpillarchara");
     global.dro_cam_moved = false;
+    global.dro_cam_pending = false;
+    global.dro_cam_handle = -1;
+    global.dro_cam_moved_room = -1;
     global.dro_cam_room = -1;
     global.dro_cam_x = 0;
     global.dro_cam_y = 0;
+    global.dro_cam_vx = 0;
+    global.dro_cam_vy = 0;
     global.dro_cam_sx = 0;
     global.dro_cam_sy = 0;
     if (!global.dro_on)
@@ -385,6 +390,8 @@ function dronline_step()
         return;
     dronline_agent_poll();
     global.dro_restarting = false;
+    dronline_cam_end();
+    global.dro_cam_moved = false;
     dronline_heart_unswap();
     for (var p = 0; p < 4; p++)
         global.dro_bits[p] = 0;
@@ -595,15 +602,21 @@ function dronline_chara(p)
     return found;
 }
 
-// The view this machine shows: the shared camera, or the own camera while dronline_cam_begin has moved it.
+// The view this machine shows: the shared camera, or the own camera rendered by dronline_cam_begin this frame.
 function dronline_view_x()
 {
-    return global.dro_cam_moved ? global.dro_cam_x : camera_get_view_x(view_camera[0]);
+    var cam = view_camera[0];
+    if (global.dro_cam_moved && room == global.dro_cam_moved_room && cam == global.dro_cam_handle)
+        return global.dro_cam_vx;
+    return (cam != -1) ? camera_get_view_x(cam) : 0;
 }
 
 function dronline_view_y()
 {
-    return global.dro_cam_moved ? global.dro_cam_y : camera_get_view_y(view_camera[0]);
+    var cam = view_camera[0];
+    if (global.dro_cam_moved && room == global.dro_cam_moved_room && cam == global.dro_cam_handle)
+        return global.dro_cam_vy;
+    return (cam != -1) ? camera_get_view_y(cam) : 0;
 }
 
 // Draw GUI: one arrow at the screen edge for every other player whose character is out of view.
@@ -612,13 +625,16 @@ function dronline_draw_arrows()
     if (global.dro_connecting || !dronline_walking())
         return;
     var cam = view_camera[0];
+    if (cam == -1)
+        return;
     var vx = dronline_view_x();
     var vy = dronline_view_y();
     var vw = camera_get_view_width(cam);
     var vh = camera_get_view_height(cam);
     var gw = display_get_gui_width();
     var gh = display_get_gui_height();
-    if (vw <= 0 || vh <= 0)
+    var m = 18;
+    if (vw <= 0 || vh <= 0 || gw <= m * 2 || gh <= m * 2)
         return;
     for (var p = 1; p <= global.dro_players; p++)
     {
@@ -627,14 +643,13 @@ function dronline_draw_arrows()
         var c = dronline_chara(p);
         if (c == noone || !c.visible)
             continue;
-        var cx = (c.bbox_left + c.bbox_right) / 2;
-        var cy = (c.bbox_top + c.bbox_bottom) / 2;
+        var cx = (c.sprite_index != -1) ? (c.bbox_left + c.bbox_right) / 2 : c.x;
+        var cy = (c.sprite_index != -1) ? (c.bbox_top + c.bbox_bottom) / 2 : c.y;
         if (cx >= vx && cx <= vx + vw && cy >= vy && cy <= vy + vh)
             continue;
         // from the middle of the screen towards the character, stopped at the edge
         var dx = (cx - vx) * gw / vw - gw / 2;
         var dy = (cy - vy) * gh / vh - gh / 2;
-        var m = 18;
         var t = min((abs(dx) > 0) ? (gw / 2 - m) / abs(dx) : 1000000, (abs(dy) > 0) ? (gh / 2 - m) / abs(dy) : 1000000);
         var ax = gw / 2 + dx * t;
         var ay = gh / 2 + dy * t;
@@ -662,8 +677,12 @@ function dronline_draw_arrows()
 // stores something computed from the camera would make the machines differ (docs/DESIGN.md, "Own camera").
 function dronline_cam_begin()
 {
+    if (!variable_global_exists("dro_mode"))
+        return;
+    // recover first if a previous draw ended without Post-Draw, then drop the previous frame's GUI snapshot
+    dronline_cam_end();
     global.dro_cam_moved = false;
-    if (!variable_global_exists("dro_mode") || !global.dro_net || global.dro_connecting || global.dro_camera != "own")
+    if (!global.dro_net || global.dro_connecting || global.dro_camera != "own")
         return;
     if (global.dro_player == 1 || !dronline_walking())   // the shared camera follows player 1 anyway
     {
@@ -677,12 +696,16 @@ function dronline_cam_begin()
         return;
     }
     var cam = view_camera[0];
+    if (cam == -1)
+        return;
     var sx = camera_get_view_x(cam);
     var sy = camera_get_view_y(cam);
     var vw = camera_get_view_width(cam);
     var vh = camera_get_view_height(cam);
-    var cx = (c.bbox_left + c.bbox_right) / 2;
-    var cy = (c.bbox_top + c.bbox_bottom) / 2;
+    if (vw <= 0 || vh <= 0)
+        return;
+    var cx = (c.sprite_index != -1) ? (c.bbox_left + c.bbox_right) / 2 : c.x;
+    var cy = (c.sprite_index != -1) ? (c.bbox_top + c.bbox_bottom) / 2 : c.y;
     // close to the others: the shared view; further away: the view centred on the own character
     var m = 40;
     var tx = sx;
@@ -701,28 +724,35 @@ function dronline_cam_begin()
     }
     global.dro_cam_x += (tx - global.dro_cam_x) * 0.2;
     global.dro_cam_y += (ty - global.dro_cam_y) * 0.2;
-    if (abs(tx - global.dro_cam_x) < 1 && abs(ty - global.dro_cam_y) < 1)
-    {
+    if (abs(tx - global.dro_cam_x) < 1)
         global.dro_cam_x = tx;
+    if (abs(ty - global.dro_cam_y) < 1)
         global.dro_cam_y = ty;
-    }
-    if (round(global.dro_cam_x) == round(sx) && round(global.dro_cam_y) == round(sy))
+    var rx = round(global.dro_cam_x);
+    var ry = round(global.dro_cam_y);
+    if (rx == round(sx) && ry == round(sy))
         return;
     global.dro_cam_sx = sx;
     global.dro_cam_sy = sy;
-    global.dro_cam_x = round(global.dro_cam_x);
-    global.dro_cam_y = round(global.dro_cam_y);
-    camera_set_view_pos(cam, global.dro_cam_x, global.dro_cam_y);
+    global.dro_cam_vx = rx;
+    global.dro_cam_vy = ry;
+    global.dro_cam_handle = cam;
+    global.dro_cam_moved_room = room;
+    camera_set_view_pos(cam, rx, ry);
+    global.dro_cam_pending = true;
     global.dro_cam_moved = true;
 }
 
-// Post-Draw of obj_time (hooked by the patcher): the shared camera again, exactly where the game left it.
-// dro_cam_moved stays set until the next Pre-Draw, so the arrows (Draw GUI) use the view that was drawn.
+// Post-Draw of obj_time (hooked by the patcher, and called defensively at Begin Step / Pre-Draw): the shared
+// camera again, exactly where the game left it. Single-use and bound to the camera handle and room moved in
+// Pre-Draw; dro_cam_moved (dro_cam_vx/vy) stays valid until the next Begin Step / Pre-Draw for Draw GUI arrows.
 function dronline_cam_end()
 {
-    if (!variable_global_exists("dro_mode") || !global.dro_cam_moved)
+    if (!variable_global_exists("dro_mode") || !global.dro_cam_pending)
         return;
-    camera_set_view_pos(view_camera[0], global.dro_cam_sx, global.dro_cam_sy);
+    global.dro_cam_pending = false;
+    if (global.dro_cam_handle != -1 && view_camera[0] == global.dro_cam_handle && room == global.dro_cam_moved_room)
+        camera_set_view_pos(global.dro_cam_handle, global.dro_cam_sx, global.dro_cam_sy);
 }
 
 // Writes the recorded input when the game ends (called from obj_time Game End / Clean Up by the patcher).
