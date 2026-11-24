@@ -179,10 +179,36 @@ def export_check(out):
     return int(m.group(1))
 
 
+SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+
+
+def _rewrite_rule(rx, repl, text):
+    spans = [(m.start(), m.end()) for m in SKIP_RX.finditer(text)]
+    si = 0
+    count = 0
+
+    def _sub(m):
+        nonlocal si, count
+        pos = m.start()
+        while si < len(spans) and spans[si][1] <= pos:
+            si += 1
+        if si < len(spans) and spans[si][0] <= pos:
+            return m.group(0)
+        k = pos - 1
+        while k >= 0 and text[k] in " \t":
+            k -= 1
+        if k >= 0 and text[k] == ".":
+            return m.group(0)
+        count += 1
+        return repl
+
+    return rx.sub(_sub, text), count
+
+
 def rewrite(text):
     total = 0
     for rx, repl in RULES:
-        text, n = rx.subn(repl, text)
+        text, n = _rewrite_rule(rx, repl, text)
         total += n
 
     def _sub_var(m):
