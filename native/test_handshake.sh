@@ -33,15 +33,19 @@ cleanup() {
 trap cleanup EXIT
 
 # Two distinct synthetic files (> 64 KB so multi-chunk SHA-256 streaming is exercised too).
-"$PY" - "$out/hashes.txt" <<'EOF'
-import hashlib, sys
+hashes=$("$PY" - <<'EOF' | tr -d '\r'
+import hashlib
 a = b"DELTARUNE_TEST_A_" * 5000
 b = b"DELTARUNE_TEST_B_" * 5000
 open("_test_data_a.win", "wb").write(a)
 open("_test_data_b.win", "wb").write(b)
-open(sys.argv[1], "w").write(hashlib.sha256(a).hexdigest()[:12] + " " + hashlib.sha256(b).hexdigest()[:12] + "\n")
+print(hashlib.sha256(a).hexdigest()[:12], hashlib.sha256(b).hexdigest()[:12])
 EOF
-read -r ha hb < "$out/hashes.txt"
+)
+# shellcheck disable=SC2086
+set -- $hashes
+ha=$1
+hb=$2
 
 run_exe() {
     outfile=$1
