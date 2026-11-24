@@ -45,14 +45,18 @@ class RewriteRules(unittest.TestCase):
                    "y = ystart + sin(dro_current_time() * 0.004) * 8; song_t += dro_delta_time() / 1000000;", 2)
         self.check("ok = (current_time >= t0 && delta_time <= 50000) ? current_time : delta_time;",
                    "ok = (dro_current_time() >= t0 && dro_delta_time() <= 50000) ? dro_current_time() : dro_delta_time();", 4)
-        # strings, comments, field access, assignments and lookalikes stay untouched
+        # strings, comments, field access (including across whitespace/comments), assignments and lookalikes stay untouched
         untouched = (
             'show_debug_message("current_time delta_time");\n'
             "// current_time + delta_time\n"
             "/* delta_time */ a = obj.current_time + other.delta_time + my_current_time + delta_time2;\n"
+            "b = obj . current_time + obj. /* note */ delta_time + obj.\n// note\ncurrent_time;\n"
             "current_time = 0; delta_time += 1; current_time(); delta_time++;\n"
         )
         self.check(untouched, untouched, 0)
+        # a dot inside a preceding comment must not suppress standalone rewrites
+        self.check("v = a + /* . */ current_time + /* . */ delta_time;",
+                   "v = a + /* . */ dro_current_time() + /* . */ dro_delta_time();", 2)
 
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",

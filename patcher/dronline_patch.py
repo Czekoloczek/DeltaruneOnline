@@ -11,6 +11,7 @@ Usage:
   (--utmt may also point to UndertaleModCli.exe on Windows)
 """
 import argparse
+import bisect
 import os
 import re
 import shutil
@@ -162,16 +163,41 @@ def export_check(out):
     return int(m.group(1))
 
 
+SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+
+
+def _preceded_by_dot(text, pos, comment_spans, comment_ends):
+    """True when the nearest non-whitespace, non-comment character before pos is '.'."""
+    i = pos - 1
+    while i >= 0:
+        if text[i].isspace():
+            i -= 1
+            continue
+        k = bisect.bisect_right(comment_ends, i)
+        if k < len(comment_spans) and comment_spans[k][0] <= i < comment_spans[k][1]:
+            i = comment_spans[k][0] - 1
+            continue
+        return text[i] == "."
+    return False
+
+
 def rewrite(text):
     total = 0
     for rx, repl in RULES:
         text, n = rx.subn(repl, text)
         total += n
 
+    comment_spans = []
+    comment_ends = []
+    for m in SKIP_RX.finditer(text):
+        if text[m.start()] == "/":
+            comment_spans.append((m.start(), m.end()))
+            comment_ends.append(m.end())
+
     def _sub_var(m):
         nonlocal total
         name = m.group(1)
-        if not name:
+        if not name or _preceded_by_dot(text, m.start(1), comment_spans, comment_ends):
             return m.group(0)
         total += 1
         return VAR_RULES[name]
