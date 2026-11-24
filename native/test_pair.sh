@@ -34,6 +34,11 @@ fi
 if timeout --version >/dev/null 2>&1; then to="timeout 180"; else to=""; fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
+stage="$out/bin"
+mkdir -p "$stage"
+cp drnet.dll test_drnet.exe "$stage/"
+printf 'DELTARUNE_PAIR_TEST_DATA\n' > "$stage/data.win"
+cd "$stage"
 
 echo "== $players players, $frames frames, ${lag} ms test latency each way$([ "$late" -gt 0 ] && echo ", the last one ${late} s late"), $where"
 start_side() {   # role player outfile

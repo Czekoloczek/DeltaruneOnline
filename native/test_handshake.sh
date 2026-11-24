@@ -1,13 +1,17 @@
 #!/bin/sh
-# Handshake checks for drnet.dll without the game: verifies that matching data.win files connect,
-# mismatched data.win files are refused immediately with both SHA-256 prefixes (verified against Python's
-# hashlib.sha256), one missing data.win is refused, and mismatched player counts are refused.
+# Handshake checks for drnet.dll without the game: verifies that matching data.win files connect with
+# identical checksums, mismatched data.win files are refused promptly with both SHA-256 prefixes (verified
+# against Python's hashlib.sha256), missing data.win fails immediately on start even when both peers lack it,
+# and mismatched player counts are refused promptly.
 # Runs natively on Windows (Git Bash) or under Wine on Linux. Used by tools/verify.sh and CI.
 set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$(sh "$REPO_ROOT/tools/find_python.sh")"
-cd "$REPO_ROOT/native/build"
-[ -f drnet.dll ] && [ -f test_drnet.exe ] || { echo "build first: sh native/build.sh"; exit 2; }
+BUILD="$REPO_ROOT/native/build"
+if [ ! -f "$BUILD/drnet.dll" ] || [ ! -f "$BUILD/test_drnet.exe" ]; then
+    echo "build first: sh native/build.sh"
+    exit 2
+fi
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*) native=1 ;;
@@ -27,18 +31,22 @@ fi
 if timeout --version >/dev/null 2>&1; then to="timeout 30"; else to=""; fi
 
 out=$(mktemp -d)
-cleanup() {
-    rm -rf "$out" _test_data_a.win _test_data_b.win
-}
-trap cleanup EXIT
+trap 'rm -rf "$out"' EXIT
+
+# Stage binaries and fixtures in a fresh isolated directory so no adjacent data.win in native/build can
+# affect the missing-file test and native/build stays untouched.
+stage="$out/bin"
+mkdir -p "$stage"
+cp "$BUILD/drnet.dll" "$BUILD/test_drnet.exe" "$stage/"
+cd "$stage"
 
 # Two distinct synthetic files (> 64 KB so multi-chunk SHA-256 streaming is exercised too).
 hashes=$("$PY" - <<'EOF' | tr -d '\r'
 import hashlib
 a = b"DELTARUNE_TEST_A_" * 5000
 b = b"DELTARUNE_TEST_B_" * 5000
-open("_test_data_a.win", "wb").write(a)
-open("_test_data_b.win", "wb").write(b)
+open("test_a.win", "wb").write(a)
+open("test_b.win", "wb").write(b)
 print(hashlib.sha256(a).hexdigest()[:12], hashlib.sha256(b).hexdigest()[:12])
 EOF
 )
@@ -57,61 +65,97 @@ run_exe() {
     fi
 }
 
+# Prompt refusal bound: well below the 30 s drnet_connect timeout, tolerant of Wine/CI jitter.
+MAX_REFUSAL_S=15
+
 echo "== handshake checks ($where)"
 
-# 1. Matching data.win files connect and stay in sync
-run_exe "$out/m1.txt" host 2 1 30 -game _test_data_a.win
+# 1. Matching data.win files connect, stay in sync, and report matching final checksums with no desync
+run_exe "$out/m1.txt" host 2 1 30 -game test_a.win
 p1=$!
 sleep 1
-run_exe "$out/m2.txt" client 2 2 30 -game _test_data_a.win
+run_exe "$out/m2.txt" client 2 2 30 -game test_a.win
 p2=$!
-wait "$p1" || { echo "FAIL: matching host failed:"; cat "$out/m1.txt"; exit 1; }
-wait "$p2" || { echo "FAIL: matching client failed:"; cat "$out/m2.txt"; exit 1; }
-grep -q "final sum" "$out/m1.txt" && grep -q "final sum" "$out/m2.txt" || { echo "FAIL: matching run did not finish"; exit 1; }
-echo "  OK: matching data.win ($ha...) connected"
+if ! wait "$p1"; then echo "FAIL: matching host failed:"; cat "$out/m1.txt"; exit 1; fi
+if ! wait "$p2"; then echo "FAIL: matching client failed:"; cat "$out/m2.txt"; exit 1; fi
+l1=$(grep 'final sum' "$out/m1.txt" || true)
+l2=$(grep 'final sum' "$out/m2.txt" || true)
+if [ -z "$l1" ] || [ -z "$l2" ]; then
+    echo "FAIL: matching run did not print final sum:"
+    cat "$out/m1.txt"; cat "$out/m2.txt"; exit 1
+fi
+s1=$(echo "$l1" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+d1=$(echo "$l1" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
+s2=$(echo "$l2" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+d2=$(echo "$l2" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
+if [ "$s1" != "$s2" ] || [ "$d1" != "-1" ] || [ "$d2" != "-1" ]; then
+    echo "FAIL: matching run checksums or desync differ (host $s1/$d1, client $s2/$d2)"
+    exit 1
+fi
+echo "  OK: matching data.win ($ha...) connected (sum $s1, desync -1)"
 
-# 2. Mismatched data.win files are refused immediately with both SHA-256 prefixes
-run_exe "$out/d1.txt" host 2 1 30 -game _test_data_a.win
+# 2. Mismatched data.win files are refused promptly with both SHA-256 prefixes
+run_exe "$out/d1.txt" host 2 1 30 -game test_a.win
 p1=$!
 sleep 1
-run_exe "$out/d2.txt" client 2 2 30 -game _test_data_b.win
+t0=$(date +%s)
+run_exe "$out/d2.txt" client 2 2 30 -game test_b.win
 p2=$!
 r1=0; wait "$p1" || r1=$?
 r2=0; wait "$p2" || r2=$?
-[ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] || { echo "FAIL: mismatched data.win unexpectedly succeeded ($r1, $r2)"; exit 1; }
-grep -q "different data.win" "$out/d1.txt" && grep -q "$ha" "$out/d1.txt" && grep -q "$hb" "$out/d1.txt" || {
-    echo "FAIL: host missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d1.txt"; exit 1;
-}
-grep -q "different data.win" "$out/d2.txt" && grep -q "$ha" "$out/d2.txt" && grep -q "$hb" "$out/d2.txt" || {
-    echo "FAIL: client missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d2.txt"; exit 1;
-}
-echo "  OK: mismatched data.win ($ha... vs $hb...) refused on both sides"
+elapsed=$(($(date +%s) - t0))
+if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; then
+    echo "FAIL: mismatched data.win unexpectedly succeeded ($r1, $r2)"; exit 1
+fi
+if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
+    echo "FAIL: mismatched data.win refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+fi
+if ! grep -q "different data.win" "$out/d1.txt" || ! grep -q "$ha" "$out/d1.txt" || ! grep -q "$hb" "$out/d1.txt"; then
+    echo "FAIL: host missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d1.txt"; exit 1
+fi
+if ! grep -q "different data.win" "$out/d2.txt" || ! grep -q "$ha" "$out/d2.txt" || ! grep -q "$hb" "$out/d2.txt"; then
+    echo "FAIL: client missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d2.txt"; exit 1
+fi
+echo "  OK: mismatched data.win ($ha... vs $hb...) refused promptly on both sides (${elapsed}s)"
 
-# 3. Missing data.win on one side is refused
-run_exe "$out/z1.txt" host 2 1 30 -game _test_data_a.win
+# 3. Missing data.win (no -game and no data.win next to drnet.dll) fails immediately on start even when both lack it
+t0=$(date +%s)
+run_exe "$out/z1.txt" host 2 1 30
 p1=$!
-sleep 1
 run_exe "$out/z2.txt" client 2 2 30
 p2=$!
 r1=0; wait "$p1" || r1=$?
 r2=0; wait "$p2" || r2=$?
-[ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] || { echo "FAIL: missing data.win on client unexpectedly succeeded"; exit 1; }
-grep -q "different data.win" "$out/z1.txt" && grep -q "different data.win" "$out/z2.txt" || {
-    echo "FAIL: missing data.win did not produce expected error:"; cat "$out/z1.txt"; cat "$out/z2.txt"; exit 1;
-}
-echo "  OK: one-sided missing data.win refused"
+elapsed=$(($(date +%s) - t0))
+if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; then
+    echo "FAIL: missing data.win unexpectedly succeeded ($r1, $r2)"; exit 1
+fi
+if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
+    echo "FAIL: missing data.win failure took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+fi
+if ! grep -q "cannot read data.win" "$out/z1.txt" || ! grep -q "cannot read data.win" "$out/z2.txt"; then
+    echo "FAIL: missing data.win did not produce expected error:"; cat "$out/z1.txt"; cat "$out/z2.txt"; exit 1
+fi
+echo "  OK: missing data.win refused immediately on both sides (${elapsed}s)"
 
-# 4. Mismatched player count is refused
-run_exe "$out/p1.txt" host 2 1 30 -game _test_data_a.win
+# 4. Mismatched player count is refused promptly on both sides
+run_exe "$out/p1.txt" host 2 1 30 -game test_a.win
 p1=$!
 sleep 1
-run_exe "$out/p2.txt" client 3 2 30 -game _test_data_a.win
+t0=$(date +%s)
+run_exe "$out/p2.txt" client 3 2 30 -game test_a.win
 p2=$!
 r1=0; wait "$p1" || r1=$?
 r2=0; wait "$p2" || r2=$?
-[ "$r1" -ne 0 ] && [ "$r2" -ne 0 ] || { echo "FAIL: mismatched player count unexpectedly succeeded"; exit 1; }
-grep -q "players=" "$out/p1.txt" && grep -q "different player count" "$out/p2.txt" || {
-    echo "FAIL: player count mismatch did not produce expected error:"; cat "$out/p1.txt"; cat "$out/p2.txt"; exit 1;
-}
-echo "  OK: mismatched player count refused on both sides"
+elapsed=$(($(date +%s) - t0))
+if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; then
+    echo "FAIL: mismatched player count unexpectedly succeeded ($r1, $r2)"; exit 1
+fi
+if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
+    echo "FAIL: player count refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+fi
+if ! grep -q "players=" "$out/p1.txt" || ! grep -q "different player count" "$out/p2.txt"; then
+    echo "FAIL: player count mismatch did not produce expected error:"; cat "$out/p1.txt"; cat "$out/p2.txt"; exit 1
+fi
+echo "  OK: mismatched player count refused promptly on both sides (${elapsed}s)"
 echo "OK: all handshake checks passed"

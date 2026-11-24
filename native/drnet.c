@@ -474,7 +474,7 @@ static int dirname_join_w(wchar_t *dst, size_t cap, const wchar_t *base_file, co
  *   1. `-game <path>` on the process command line (what DELTARUNE's launcher passes, and what test_drnet uses),
  *   2. `data.win` next to drnet.dll (the patcher always copies drnet.dll alongside the patched data.win).
  * Never falls back to cwd `data.win`, which in DELTARUNE's root folder would be the launcher's own data.win. */
-static void load_data_hash(void)
+static int load_data_hash(void)
 {
     const wchar_t *cmd = GetCommandLineW();
     wchar_t tok[1024], game_arg[1024], cand[1024], base[1024];
@@ -505,9 +505,18 @@ static void load_data_hash(void)
         if (n > 0 && n < 1024 && dirname_join_w(cand, 1024, base, L"data.win") && hash_file_w(cand, my_data_hash))
             has_data_hash = 1;
     }
-    hex_bytes(my_data_hash, 32, hex64);
-    if (has_data_hash) logm("data.win sha256 %s", hex64);
-    else logm("data.win not found next to drnet.dll; build hash is %s", hex64);
+    if (has_data_hash) {
+        hex_bytes(my_data_hash, 32, hex64);
+        logm("data.win sha256 %s", hex64);
+    } else {
+        logm("data.win not found via -game or next to drnet.dll");
+    }
+    return has_data_hash;
+}
+
+static int same_addr(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
 }
 
 /* Status text once player p's goodbye made drnet_exchange give up (lock held). */
@@ -535,24 +544,32 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
     const hdr_t *h = (const hdr_t *)buf;
     if (len < (int)sizeof(hdr_t) || h->magic != MAGIC) return;
     /* a client repeats HELLO until it is welcomed: log the first one from each address */
-    if (!connect_err && (h->type == T_WELCOME || h->type == T_REJECT ||
-        (h->type == T_HELLO && h->player >= 1 && h->player <= MAXP &&
-         (!have_peer[h->player] || peer[h->player].sin_addr.s_addr != from->sin_addr.s_addr || peer[h->player].sin_port != from->sin_port))))
+    if (!connect_err && (
+        (!is_host && have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT)) ||
+        (is_host && h->type == T_HELLO && h->player >= 2 && h->player <= MAXP &&
+         (!have_peer[h->player] || !same_addr(&peer[h->player], from))))) {
         logm("got %s from %s:%d player %d",
              h->type == T_HELLO ? "HELLO" : (h->type == T_WELCOME ? "WELCOME" : "REJECT"),
              inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
+    }
     if (h->proto != PROTO) {
-        if (!connected && !connect_err) {
-            connect_err = 1;
-            snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version (protocol %d, mine %d)", h->proto, PROTO);
-            logm("%s", status);
+        int valid_hs = is_host
+            ? (h->type == T_HELLO && h->player >= 2 && h->player <= MAXP && h->players >= 2 && h->players <= MAXP)
+            : (have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT));
+        if (valid_hs) {
+            if (is_host) send_reject(from, REJ_PROTO);
+            if (!connected && !connect_err) {
+                connect_err = 1;
+                snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version (protocol %d, mine %d)", h->proto, PROTO);
+                logm("%s", status);
+            }
         }
-        if (is_host && h->type == T_HELLO) send_reject(from, REJ_PROTO);
         return;
     }
     if (h->type == T_HELLO && is_host) {
         const hello_pkt *hp = (const hello_pkt *)buf;
         hdr_t w; int q, all = 1;
+        if (h->player < 2 || h->player > MAXP || h->players < 2 || h->players > MAXP) return;
         if (h->players != players) {
             send_reject(from, REJ_PLAYERS);
             if (!connected && !connect_err) {
@@ -562,7 +579,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             return;
         }
-        if (h->player < 2 || h->player > players) return;
+        if (h->player > players) return;
         if (len < (int)sizeof(hello_pkt)) {
             send_reject(from, REJ_PROTO);
             if (!connected && !connect_err) {
@@ -572,7 +589,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             return;
         }
-        if (memcmp(hp->data_hash, my_data_hash, 32) != 0) {
+        if (!has_data_hash || memcmp(hp->data_hash, my_data_hash, 32) != 0) {
             send_reject(from, REJ_HASH);
             if (!connected && !connect_err) {
                 char their12[13], mine12[13], their64[65], mine64[65];
@@ -584,13 +601,23 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             return;
         }
+        /* Once this attempt has refused a peer, never register peers or emit WELCOME. */
+        if (connect_err) return;
         peer[h->player] = *from; have_peer[h->player] = 1;
         /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
            exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
            HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. */
         for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
-        if (all) { fill_hdr(&w, T_WELCOME, 1); send_to(from, &w, sizeof(w)); }
-    } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt)) {
+        if (all) {
+            fill_hdr(&w, T_WELCOME, 1);
+            if (!connected) {
+                connected = 1;
+                for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
+            } else {
+                send_to(from, &w, sizeof(w));
+            }
+        }
+    } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
         const reject_pkt *r = (const reject_pkt *)buf;
         if (!connected && !connect_err) {
             connect_err = 1;
@@ -605,8 +632,8 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             logm("rejected by host: %s", status);
         }
-    } else if (h->type == T_WELCOME && !is_host) {
-        connected = 1;
+    } else if (h->type == T_WELCOME && !is_host && have_peer[1] && same_addr(from, &peer[1])) {
+        if (!connect_err) connected = 1;
     } else if ((h->type == T_INPUT || h->type == T_BYE) && len >= (int)sizeof(input_pkt)) {
         const input_pkt *k = (const input_pkt *)buf; int i;
         if (k->h.player < 1 || k->h.player > players || k->h.player == me) return;
@@ -772,6 +799,12 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     delay_auto = dly < 0; delay = delay_auto ? 0 : (int)dly;
     if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); WSACleanup(); return 0; }
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); WSACleanup(); return 0; }
+    if (!load_data_hash()) {
+        snprintf(status, sizeof(status), "cannot read data.win to verify build");
+        logm("%s", status);
+        WSACleanup();
+        return 0;
+    }
     /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
        process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
        again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
@@ -801,7 +834,6 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
         have_peer[1] = 1;
     }
     connected = 0; connect_err = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
-    load_data_hash();
     srand((unsigned)now_us());
     running = 1;
     thr = CreateThread(NULL, 0, net_thread, NULL, 0, NULL);
@@ -821,22 +853,29 @@ EXPORT double drnet_connect(double timeout_ms)
         lock();
         if (connect_err) {
             done = -1;
-        } else if (is_host) {
-            int p, all = 1;
-            for (p = 2; p <= players; p++) if (!have_peer[p]) all = 0;
-            if (all) { connected = 1; done = 1; logm("all players connected"); }
-        } else {
-            if (connected) { done = 1; logm("connected to host"); }
-            else if (GetTickCount() - last_hello > 200) {
-                hello_pkt hp;
-                fill_hdr(&hp.h, T_HELLO, me);
-                memcpy(hp.data_hash, my_data_hash, sizeof(hp.data_hash));
-                send_to(&peer[1], &hp, sizeof(hp)); last_hello = GetTickCount();
-            }
+        } else if (connected) {
+            done = 1;
+            logm("%s", is_host ? "all players connected" : "connected to host");
+        } else if (!is_host && GetTickCount() - last_hello > 200) {
+            hello_pkt hp;
+            fill_hdr(&hp.h, T_HELLO, me);
+            memcpy(hp.data_hash, my_data_hash, sizeof(hp.data_hash));
+            send_to(&peer[1], &hp, sizeof(hp)); last_hello = GetTickCount();
         }
         unlock();
         if (done > 0) return 1;
-        if (done < 0) { if (is_host) Sleep(50); return 0; }
+        if (done < 0) {
+            if (is_host) {
+                /* Keep serving REJECT replies past one client HELLO retry interval (200 ms) so a short burst
+                   that drops the initial REJECT copies still lets the client get the reason on its retry. */
+                DWORD refuse_start = GetTickCount();
+                while (GetTickCount() - refuse_start < 350) {
+                    Sleep(10);
+                    pump_window_messages();
+                }
+            }
+            return 0;
+        }
         Sleep(10);
         pump_window_messages();
         if (GetTickCount() - last_note > 5000) { last_note = GetTickCount(); logm("connect: still waiting"); }

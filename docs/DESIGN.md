@@ -45,9 +45,11 @@ A network thread receives packets the moment they arrive, so the ping is measure
 input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
 last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
-`drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 and
-refuses to connect on a build, protocol or player-count mismatch, showing both hash prefixes immediately instead of
-desyncing later. State fingerprints are exchanged every 30 frames to detect desyncs.
+`drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
+refusing to start if `data.win` cannot be read — and refuses to connect on a build, protocol or player-count
+mismatch, showing both SHA-256 hash prefixes on a `data.win` mismatch instead of desyncing later. All players must
+update `drnet.dll` together: mixing protocol 3 and protocol 4 peers can still hit the connection timeout on the
+protocol-3 side. State fingerprints are exchanged every 30 frames to detect desyncs.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -155,9 +157,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
-- `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect, while mismatched `data.win`
-  hashes, a missing `data.win` on one side, or mismatched player counts are refused immediately on both sides with
-  the expected SHA-256 prefixes (Wine on Linux, native on Windows).
+- `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect with identical checksums,
+  while mismatched `data.win` hashes (with both SHA-256 prefixes), a missing `data.win` (even on both sides), or
+  mismatched player counts are refused promptly on both sides (Wine on Linux, native on Windows).
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network

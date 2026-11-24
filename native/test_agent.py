@@ -20,6 +20,7 @@ builds the real state is not part of this: it needs the game. Used by tools/veri
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -67,13 +68,14 @@ class Game:
     """test_agent.exe, under Wine or natively."""
 
     def __init__(self, tmp, mode, port, fps=100, pad=0, delay=-1, lag=0, wave=0):
+        stage = os.path.join(tmp, "bin")
         cmd, env = runner()
-        cmd = cmd + [os.path.join(BUILD, "test_agent.exe")]
+        cmd = cmd + [os.path.join(stage, "test_agent.exe")]
         self.name = "%s game" % mode
         self.log = os.path.join(tmp, "%s-%d.txt" % (mode, port))
         self.out = open(self.log, "wb")
         self.proc = subprocess.Popen(cmd + [mode, str(port), str(fps), str(pad), str(delay), str(lag), str(wave)],
-                                     cwd=BUILD, env=env, stdin=subprocess.DEVNULL, stdout=self.out, stderr=subprocess.STDOUT)
+                                     cwd=stage, env=env, stdin=subprocess.DEVNULL, stdout=self.out, stderr=subprocess.STDOUT)
         games.append(self)
 
     def output(self):
@@ -542,6 +544,12 @@ def main(argv):
             print("warning: creating the Wine prefix %s failed" % env["WINEPREFIX"])
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
+        stage = os.path.join(tmp, "bin")
+        os.makedirs(stage)
+        for name in ("drnet.dll", "test_agent.exe"):
+            shutil.copy2(os.path.join(BUILD, name), os.path.join(stage, name))
+        with open(os.path.join(stage, "data.win"), "wb") as f:
+            f.write(b"DELTARUNE_AGENT_TEST_DATA\n")
         runs = [("solo", "one game", lambda: solo(tmp)), ("long", "long replies", lambda: long_replies(tmp)),
                 ("online", "host and client, delay 3", lambda: online(tmp, 3, 0)),
                 ("online", "host and client, automatic delay, 60 ms test latency that comes and goes", lambda: online(tmp, -1, 60))]
