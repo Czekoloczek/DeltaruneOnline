@@ -7,6 +7,10 @@
 set -eu
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$(sh "$REPO_ROOT/tools/find_python.sh")"
+case "$PY" in
+    /*|[A-Za-z]:/*|[A-Za-z]:\\*) ;;
+    */*) PY="$(cd "$(dirname "$PY")" && pwd)/$(basename "$PY")" ;;
+esac
 BUILD="$REPO_ROOT/native/build"
 if [ ! -f "$BUILD/drnet.dll" ] || [ ! -f "$BUILD/test_drnet.exe" ]; then
     echo "build first: sh native/build.sh"
@@ -158,4 +162,32 @@ if ! grep -q "players=" "$out/p1.txt" || ! grep -q "different player count" "$ou
     echo "FAIL: player count mismatch did not produce expected error:"; cat "$out/p1.txt"; cat "$out/p2.txt"; exit 1
 fi
 echo "  OK: mismatched player count refused promptly on both sides (${elapsed}s)"
+
+# 5. Three players: compatible player 2 is notified promptly when player 3 has a mismatched data.win
+run_exe "$out/t1.txt" host 3 1 30 -game test_a.win
+p1=$!
+sleep 1
+run_exe "$out/t2.txt" client 3 2 30 -game test_a.win
+p2=$!
+sleep 1
+t0=$(date +%s)
+run_exe "$out/t3.txt" client 3 3 30 -game test_b.win
+p3=$!
+r1=0; wait "$p1" || r1=$?
+r2=0; wait "$p2" || r2=$?
+r3=0; wait "$p3" || r3=$?
+elapsed=$(($(date +%s) - t0))
+if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ] || [ "$r3" -eq 0 ]; then
+    echo "FAIL: 3-player mismatch unexpectedly succeeded ($r1, $r2, $r3)"; exit 1
+fi
+if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
+    echo "FAIL: 3-player abort took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+fi
+if ! grep -q "different data.win" "$out/t1.txt" || ! grep -q "different data.win" "$out/t3.txt"; then
+    echo "FAIL: host or player 3 missing data.win mismatch error:"; cat "$out/t1.txt"; cat "$out/t3.txt"; exit 1
+fi
+if ! grep -q "another player could not connect" "$out/t2.txt"; then
+    echo "FAIL: compatible player 2 missing session-cancelled error:"; cat "$out/t2.txt"; exit 1
+fi
+echo "  OK: 3-player mismatch aborted compatible player 2 promptly (${elapsed}s)"
 echo "OK: all handshake checks passed"

@@ -87,7 +87,7 @@
 
 /* BYE: an input packet that also says goodbye; REJECT: host refuses a HELLO (version, player count or data.win) */
 enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5, T_REJECT = 6 };
-enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3 };
+enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3, REJ_ABORT = 4 };
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t player; uint8_t players; uint8_t proto; } hdr_t;
@@ -538,6 +538,17 @@ static void send_reject(const struct sockaddr_in *to, uint8_t reason)
     for (i = 0; i < 3; i++) raw_send(to, &r, sizeof(r));
 }
 
+/* Tell any already-registered compatible clients that this handshake was cancelled because another peer failed. Lock held. */
+static void notify_peers_abort(const struct sockaddr_in *except)
+{
+    int q;
+    for (q = 2; q <= players; q++) {
+        if (have_peer[q] && (!except || !same_addr(&peer[q], except))) {
+            send_reject(&peer[q], REJ_ABORT);
+        }
+    }
+}
+
 /* Runs on the network thread, with the lock held. */
 static void handle(const char *buf, int len, const struct sockaddr_in *from, uint64_t now)
 {
@@ -562,6 +573,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 connect_err = 1;
                 snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version (protocol %d, mine %d)", h->proto, PROTO);
                 logm("%s", status);
+                if (is_host) notify_peers_abort(from);
             }
         }
         return;
@@ -576,6 +588,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 connect_err = 1;
                 snprintf(status, sizeof(status), "player %d has players=%d, host has players=%d", h->player, h->players, players);
                 logm("%s", status);
+                notify_peers_abort(from);
             }
             return;
         }
@@ -586,6 +599,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 connect_err = 1;
                 snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version");
                 logm("%s", status);
+                notify_peers_abort(from);
             }
             return;
         }
@@ -598,11 +612,15 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 connect_err = 1;
                 snprintf(status, sizeof(status), "player %d has a different data.win (theirs %s..., mine %s...)", h->player, their12, mine12);
                 logm("data.win mismatch from player %d: theirs %s, mine %s", h->player, their64, mine64);
+                notify_peers_abort(from);
             }
             return;
         }
-        /* Once this attempt has refused a peer, never register peers or emit WELCOME. */
-        if (connect_err) return;
+        /* Once this attempt has refused a peer, never register peers or emit WELCOME; tell compatible clients it was aborted. */
+        if (connect_err) {
+            send_reject(from, REJ_ABORT);
+            return;
+        }
         peer[h->player] = *from; have_peer[h->player] = 1;
         /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
            exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
@@ -627,6 +645,8 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 snprintf(status, sizeof(status), "different data.win than the host (mine %s..., host %s...)", mine12, host12);
             } else if (r->reason == REJ_PLAYERS) {
                 snprintf(status, sizeof(status), "different player count than the host (host has %d, mine %d)", r->h.players, players);
+            } else if (r->reason == REJ_ABORT) {
+                snprintf(status, sizeof(status), "host cancelled the session because another player could not connect");
             } else {
                 snprintf(status, sizeof(status), "different DeltaruneOnline version than the host (protocol %d, mine %d)", r->h.proto, PROTO);
             }
