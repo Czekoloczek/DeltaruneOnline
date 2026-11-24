@@ -107,7 +107,7 @@ jobs:
       - name: Podagent wybiera model i effort
         id: podagent
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1.0.284
+        uses: anthropics/claude-code-action@v1.0.286
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: 'dependabot[bot]'
@@ -187,7 +187,7 @@ jobs:
           echo "Przegląd: $model, effort $effort. Źródło: $src" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Run Claude Code Review
-        uses: anthropics/claude-code-action@v1.0.284
+        uses: anthropics/claude-code-action@v1.0.286
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Akcja domyślnie odrzuca boty; Dependabota wpuszczamy jawnie.
