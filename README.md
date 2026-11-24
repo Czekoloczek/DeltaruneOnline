@@ -82,7 +82,8 @@ To install, whichever way you built it:
    `chapter5_online.win` if you ran the patcher yourself) and `drnet.dll` next to it.
 3. Compare the SHA-256 of that `data.win` with every other player's. `build.py` prints it; otherwise run
    `certutil -hashfile data.win SHA256` on Windows or `sha256sum data.win`. If they differ, the games will not stay
-   in sync: check that everyone started from the same game, mod and UndertaleModTool versions.
+   in sync (and `drnet.dll` refuses to connect with a message showing both hash prefixes): check that everyone started
+   from the same game, mod and UndertaleModTool versions.
 
 Without a config file the patched game behaves like the original. To enable a mode, copy
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it

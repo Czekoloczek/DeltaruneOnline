@@ -48,6 +48,7 @@ jobs:
           sh native/test_pair.sh 0 450 3
           # trzeci gracz dołącza 12 s później: pozostali czekają na niego, zamiast odpaść po 10 s
           sh native/test_pair.sh 0 150 3 12
+          sh native/test_handshake.sh
       # Udawana gra ładuje drnet.dll i woła ją tak jak GML, a skrypt rozmawia z nią jak agent: protokół, limity,
       # błędne komendy, moment odpowiedzi "done" przy opóźnieniu wejścia. Sam GML (stan gry) wymaga gry.
       - name: Agent API bez gry
@@ -79,6 +80,7 @@ jobs:
           sh native/test_pair.sh 60 450 2
           sh native/test_pair.sh 0 450 3
           sh native/test_pair.sh 0 150 3 12
+          sh native/test_handshake.sh
       - name: Agent API bez gry
         run: |
           PY="$(PYTHON=python sh tools/find_python.sh)"
