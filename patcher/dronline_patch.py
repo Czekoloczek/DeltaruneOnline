@@ -2,7 +2,7 @@
 """DeltaruneOnline patcher.
 
 Takes a chapter data.win that the user already has (DELTARUNE + Local Multiplayer mod applied),
-decompiles it with UndertaleModTool CLI, rewrites every keyboard/gamepad read to the dro_* virtual
+decompiles it with UndertaleModTool CLI, rewrites every keyboard/gamepad/mouse read to the dro_* virtual
 input functions, hooks the lockstep driver into obj_time and compiles the result into a new data.win.
 Nothing from the game or the mod is stored in this repository: all edits are rules applied locally.
 
@@ -37,6 +37,24 @@ RULES = [
     (r"\bgamepad_axis_value\(", "dro_gp_axis("),
     (r"\bgamepad_is_connected\(", "dro_gp_connected("),
     (r"\bgamepad_get_device_count\(", "dro_gp_count("),
+    # mouse reads: online every machine sees the same off-screen position and no buttons held
+    # (obj_attack_blue_flowerbullet explodes a bullet when the cursor is over it)
+    (r"\bmouse_check_button_pressed\(", "dro_mouse_pressed("),
+    (r"\bmouse_check_button_released\(", "dro_mouse_released("),
+    (r"\bmouse_check_button\(", "dro_mouse_check("),
+    (r"\bmouse_wheel_up\(\s*\)", "dro_mouse_wheel_up()"),
+    (r"\bmouse_wheel_down\(\s*\)", "dro_mouse_wheel_down()"),
+    (r"\bwindow_mouse_get_x\(\s*\)", "dro_window_mouse_x()"),
+    (r"\bwindow_mouse_get_y\(\s*\)", "dro_window_mouse_y()"),
+    (r"\bwindow_mouse_get_delta_x\(\s*\)", "dro_window_mouse_delta_x()"),
+    (r"\bwindow_mouse_get_delta_y\(\s*\)", "dro_window_mouse_delta_y()"),
+    (r"\bdevice_mouse_check_button_pressed\(", "dro_device_mouse_pressed("),
+    (r"\bdevice_mouse_check_button_released\(", "dro_device_mouse_released("),
+    (r"\bdevice_mouse_check_button\(", "dro_device_mouse_check("),
+    (r"\bdevice_mouse_x_to_gui\(", "dro_device_mouse_x_to_gui("),
+    (r"\bdevice_mouse_y_to_gui\(", "dro_device_mouse_y_to_gui("),
+    (r"\bdevice_mouse_x\(", "dro_device_mouse_x("),
+    (r"\bdevice_mouse_y\(", "dro_device_mouse_y("),
     (r"\brandomize\(\s*\)", "dro_randomize()"),
     # the system clock in microseconds -> a clock that counts lockstep frames (obj_spin_petal's Draw moves the
     # petals with it, so their x differed between machines from the first frame in the Chapter 5 garden)
@@ -63,6 +81,16 @@ RULES = [
     (r"\baudio_resume_all\(\s*\)", "dro_audio_resume_all()"),
 ]
 RULES = [(re.compile(a), b) for a, b in RULES]
+
+# Built-in read-only variables rewritten outside strings, comments, field access and assignments.
+VAR_RULES = {
+    "mouse_x": "dro_mouse_x()",
+    "mouse_y": "dro_mouse_y()",
+}
+VAR_TOKEN_RX = re.compile(
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(mouse_x|mouse_y)\b(?!\s*(?:\(|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    re.S,
+)
 
 HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here
 HOOK_END = "gml_Object_obj_time_Other_3"      # Game End
@@ -156,6 +184,16 @@ def rewrite(text):
     for rx, repl in RULES:
         text, n = rx.subn(repl, text)
         total += n
+
+    def _sub_var(m):
+        nonlocal total
+        name = m.group(1)
+        if not name:
+            return m.group(0)
+        total += 1
+        return VAR_RULES[name]
+
+    text = VAR_TOKEN_RX.sub(_sub_var, text)
     return text, total
 
 

@@ -28,10 +28,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 1. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that returns
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
-3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
-   The virtual audio clock is done, and `get_timer()` uses a frame clock online; still open are the other system
-   clock reads in gameplay code (`current_time`, about 20 entries in Chapter 5)
-   and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
+3. **Determinism**: shared random seed; game logic must not depend on audio playback state, the mouse or the
+   system clock. The virtual audio clock, `get_timer()` frame clock and deterministic mouse reads (off-screen
+   cursor / no buttons online, not tested in the game yet) are done; still open are the other system clock reads
+   in gameplay code (`current_time`, about 20 entries in Chapter 5, and `delta_time`). See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
