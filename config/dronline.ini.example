@@ -45,5 +45,5 @@ debug=0
 ; (host/client/solo) Agent API: with a port here, a program on this PC (an AI agent, tools/agent_client.py) connects
 ; to 127.0.0.1:<port>, reads the game state as JSON and sends input for the local player (docs/agent-api.md).
 ; 0 or no key = off. Never reachable from the network, but any program on this PC can connect, so leave it off
-; unless you use it. Not tested in the game yet.
+; unless you use it. Tried in the game in mode=solo only, not yet online.
 ;agent=8765

@@ -227,7 +227,8 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 game state as JSON and send input for the local player. The protocol, the keys of the state and the security
 notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module,
 and `tools/deepseek_player.py` lets a DeepSeek model play toward a goal given in words.
-**Not yet tested in the game:** the GML below has never been compiled by UndertaleModTool or run.
+**In the game** it has been tried in chapter 5 in `mode=solo` only; not yet online or across a chapter change
+(the status at the top of agent-api.md says what was seen).
 
 - **The DLL holds the protocol.** `drnet.dll` listens on 127.0.0.1 only, on a TCP socket of its own (the lockstep
   UDP socket is open to the network on the host and does not exist in `mode=solo`). A thread accepts one
