@@ -40,6 +40,19 @@ class RewriteRules(unittest.TestCase):
                    "offset = sin(phase + (dro_get_timer() / 400000)) * 2;", 1)
         self.check("t = get_timer( );", "t = dro_get_timer();", 1)
         self.check("t = my_get_timer() + get_timerx();", "t = my_get_timer() + get_timerx();", 0)
+        # current_time (ms) and delta_time (us) built-in variables
+        self.check("y = ystart + sin(current_time * 0.004) * 8; song_t += delta_time / 1000000;",
+                   "y = ystart + sin(dro_current_time() * 0.004) * 8; song_t += dro_delta_time() / 1000000;", 2)
+        self.check("ok = (current_time >= t0 && delta_time <= 50000) ? current_time : delta_time;",
+                   "ok = (dro_current_time() >= t0 && dro_delta_time() <= 50000) ? dro_current_time() : dro_delta_time();", 4)
+        # strings, comments, field access, assignments and lookalikes stay untouched
+        untouched = (
+            'show_debug_message("current_time delta_time");\n'
+            "// current_time + delta_time\n"
+            "/* delta_time */ a = obj.current_time + other.delta_time + my_current_time + delta_time2;\n"
+            "current_time = 0; delta_time += 1; current_time(); delta_time++;\n"
+        )
+        self.check(untouched, untouched, 0)
 
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",
@@ -60,7 +73,7 @@ class RewriteRules(unittest.TestCase):
 
     def test_idempotent(self):
         src = ("if (keyboard_check_pressed(vk_up)) { randomize(); audio_play_sound(a, 1, 0); }\n"
-               'n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
+               't = current_time + delta_time; n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
         once, _ = dp.rewrite(src)
         twice, n = dp.rewrite(once)
         self.assertEqual(once, twice)

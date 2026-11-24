@@ -58,8 +58,12 @@ def csx_functions():
 class PatcherTargetsExist(unittest.TestCase):
     def test_rewrite_targets_are_defined(self):
         targets = {re.match(r"(\w+)\(", repl).group(1) for _, repl in dp.RULES}
+        targets |= {re.match(r"(\w+)\(", repl).group(1) for repl in dp.VAR_RULES.values()}
         missing = sorted(t for t in targets if t not in GML_FUNCS)
         self.assertEqual(missing, [], "rewrite rules point at functions missing from gml/scr_dronline.gml")
+        for var, repl in dp.VAR_RULES.items():
+            out, n = dp.rewrite(var)
+            self.assertEqual((out, n), (repl, 1), f"VAR_RULES entry {var!r} is not rewritten by VAR_TOKEN_RX")
 
     def test_inserted_hooks_are_defined(self):
         called = set(re.findall(r"\b(dronline_\w+)\(", PATCHER))

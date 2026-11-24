@@ -64,6 +64,17 @@ RULES = [
 ]
 RULES = [(re.compile(a), b) for a, b in RULES]
 
+# Built-in read-only variables rewritten outside strings, comments, field access and assignments:
+# current_time (ms) and delta_time (us) use the lockstep frame clock online (docs/DESIGN.md, "System clock").
+VAR_RULES = {
+    "current_time": "dro_current_time()",
+    "delta_time": "dro_delta_time()",
+}
+VAR_TOKEN_RX = re.compile(
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(current_time|delta_time)\b(?!\s*(?:\(|(?:\+\+|--)|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    re.S,
+)
+
 HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here
 HOOK_END = "gml_Object_obj_time_Other_3"      # Game End
 HOOK_GUI = "gml_Object_obj_time_Draw_64"       # Draw GUI: status line
@@ -156,6 +167,16 @@ def rewrite(text):
     for rx, repl in RULES:
         text, n = rx.subn(repl, text)
         total += n
+
+    def _sub_var(m):
+        nonlocal total
+        name = m.group(1)
+        if not name:
+            return m.group(0)
+        total += 1
+        return VAR_RULES[name]
+
+    text = VAR_TOKEN_RX.sub(_sub_var, text)
     return text, total
 
 

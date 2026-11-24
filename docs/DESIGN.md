@@ -286,20 +286,20 @@ shows exactly the frames of the input, also while the automatic delay grows and 
 Random calls are fine as long as every machine consumes the RNG in the same order with the same seed.
 Clock, audio and fps reads are the real risks; record/replay shows which ones matter in practice.
 
-**System clock.** Audio state already goes through the virtual audio clock; of the clock reads, only `get_timer()`
-goes through a frame clock (below). Of the 52 clock entries in Chapter 5, 30 are Draw events. Most of them only change the picture, but a Draw event can also
-change the game state: `obj_spin_petal` sets its `x` from `get_timer()`, so in the Chapter 5 garden the petals
-stood in different places on each machine and the games desynced on the first frame after loading a save there
-(found by the scripted two-player run). `get_timer()` (5 entries) therefore goes through `dro_get_timer()`, which
-counts lockstep frames online (`frames × 1000000 / 30` µs) and is the real timer offline; `current_time` is still
-read directly. Of the 22 entries outside Draw events, `scr_save`
-only writes the date into the save file, and `scr_screenspace` only uses the clock as a cache key for the camera
-position and is called from Draw events alone. The remaining **20 are game logic** and need a frame-based clock
-(`frames × 1000 / 30` ms): `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
-`obj_cliff_petalwarp` (and its `_old` copy), `obj_dw_flowerydash`, `obj_dw_post_fountain_close`,
-`obj_flowery_runner`, `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, and the platformer objects `obj_plat_coin`,
-`obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
-`obj_plat_stringed_object`. The rhythm game times itself with `delta_time`, counted under fps / delta time.
+**System clock.** Audio state already goes through the virtual audio clock, and the monotonic timers used in
+gameplay go through the lockstep frame clock online (and the real built-ins offline):
+
+- `get_timer()` (5 entries, including `obj_spin_petal`'s Draw which sets `x` and desynced the Chapter 5 garden on
+  the first frame) → `dro_get_timer()`, returning `frames × 1000000 / 30` µs.
+- `current_time` → `dro_current_time()`, returning `frames × 1000 / 30` ms (not tested in the game yet). That
+  covers the 20 Chapter 5 game-logic entries (`scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
+  `obj_cliff_petalwarp` and `_old`, `obj_dw_flowerydash`, `obj_dw_post_fountain_close`, `obj_flowery_runner`,
+  `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, `obj_plat_coin`,
+  `obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
+  `obj_plat_stringed_object`), as well as Draw animations and `scr_screenspace`'s per-frame cache key (which still
+  changes once every lockstep frame). `date_current_datetime()` is left untouched so `scr_save` writes the real date.
+- `delta_time` → `dro_delta_time()`, returning `1000000 / 30` µs (one fixed 30 fps frame, matching `dro_get_timer()`
+  and the virtual audio clock; covers the rhythm game, not tested in the game yet).
 
 **Other chapters** (same scanner, game 0.253 + mod v19, uses / entries):
 

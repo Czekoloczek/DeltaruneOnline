@@ -725,6 +725,24 @@ function dro_get_timer()
     return global.dro_frame * (1000000 / 30);
 }
 
+// Replaces current_time (patcher). Online: milliseconds since session start from the lockstep frame clock
+// (20 Chapter 5 game-logic entries read current_time, docs/DESIGN.md). Offline: the real current_time.
+function dro_current_time()
+{
+    if (!dronline_ready())
+        return current_time;
+    return global.dro_frame * (1000 / 30);
+}
+
+// Replaces delta_time (patcher). Online: one fixed 30 fps frame in microseconds, matching dro_get_timer()
+// and the virtual audio clock (used by the rhythm game). Offline: the real delta_time.
+function dro_delta_time()
+{
+    if (!dronline_ready())
+        return delta_time;
+    return 1000000 / 30;
+}
+
 // Replaces the mod's ini_read_real("PLAYER_AMOUNT", ...) (patcher). Online, every machine uses the session's
 // player count from dronline.ini instead of its own keyconfig_mod.ini, so new game, loading a save and the
 // config menu agree everywhere. The game has the ini open while it calls this, so no other file is touched.
