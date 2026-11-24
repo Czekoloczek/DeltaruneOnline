@@ -48,15 +48,19 @@ class RewriteRules(unittest.TestCase):
         # comparisons and ternary still rewrite mouse_x/mouse_y
         self.check("ok = (mouse_x == x && mouse_y <= y && mouse_x >= 0) ? mouse_x : mouse_y;",
                    "ok = (dro_mouse_x() == x && dro_mouse_y() <= y && dro_mouse_x() >= 0) ? dro_mouse_x() : dro_mouse_y();", 5)
-        # strings, comments, field/member access, assignments and word-boundary lookalikes stay untouched
+        # strings, comments, field/member access (including across whitespace/comments), assignments and lookalikes stay untouched
         untouched = (
             'show_debug_message("mouse_x mouse_y mouse_check_button(mb_left) window_mouse_get_x()");\n'
             "// mouse_x + mouse_y + mouse_check_button(mb_left)\n"
             "/* mouse_x device_mouse_x(0) */ a = obj.mouse_x + other.mouse_y + my_mouse_x + mouse_y2;\n"
             "b = obj.mouse_check_button(mb_left) + other.window_mouse_get_x() + mgr.device_mouse_x(0);\n"
+            "c = obj. mouse_x + obj . /* note */ mouse_y + obj.\nmouse_check_button(mb_left) + obj.\n// note\nwindow_mouse_get_x();\n"
             "mouse_x = 0; mouse_y += 1; mouse_x();\n"
         )
         self.check(untouched, untouched, 0)
+        # a dot inside a preceding comment must not suppress standalone rewrites
+        self.check("v = a + /* . */ mouse_x + /* . */ mouse_check_button(mb_left);",
+                   "v = a + /* . */ dro_mouse_x() + /* . */ dro_mouse_check(mb_left);", 2)
 
     def test_randomize_with_spaces(self):
         self.check("randomize( );", "dro_randomize();", 1)

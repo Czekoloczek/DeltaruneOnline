@@ -11,6 +11,7 @@ Usage:
   (--utmt may also point to UndertaleModCli.exe on Windows)
 """
 import argparse
+import bisect
 import os
 import re
 import shutil
@@ -182,8 +183,31 @@ def export_check(out):
 SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
 
+def _preceded_by_dot(text, pos, comment_spans, comment_ends):
+    """True when the nearest non-whitespace, non-comment character before pos is '.'."""
+    i = pos - 1
+    while i >= 0:
+        if text[i].isspace():
+            i -= 1
+            continue
+        k = bisect.bisect_right(comment_ends, i)
+        if k < len(comment_spans) and comment_spans[k][0] <= i < comment_spans[k][1]:
+            i = comment_spans[k][0] - 1
+            continue
+        return text[i] == "."
+    return False
+
+
 def _rewrite_rule(rx, repl, text):
-    spans = [(m.start(), m.end()) for m in SKIP_RX.finditer(text)]
+    spans = []
+    comment_spans = []
+    comment_ends = []
+    for m in SKIP_RX.finditer(text):
+        span = (m.start(), m.end())
+        spans.append(span)
+        if text[span[0]] == "/":
+            comment_spans.append(span)
+            comment_ends.append(span[1])
     si = 0
     count = 0
 
@@ -194,10 +218,7 @@ def _rewrite_rule(rx, repl, text):
             si += 1
         if si < len(spans) and spans[si][0] <= pos:
             return m.group(0)
-        k = pos - 1
-        while k >= 0 and text[k] in " \t":
-            k -= 1
-        if k >= 0 and text[k] == ".":
+        if _preceded_by_dot(text, pos, comment_spans, comment_ends):
             return m.group(0)
         count += 1
         return repl
@@ -211,10 +232,17 @@ def rewrite(text):
         text, n = _rewrite_rule(rx, repl, text)
         total += n
 
+    comment_spans = []
+    comment_ends = []
+    for m in SKIP_RX.finditer(text):
+        if text[m.start()] == "/":
+            comment_spans.append((m.start(), m.end()))
+            comment_ends.append(m.end())
+
     def _sub_var(m):
         nonlocal total
         name = m.group(1)
-        if not name:
+        if not name or _preceded_by_dot(text, m.start(1), comment_spans, comment_ends):
             return m.group(0)
         total += 1
         return VAR_RULES[name]
