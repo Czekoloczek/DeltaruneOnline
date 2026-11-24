@@ -73,33 +73,43 @@ class PatcherTargetsExist(unittest.TestCase):
             self.assertIn("function " + name, dp.HEART_OFF)
 
 
-# What the replaced engine functions return (GameMaker manual). A new rewrite rule must be added to one of the
-# sets, so that someone decides whether the game can use its result.
+# What the replaced engine functions return (checked against YoYoGames/GameMaker-Manual). A new rewrite rule must
+# be added to one of the sets, so that someone decides whether the game can use its result.
 RETURNS_VALUE = {
     "keyboard_check", "keyboard_check_pressed", "keyboard_check_released", "keyboard_check_direct",
     "gamepad_button_check", "gamepad_button_check_pressed", "gamepad_button_check_released", "gamepad_axis_value",
-    "gamepad_is_connected", "gamepad_get_device_count", "randomize", "get_timer", "ini_read_real",
+    "gamepad_is_connected", "gamepad_get_device_count", "randomize", "randomise", "get_timer", "ini_read_real",
     "audio_play_sound", "audio_play_sound_on", "audio_sound_get_track_position", "audio_is_playing", "audio_is_paused",
 }
 RETURNS_NOTHING = {
-    "io_clear", "game_change", "game_restart", "audio_sound_set_track_position", "audio_sound_pitch",
-    "audio_pause_sound", "audio_resume_sound", "audio_stop_sound", "audio_stop_all", "audio_pause_all",
-    "audio_resume_all",
+    "keyboard_clear", "io_clear", "game_change", "game_restart", "audio_sound_set_track_position",
+    "audio_sound_pitch", "audio_pause_sound", "audio_resume_sound", "audio_stop_sound", "audio_stop_all",
+    "audio_pause_all", "audio_resume_all",
 }
-# Not checked against the manual yet: whether keyboard_clear returns a value (dro_kb_clear returns nothing online).
-UNCHECKED = {"keyboard_clear"}
 
 
 def gml_body(name):
     """The body of a GML function, from its opening brace to the matching closing one."""
-    m = re.search(r"^function\s+%s\s*\([^)]*\)\s*\{" % name, GML, re.M)
+    m = re.search(rf"^function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{", GML, re.M)
     if not m:
         return None
-    depth, i = 1, m.end()
-    while depth:
-        depth += {"{": 1, "}": -1}.get(GML[i], 0)
+    depth, i, n = 1, m.end(), len(GML)
+    while depth and i < n:
+        c = GML[i]
+        if c == '"':
+            i += 1
+            while i < n and GML[i] != '"':
+                i += 2 if GML[i] == "\\" else 1
+        elif GML.startswith("//", i):
+            nl = GML.find("\n", i + 2)
+            i = n if nl < 0 else nl
+        elif GML.startswith("/*", i):
+            stop = GML.find("*/", i + 2)
+            i = n if stop < 0 else stop + 1
+        else:
+            depth += {"{": 1, "}": -1}.get(c, 0)
         i += 1
-    return GML[m.end():i - 1]
+    return GML[m.end():i - 1] if depth == 0 else None
 
 
 def rule_pairs():
@@ -109,9 +119,10 @@ def rule_pairs():
 
 class ReturnValues(unittest.TestCase):
     def test_every_replaced_function_is_classified(self):
+        self.assertEqual(RETURNS_VALUE & RETURNS_NOTHING, set(), "a function cannot be in both return-value sets")
         for engine, _ in rule_pairs():
             with self.subTest(engine=engine):
-                self.assertIn(engine, RETURNS_VALUE | RETURNS_NOTHING | UNCHECKED,
+                self.assertIn(engine, RETURNS_VALUE | RETURNS_NOTHING,
                               "add it to RETURNS_VALUE or RETURNS_NOTHING (does the engine function return a value?)")
 
     def test_stand_ins_return_a_value_on_every_path(self):
@@ -122,7 +133,8 @@ class ReturnValues(unittest.TestCase):
                 body = gml_body(dro)
                 self.assertIsNotNone(body, "function missing from gml/scr_dronline.gml")
                 self.assertNotRegex(body, r"\breturn\s*;", "a bare return gives the game undefined")
-                last = [l.strip() for l in body.strip().splitlines() if l.strip() and not l.strip().startswith("//")][-1]
+                last = [line.strip() for line in body.strip().splitlines()
+                        if line.strip() and not line.strip().startswith("//")][-1]
                 self.assertRegex(last, r"^return\s+\S", "the function can end without a return: the game gets undefined")
 
 
