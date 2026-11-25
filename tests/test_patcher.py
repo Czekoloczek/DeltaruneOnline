@@ -57,6 +57,13 @@ class RewriteRules(unittest.TestCase):
         # a dot inside a preceding comment must not suppress standalone rewrites
         self.check("v = a + /* . */ current_time + /* . */ delta_time;",
                    "v = a + /* . */ dro_current_time() + /* . */ dro_delta_time();", 2)
+        # GML verbatim strings (@"..." and @'...') treat backslashes literally
+        self.check(r's = @"current_time\" + string(current_time);',
+                   r's = @"current_time\" + string(dro_current_time());', 1)
+        self.check(r"s = @'delta_time\' + string(delta_time);",
+                   r"s = @'delta_time\' + string(dro_delta_time());", 1)
+        self.check(r's = @"/* " + string(current_time);',
+                   r's = @"/* " + string(dro_current_time());', 1)
 
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",

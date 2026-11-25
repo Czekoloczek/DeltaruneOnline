@@ -72,7 +72,7 @@ VAR_RULES = {
     "delta_time": "dro_delta_time()",
 }
 VAR_TOKEN_RX = re.compile(
-    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(current_time|delta_time)\b(?!\s*(?:\(|(?:\+\+|--)|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    r'@"[^"]*"|@\'[^\']*\'|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(current_time|delta_time)\b(?!\s*(?:\(|(?:\+\+|--)|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
     re.S,
 )
 
@@ -163,7 +163,7 @@ def export_check(out):
     return int(m.group(1))
 
 
-SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+SKIP_RX = re.compile(r'@"[^"]*"|@\'[^\']*\'|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
 
 def _preceded_by_dot(text, pos, comment_spans, comment_ends):
