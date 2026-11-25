@@ -98,29 +98,37 @@ if [ "$s1" != "$s2" ] || [ "$d1" != "-1" ] || [ "$d2" != "-1" ]; then
 fi
 echo "  OK: matching data.win ($ha...) connected (sum $s1, desync -1)"
 
-# 2. Mismatched data.win files are refused promptly with both SHA-256 prefixes
+# 2. Mismatched data.win client is refused promptly with both SHA-256 prefixes; host stays up for a matching client
 run_exe "$out/d1.txt" host 2 1 30 -game test_a.win
 p1=$!
 sleep 1
 t0=$(date +%s)
 run_exe "$out/d2.txt" client 2 2 30 -game test_b.win
 p2=$!
-r1=0; wait "$p1" || r1=$?
 r2=0; wait "$p2" || r2=$?
 elapsed=$(($(date +%s) - t0))
-if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; then
-    echo "FAIL: mismatched data.win unexpectedly succeeded ($r1, $r2)"; exit 1
+if [ "$r2" -eq 0 ]; then
+    echo "FAIL: mismatched data.win client unexpectedly succeeded"; kill "$p1" 2>/dev/null || true; exit 1
 fi
 if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
-    echo "FAIL: mismatched data.win refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
-fi
-if ! grep -q "different data.win" "$out/d1.txt" || ! grep -q "$ha" "$out/d1.txt" || ! grep -q "$hb" "$out/d1.txt"; then
-    echo "FAIL: host missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d1.txt"; exit 1
+    echo "FAIL: mismatched data.win refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; kill "$p1" 2>/dev/null || true; exit 1
 fi
 if ! grep -q "different data.win" "$out/d2.txt" || ! grep -q "$ha" "$out/d2.txt" || ! grep -q "$hb" "$out/d2.txt"; then
-    echo "FAIL: client missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d2.txt"; exit 1
+    echo "FAIL: client missing expected data.win mismatch message ($ha / $hb):"; cat "$out/d2.txt"; kill "$p1" 2>/dev/null || true; exit 1
 fi
-echo "  OK: mismatched data.win ($ha... vs $hb...) refused promptly on both sides (${elapsed}s)"
+# Now a matching client joins the same host without restarting it
+run_exe "$out/d3.txt" client 2 2 30 -game test_a.win
+p3=$!
+if ! wait "$p1"; then echo "FAIL: host did not survive rejected client:"; cat "$out/d1.txt"; exit 1; fi
+if ! wait "$p3"; then echo "FAIL: matching client after rejection failed:"; cat "$out/d3.txt"; exit 1; fi
+l1=$(grep 'final sum' "$out/d1.txt" || true)
+l3=$(grep 'final sum' "$out/d3.txt" || true)
+s1=$(echo "$l1" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+s3=$(echo "$l3" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+if [ -z "$s1" ] || [ "$s1" != "$s3" ]; then
+    echo "FAIL: host and follow-up matching client checksums differ ($s1 vs $s3)"; exit 1
+fi
+echo "  OK: mismatched data.win ($ha... vs $hb...) refused promptly (${elapsed}s); host accepted matching follow-up client"
 
 # 3. Missing data.win (no -game and no data.win next to drnet.dll) fails immediately on start even when both lack it
 t0=$(date +%s)
@@ -142,28 +150,31 @@ if ! grep -q "cannot read data.win" "$out/z1.txt" || ! grep -q "cannot read data
 fi
 echo "  OK: missing data.win refused immediately on both sides (${elapsed}s)"
 
-# 4. Mismatched player count is refused promptly on both sides
+# 4. Mismatched player count client is refused promptly; host stays up for a matching client
 run_exe "$out/p1.txt" host 2 1 30 -game test_a.win
 p1=$!
 sleep 1
 t0=$(date +%s)
 run_exe "$out/p2.txt" client 3 2 30 -game test_a.win
 p2=$!
-r1=0; wait "$p1" || r1=$?
 r2=0; wait "$p2" || r2=$?
 elapsed=$(($(date +%s) - t0))
-if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ]; then
-    echo "FAIL: mismatched player count unexpectedly succeeded ($r1, $r2)"; exit 1
+if [ "$r2" -eq 0 ]; then
+    echo "FAIL: mismatched player count client unexpectedly succeeded"; kill "$p1" 2>/dev/null || true; exit 1
 fi
 if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
-    echo "FAIL: player count refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+    echo "FAIL: player count refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; kill "$p1" 2>/dev/null || true; exit 1
 fi
-if ! grep -q "players=" "$out/p1.txt" || ! grep -q "different player count" "$out/p2.txt"; then
-    echo "FAIL: player count mismatch did not produce expected error:"; cat "$out/p1.txt"; cat "$out/p2.txt"; exit 1
+if ! grep -q "different player count" "$out/p2.txt"; then
+    echo "FAIL: client missing player count mismatch error:"; cat "$out/p2.txt"; kill "$p1" 2>/dev/null || true; exit 1
 fi
-echo "  OK: mismatched player count refused promptly on both sides (${elapsed}s)"
+run_exe "$out/p3.txt" client 2 2 30 -game test_a.win
+p3=$!
+if ! wait "$p1"; then echo "FAIL: host did not survive player-count mismatch:"; cat "$out/p1.txt"; exit 1; fi
+if ! wait "$p3"; then echo "FAIL: matching follow-up client failed:"; cat "$out/p3.txt"; exit 1; fi
+echo "  OK: mismatched player count refused promptly (${elapsed}s); host accepted matching follow-up client"
 
-# 5. Three players: compatible player 2 is notified promptly when player 3 has a mismatched data.win
+# 5. Three players: mismatched player 3 is refused promptly without aborting the host or waiting player 2
 run_exe "$out/t1.txt" host 3 1 30 -game test_a.win
 p1=$!
 sleep 1
@@ -173,21 +184,28 @@ sleep 1
 t0=$(date +%s)
 run_exe "$out/t3.txt" client 3 3 30 -game test_b.win
 p3=$!
-r1=0; wait "$p1" || r1=$?
-r2=0; wait "$p2" || r2=$?
 r3=0; wait "$p3" || r3=$?
 elapsed=$(($(date +%s) - t0))
-if [ "$r1" -eq 0 ] || [ "$r2" -eq 0 ] || [ "$r3" -eq 0 ]; then
-    echo "FAIL: 3-player mismatch unexpectedly succeeded ($r1, $r2, $r3)"; exit 1
+if [ "$r3" -eq 0 ]; then
+    echo "FAIL: mismatched player 3 unexpectedly succeeded"; kill "$p1" "$p2" 2>/dev/null || true; exit 1
 fi
 if [ "$elapsed" -ge "$MAX_REFUSAL_S" ]; then
-    echo "FAIL: 3-player abort took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; exit 1
+    echo "FAIL: 3-player mismatch refusal took ${elapsed}s (limit ${MAX_REFUSAL_S}s)"; kill "$p1" "$p2" 2>/dev/null || true; exit 1
 fi
-if ! grep -q "different data.win" "$out/t1.txt" || ! grep -q "different data.win" "$out/t3.txt"; then
-    echo "FAIL: host or player 3 missing data.win mismatch error:"; cat "$out/t1.txt"; cat "$out/t3.txt"; exit 1
+if ! grep -q "different data.win" "$out/t3.txt" || ! grep -q "$ha" "$out/t3.txt" || ! grep -q "$hb" "$out/t3.txt"; then
+    echo "FAIL: player 3 missing data.win mismatch error:"; cat "$out/t3.txt"; kill "$p1" "$p2" 2>/dev/null || true; exit 1
 fi
-if ! grep -q "another player could not connect" "$out/t2.txt"; then
-    echo "FAIL: compatible player 2 missing session-cancelled error:"; cat "$out/t2.txt"; exit 1
+# Matching player 3 now joins the waiting host and player 2
+run_exe "$out/t4.txt" client 3 3 30 -game test_a.win
+p4=$!
+if ! wait "$p1"; then echo "FAIL: 3-player host failed after rejecting bad player 3:"; cat "$out/t1.txt"; exit 1; fi
+if ! wait "$p2"; then echo "FAIL: compatible player 2 failed after bad player 3 was rejected:"; cat "$out/t2.txt"; exit 1; fi
+if ! wait "$p4"; then echo "FAIL: matching player 3 failed:"; cat "$out/t4.txt"; exit 1; fi
+s1=$(grep 'final sum' "$out/t1.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+s2=$(grep 'final sum' "$out/t2.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+s4=$(grep 'final sum' "$out/t4.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+if [ -z "$s1" ] || [ "$s1" != "$s2" ] || [ "$s1" != "$s4" ]; then
+    echo "FAIL: 3-player checksums differ ($s1 / $s2 / $s4)"; exit 1
 fi
-echo "  OK: 3-player mismatch aborted compatible player 2 promptly (${elapsed}s)"
+echo "  OK: 3-player mismatched peer refused promptly (${elapsed}s) without aborting host or player 2 (sum $s1)"
 echo "OK: all handshake checks passed"

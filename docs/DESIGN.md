@@ -46,10 +46,11 @@ input without waiting for its own next frame. Star topology: clients talk only t
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
 last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
 `drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
-refusing to start if `data.win` cannot be read — and refuses to connect on a build, protocol or player-count
-mismatch, showing both SHA-256 hash prefixes on a `data.win` mismatch instead of desyncing later. All players must
-update `drnet.dll` together: mixing protocol 3 and protocol 4 peers can still hit the connection timeout on the
-protocol-3 side. State fingerprints are exchanged every 30 frames to detect desyncs.
+refusing to start if `data.win` cannot be read — and the host rejects clients with a build, protocol or player-count
+mismatch (showing both SHA-256 hash prefixes on a `data.win` mismatch) while keeping the lobby open for valid peers
+so an incompatible or stray packet cannot abort a session. All players must update `drnet.dll` together: mixing
+protocol 3 and protocol 4 peers can still hit the connection timeout on the protocol-3 side. State fingerprints are
+exchanged every 30 frames to detect desyncs.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -158,8 +159,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
 - `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect with identical checksums,
-  while mismatched `data.win` hashes (with both SHA-256 prefixes), a missing `data.win` (even on both sides), or
-  mismatched player counts are refused promptly on both sides (Wine on Linux, native on Windows).
+  while mismatched `data.win` hashes (with both SHA-256 prefixes) and mismatched player counts are refused promptly
+  without aborting the host or waiting compatible peers, and a missing `data.win` (even on both sides) fails on
+  start (Wine on Linux, native on Windows).
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network

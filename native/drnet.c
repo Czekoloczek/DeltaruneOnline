@@ -87,7 +87,7 @@
 
 /* BYE: an input packet that also says goodbye; REJECT: host refuses a HELLO (version, player count or data.win) */
 enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5, T_REJECT = 6 };
-enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3, REJ_ABORT = 4 };
+enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3 };
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t player; uint8_t players; uint8_t proto; } hdr_t;
@@ -117,6 +117,8 @@ static volatile LONG running;
 static int is_host, players, me, connected, connect_err;
 static uint8_t my_data_hash[32];            /* SHA-256 of data.win, or all zeros when no data.win is present */
 static int has_data_hash;
+static char last_reject[192];               /* host: last refused peer reason (shown if connect times out) */
+static int reject_logged;
 static struct sockaddr_in peer[MAXP + 1];   /* host: client addresses; client: peer[1] = host */
 static int have_peer[MAXP + 1];
 static int32_t frame_of[MAXP + 1][RING];    /* which frame the slot currently holds */
@@ -526,26 +528,27 @@ static void left_status(int p)
     else snprintf(status, sizeof(status), "player %d left the game", p);
 }
 
-/* Tell a peer why HELLO was refused; sent three times straight out (UDP, not delayed by test lag). Lock held. */
+/* Tell a peer why HELLO was refused; sent straight out (UDP, not delayed by test lag). One packet per HELLO avoids
+ * amplification; the host keeps listening, so a client whose REJECT was lost gets another on its 200 ms retry. Lock held. */
 static void send_reject(const struct sockaddr_in *to, uint8_t reason)
 {
     reject_pkt r;
-    int i;
     memset(&r, 0, sizeof(r));
     fill_hdr(&r.h, T_REJECT, me);
     r.reason = reason;
     memcpy(r.hash_prefix, my_data_hash, sizeof(r.hash_prefix));
-    for (i = 0; i < 3; i++) raw_send(to, &r, sizeof(r));
+    raw_send(to, &r, sizeof(r));
 }
 
-/* Tell any already-registered compatible clients that this handshake was cancelled because another peer failed. Lock held. */
-static void notify_peers_abort(const struct sockaddr_in *except)
+/* Record a host-side handshake refusal for drnet.log and timeout diagnostics without aborting the pending lobby. Lock held. */
+static void note_reject(const char *short_msg, const char *log_msg)
 {
-    int q;
-    for (q = 2; q <= players; q++) {
-        if (have_peer[q] && (!except || !same_addr(&peer[q], except))) {
-            send_reject(&peer[q], REJ_ABORT);
-        }
+    if (!connected) {
+        snprintf(last_reject, sizeof(last_reject), "%s", short_msg);
+    }
+    if (reject_logged < 10) {
+        reject_logged++;
+        logm("%s", log_msg ? log_msg : short_msg);
     }
 }
 
@@ -557,23 +560,25 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
     /* a client repeats HELLO until it is welcomed: log the first one from each address */
     if (!connect_err && (
         (!is_host && have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT)) ||
-        (is_host && h->type == T_HELLO && h->player >= 2 && h->player <= MAXP &&
-         (!have_peer[h->player] || !same_addr(&peer[h->player], from))))) {
+        (is_host && !connected && h->type == T_HELLO && h->player >= 2 && h->player <= MAXP &&
+         (!have_peer[h->player] || !same_addr(&peer[h->player], from)) && reject_logged < 10))) {
         logm("got %s from %s:%d player %d",
              h->type == T_HELLO ? "HELLO" : (h->type == T_WELCOME ? "WELCOME" : "REJECT"),
              inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
     }
     if (h->proto != PROTO) {
-        int valid_hs = is_host
-            ? (h->type == T_HELLO && h->player >= 2 && h->player <= MAXP && h->players >= 2 && h->players <= MAXP)
-            : (have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT));
-        if (valid_hs) {
-            if (is_host) send_reject(from, REJ_PROTO);
+        if (is_host) {
+            if (h->type == T_HELLO && h->player >= 2 && h->player <= MAXP && h->players >= 2 && h->players <= MAXP) {
+                char msg[192];
+                send_reject(from, REJ_PROTO);
+                snprintf(msg, sizeof(msg), "player %d runs a different DeltaruneOnline version (protocol %d, mine %d)", h->player, h->proto, PROTO);
+                note_reject(msg, NULL);
+            }
+        } else if (have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT)) {
             if (!connected && !connect_err) {
                 connect_err = 1;
                 snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version (protocol %d, mine %d)", h->proto, PROTO);
                 logm("%s", status);
-                if (is_host) notify_peers_abort(from);
             }
         }
         return;
@@ -583,42 +588,34 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         hdr_t w; int q, all = 1;
         if (h->player < 2 || h->player > MAXP || h->players < 2 || h->players > MAXP) return;
         if (h->players != players) {
+            char msg[192];
             send_reject(from, REJ_PLAYERS);
-            if (!connected && !connect_err) {
-                connect_err = 1;
-                snprintf(status, sizeof(status), "player %d has players=%d, host has players=%d", h->player, h->players, players);
-                logm("%s", status);
-                notify_peers_abort(from);
-            }
+            snprintf(msg, sizeof(msg), "player %d has players=%d, host has players=%d", h->player, h->players, players);
+            note_reject(msg, NULL);
             return;
         }
         if (h->player > players) return;
         if (len < (int)sizeof(hello_pkt)) {
             send_reject(from, REJ_PROTO);
-            if (!connected && !connect_err) {
-                connect_err = 1;
-                snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version");
-                logm("%s", status);
-                notify_peers_abort(from);
-            }
+            note_reject("other player runs a different DeltaruneOnline version", NULL);
             return;
         }
         if (!has_data_hash || memcmp(hp->data_hash, my_data_hash, 32) != 0) {
+            char their12[13], mine12[13], their64[65], mine64[65], msg[192], lmsg[256];
             send_reject(from, REJ_HASH);
-            if (!connected && !connect_err) {
-                char their12[13], mine12[13], their64[65], mine64[65];
-                hex_bytes(hp->data_hash, 6, their12); hex_bytes(my_data_hash, 6, mine12);
-                hex_bytes(hp->data_hash, 32, their64); hex_bytes(my_data_hash, 32, mine64);
-                connect_err = 1;
-                snprintf(status, sizeof(status), "player %d has a different data.win (theirs %s..., mine %s...)", h->player, their12, mine12);
-                logm("data.win mismatch from player %d: theirs %s, mine %s", h->player, their64, mine64);
-                notify_peers_abort(from);
-            }
+            hex_bytes(hp->data_hash, 6, their12); hex_bytes(my_data_hash, 6, mine12);
+            hex_bytes(hp->data_hash, 32, their64); hex_bytes(my_data_hash, 32, mine64);
+            snprintf(msg, sizeof(msg), "player %d has a different data.win (theirs %s..., mine %s...)", h->player, their12, mine12);
+            snprintf(lmsg, sizeof(lmsg), "data.win mismatch from player %d: theirs %s, mine %s", h->player, their64, mine64);
+            note_reject(msg, lmsg);
             return;
         }
-        /* Once this attempt has refused a peer, never register peers or emit WELCOME; tell compatible clients it was aborted. */
-        if (connect_err) {
-            send_reject(from, REJ_ABORT);
+        if (connected) {
+            /* Only retransmit WELCOME to the already-accepted peer for this slot; never overwrite peer[] after connect. */
+            if (have_peer[h->player] && same_addr(&peer[h->player], from)) {
+                fill_hdr(&w, T_WELCOME, 1);
+                send_to(from, &w, sizeof(w));
+            }
             return;
         }
         peer[h->player] = *from; have_peer[h->player] = 1;
@@ -628,12 +625,8 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
         if (all) {
             fill_hdr(&w, T_WELCOME, 1);
-            if (!connected) {
-                connected = 1;
-                for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
-            } else {
-                send_to(from, &w, sizeof(w));
-            }
+            connected = 1;
+            for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
         }
     } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
         const reject_pkt *r = (const reject_pkt *)buf;
@@ -645,8 +638,6 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
                 snprintf(status, sizeof(status), "different data.win than the host (mine %s..., host %s...)", mine12, host12);
             } else if (r->reason == REJ_PLAYERS) {
                 snprintf(status, sizeof(status), "different player count than the host (host has %d, mine %d)", r->h.players, players);
-            } else if (r->reason == REJ_ABORT) {
-                snprintf(status, sizeof(status), "host cancelled the session because another player could not connect");
             } else {
                 snprintf(status, sizeof(status), "different DeltaruneOnline version than the host (protocol %d, mine %d)", r->h.proto, PROTO);
             }
@@ -853,7 +844,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
         if (inet_pton(AF_INET, host_ip, &peer[1].sin_addr) != 1) { snprintf(status, sizeof(status), "bad host address %s", host_ip); logm("%s", status); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return 0; }
         have_peer[1] = 1;
     }
-    connected = 0; connect_err = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
+    connected = 0; connect_err = 0; last_reject[0] = 0; reject_logged = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
     srand((unsigned)now_us());
     running = 1;
     thr = CreateThread(NULL, 0, net_thread, NULL, 0, NULL);
@@ -875,6 +866,7 @@ EXPORT double drnet_connect(double timeout_ms)
             done = -1;
         } else if (connected) {
             done = 1;
+            update_status();
             logm("%s", is_host ? "all players connected" : "connected to host");
         } else if (!is_host && GetTickCount() - last_hello > 200) {
             hello_pkt hp;
@@ -884,24 +876,19 @@ EXPORT double drnet_connect(double timeout_ms)
         }
         unlock();
         if (done > 0) return 1;
-        if (done < 0) {
-            if (is_host) {
-                /* Keep serving REJECT replies past one client HELLO retry interval (200 ms) so a short burst
-                   that drops the initial REJECT copies still lets the client get the reason on its retry. */
-                DWORD refuse_start = GetTickCount();
-                while (GetTickCount() - refuse_start < 350) {
-                    Sleep(10);
-                    pump_window_messages();
-                }
-            }
-            return 0;
-        }
+        if (done < 0) return 0;
         Sleep(10);
         pump_window_messages();
         if (GetTickCount() - last_note > 5000) { last_note = GetTickCount(); logm("connect: still waiting"); }
     }
-    snprintf(status, sizeof(status), "%s: nobody answered in %g s", is_host ? "host" : "client", timeout_ms / 1000);
+    lock();
+    if (is_host && last_reject[0]) {
+        snprintf(status, sizeof(status), "%s (timed out after %g s)", last_reject, timeout_ms / 1000);
+    } else {
+        snprintf(status, sizeof(status), "%s: nobody answered in %g s", is_host ? "host" : "client", timeout_ms / 1000);
+    }
     logm("%s", status);
+    unlock();
     return 0;
 }
 
