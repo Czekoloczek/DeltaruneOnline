@@ -72,6 +72,33 @@ run_exe() {
 # Prompt refusal bound: well below the 30 s drnet_connect timeout, tolerant of Wine/CI jitter.
 MAX_REFUSAL_S=15
 
+check_sync() {
+    label=$1
+    shift
+    first=""
+    for f in "$@"; do
+        line=$(grep 'final sum' "$f" || true)
+        if [ -z "$line" ]; then
+            echo "FAIL: $label did not print final sum ($f):"
+            cat "$f"
+            exit 1
+        fi
+        sum=$(echo "$line" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
+        desync=$(echo "$line" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
+        if [ -z "$sum" ] || [ "$desync" != "-1" ]; then
+            echo "FAIL: $label bad checksum or desync ($sum / $desync in $f)"
+            exit 1
+        fi
+        if [ -z "$first" ]; then
+            first=$sum
+        elif [ "$sum" != "$first" ]; then
+            echo "FAIL: $label checksums differ ($first vs $sum)"
+            exit 1
+        fi
+    done
+    LAST_SUM=$first
+}
+
 echo "== handshake checks ($where)"
 
 # 1. Matching data.win files connect, stay in sync, and report matching final checksums with no desync
@@ -82,21 +109,8 @@ run_exe "$out/m2.txt" client 2 2 30 -game test_a.win
 p2=$!
 if ! wait "$p1"; then echo "FAIL: matching host failed:"; cat "$out/m1.txt"; exit 1; fi
 if ! wait "$p2"; then echo "FAIL: matching client failed:"; cat "$out/m2.txt"; exit 1; fi
-l1=$(grep 'final sum' "$out/m1.txt" || true)
-l2=$(grep 'final sum' "$out/m2.txt" || true)
-if [ -z "$l1" ] || [ -z "$l2" ]; then
-    echo "FAIL: matching run did not print final sum:"
-    cat "$out/m1.txt"; cat "$out/m2.txt"; exit 1
-fi
-s1=$(echo "$l1" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-d1=$(echo "$l1" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
-s2=$(echo "$l2" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-d2=$(echo "$l2" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
-if [ "$s1" != "$s2" ] || [ "$d1" != "-1" ] || [ "$d2" != "-1" ]; then
-    echo "FAIL: matching run checksums or desync differ (host $s1/$d1, client $s2/$d2)"
-    exit 1
-fi
-echo "  OK: matching data.win ($ha...) connected (sum $s1, desync -1)"
+check_sync "matching run" "$out/m1.txt" "$out/m2.txt"
+echo "  OK: matching data.win ($ha...) connected (sum $LAST_SUM, desync -1)"
 
 # 2. Mismatched data.win client is refused promptly with both SHA-256 prefixes; host stays up for a matching client
 run_exe "$out/d1.txt" host 2 1 30 -game test_a.win
@@ -121,14 +135,8 @@ run_exe "$out/d3.txt" client 2 2 30 -game test_a.win
 p3=$!
 if ! wait "$p1"; then echo "FAIL: host did not survive rejected client:"; cat "$out/d1.txt"; exit 1; fi
 if ! wait "$p3"; then echo "FAIL: matching client after rejection failed:"; cat "$out/d3.txt"; exit 1; fi
-l1=$(grep 'final sum' "$out/d1.txt" || true)
-l3=$(grep 'final sum' "$out/d3.txt" || true)
-s1=$(echo "$l1" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-s3=$(echo "$l3" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-if [ -z "$s1" ] || [ "$s1" != "$s3" ]; then
-    echo "FAIL: host and follow-up matching client checksums differ ($s1 vs $s3)"; exit 1
-fi
-echo "  OK: mismatched data.win ($ha... vs $hb...) refused promptly (${elapsed}s); host accepted matching follow-up client"
+check_sync "hash-mismatch recovery" "$out/d1.txt" "$out/d3.txt"
+echo "  OK: mismatched data.win ($ha... vs $hb...) refused promptly (${elapsed}s); host accepted matching follow-up client (sum $LAST_SUM)"
 
 # 3. Missing data.win (no -game and no data.win next to drnet.dll) fails immediately on start even when both lack it
 t0=$(date +%s)
@@ -172,7 +180,8 @@ run_exe "$out/p3.txt" client 2 2 30 -game test_a.win
 p3=$!
 if ! wait "$p1"; then echo "FAIL: host did not survive player-count mismatch:"; cat "$out/p1.txt"; exit 1; fi
 if ! wait "$p3"; then echo "FAIL: matching follow-up client failed:"; cat "$out/p3.txt"; exit 1; fi
-echo "  OK: mismatched player count refused promptly (${elapsed}s); host accepted matching follow-up client"
+check_sync "player-count recovery" "$out/p1.txt" "$out/p3.txt"
+echo "  OK: mismatched player count refused promptly (${elapsed}s); host accepted matching follow-up client (sum $LAST_SUM)"
 
 # 5. Three players: mismatched player 3 is refused promptly without aborting the host or waiting player 2
 run_exe "$out/t1.txt" host 3 1 30 -game test_a.win
@@ -201,11 +210,6 @@ p4=$!
 if ! wait "$p1"; then echo "FAIL: 3-player host failed after rejecting bad player 3:"; cat "$out/t1.txt"; exit 1; fi
 if ! wait "$p2"; then echo "FAIL: compatible player 2 failed after bad player 3 was rejected:"; cat "$out/t2.txt"; exit 1; fi
 if ! wait "$p4"; then echo "FAIL: matching player 3 failed:"; cat "$out/t4.txt"; exit 1; fi
-s1=$(grep 'final sum' "$out/t1.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-s2=$(grep 'final sum' "$out/t2.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-s4=$(grep 'final sum' "$out/t4.txt" | sed -E 's/.*final sum ([0-9a-f]+).*/\1/')
-if [ -z "$s1" ] || [ "$s1" != "$s2" ] || [ "$s1" != "$s4" ]; then
-    echo "FAIL: 3-player checksums differ ($s1 / $s2 / $s4)"; exit 1
-fi
-echo "  OK: 3-player mismatched peer refused promptly (${elapsed}s) without aborting host or player 2 (sum $s1)"
+check_sync "3-player recovery" "$out/t1.txt" "$out/t2.txt" "$out/t4.txt"
+echo "  OK: 3-player mismatched peer refused promptly (${elapsed}s) without aborting host or player 2 (sum $LAST_SUM)"
 echo "OK: all handshake checks passed"
