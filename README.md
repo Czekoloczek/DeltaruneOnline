@@ -8,7 +8,9 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
 > With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
 > input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, and in the game it
-> has been tried in `mode=solo` only (not yet online or across a chapter change).
+> has been tried in `mode=solo` only (not yet online or across a chapter change). `tools/deepseek_player.py` lets
+> a DeepSeek model play through it toward a goal given in words (with your own API key; tried in the game in solo,
+> see its section there).
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 

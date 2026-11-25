@@ -156,7 +156,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network
-  and checks that its limits and button names are the DLL's.
+  and checks that its limits and button names are the DLL's. `tests/test_deepseek_player.py` covers
+  `tools/deepseek_player.py` against a small game written in Python and a fake DeepSeek API (no key, no
+  network), and `test_agent.py solo` runs it once more against the DLL with its fake model.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
@@ -223,7 +225,8 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 
 `agent=<port>` in `[online]` (host, client and solo) lets a program on the same PC, such as an AI agent, read the
 game state as JSON and send input for the local player. The protocol, the keys of the state and the security
-notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module.
+notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module,
+and `tools/deepseek_player.py` lets a DeepSeek model play toward a goal given in words.
 **In the game** it has been tried in chapter 5 in `mode=solo` only; not yet online or across a chapter change
 (the status at the top of agent-api.md says what was seen).
 
