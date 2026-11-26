@@ -32,9 +32,9 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
 3. **Determinism**: shared random seed; game logic must not depend on audio playback state, the mouse or the
-   system clock. The virtual audio clock, `get_timer()` frame clock and deterministic mouse reads (off-screen
-   cursor / no buttons online, not tested in the game yet) are done; still open are the other system clock reads
-   in gameplay code (`current_time`, about 20 entries in Chapter 5, and `delta_time`). See [docs/DESIGN.md](docs/DESIGN.md).
+   system clock. The virtual audio clock, the lockstep frame clock (`get_timer()`, plus `current_time` and
+   `delta_time`) and deterministic mouse reads (off-screen cursor, no buttons online) are done.
+   See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 

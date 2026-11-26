@@ -85,7 +85,9 @@ RULES = [
 ]
 RULES = [(re.compile(a), b) for a, b in RULES]
 
-# Built-in read-only variables rewritten outside strings, comments, field access and assignments.
+# Built-in read-only variables rewritten outside strings, comments, field access and assignments: online,
+# mouse_x/mouse_y give the same off-screen cursor on every PC, and current_time (ms) and delta_time (us) use the
+# lockstep frame clock (docs/DESIGN.md, "System clock").
 # The assignment check skips whitespace and comments: `mouse_x /* note */ = 0` stays as it is. Inside that check
 # a comment must match as a whole (a block comment ends at its first */, a line comment at the end of its line),
 # or the lookahead could stop inside one comment or run on into the next and find an `=` that is not code.
@@ -93,10 +95,12 @@ _WHOLE_COMMENT = r'(?://[^\n]*(?![^\n])|/\*(?:[^*]|\*(?!/))*\*/)'
 VAR_RULES = {
     "mouse_x": "dro_mouse_x()",
     "mouse_y": "dro_mouse_y()",
+    "current_time": "dro_current_time()",
+    "delta_time": "dro_delta_time()",
 }
 VAR_TOKEN_RX = re.compile(
-    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(mouse_x|mouse_y)\b'
-    r'(?!(?:\s|' + _WHOLE_COMMENT + r')*(?:\(|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    r'@"[^"]*"|@\'[^\']*\'|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(' + "|".join(VAR_RULES) + r')\b'
+    r'(?!(?:\s|' + _WHOLE_COMMENT + r')*(?:\(|(?:\+\+|--)|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
     re.S,
 )
 
@@ -372,7 +376,7 @@ def export_check(out):
     return int(m.group(1))
 
 
-SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+SKIP_RX = re.compile(r'@"[^"]*"|@\'[^\']*\'|"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
 
 
 def _preceded_by_dot(text, pos, comment_spans, comment_ends):
