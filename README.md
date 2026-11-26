@@ -39,8 +39,8 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
 6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL), and the
-   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; not yet
-   checked in the game); next: your character in the overworld and the FIGHT timing bar.
+   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; checked in
+   an online two-player battle); next: your character in the overworld and the FIGHT timing bar.
 7. **Online-only quality of life** (planned):
    - **shared camera that splits when players drift apart**: one camera while everyone is close, split
      screen once a player walks too far away.
