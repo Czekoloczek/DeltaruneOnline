@@ -65,6 +65,9 @@ class RewriteRules(unittest.TestCase):
         # a comment before a comparison does not hide the read
         self.check("if (mouse_x /* note */ == 0 || mouse_y // note\n>= 1)",
                    "if (dro_mouse_x() /* note */ == 0 || dro_mouse_y() // note\n>= 1)", 2)
+        # an `=` further on, inside or after another comment, does not make a read an assignment
+        self.check("var cursor_x = mouse_x /* read */;\nx /* write */ = 0;\nb = mouse_y // c = d\n+ 1; e = mouse_x /* = */ + 1;",
+                   "var cursor_x = dro_mouse_x() /* read */;\nx /* write */ = 0;\nb = dro_mouse_y() // c = d\n+ 1; e = dro_mouse_x() /* = */ + 1;", 3)
         # a dot inside a preceding comment must not suppress standalone rewrites
         self.check("v = a + /* . */ mouse_x + /* . */ mouse_check_button(mb_left);",
                    "v = a + /* . */ dro_mouse_x() + /* . */ dro_mouse_check(mb_left);", 2)
