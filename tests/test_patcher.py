@@ -66,7 +66,8 @@ class RewriteRules(unittest.TestCase):
                    "v = a + /* . */ dro_mouse_x() + /* . */ dro_mouse_check(mb_left);", 2)
 
     def test_randomize_with_spaces(self):
-        self.check("randomize( );", "dro_randomize();", 1)
+        self.check("randomize( ); randomise(); randomise( );",
+                   "dro_randomize(); dro_randomize(); dro_randomize();", 3)
 
     def test_clock(self):
         # a made-up Draw-style line: an instance position that follows the clock must use the frame clock
@@ -89,7 +90,7 @@ class RewriteRules(unittest.TestCase):
 
     def test_word_boundaries(self):
         # names that only contain a rewritten name must stay as they are
-        src = "my_keyboard_check(1); scr_randomize(); xaudio_is_playing(2); keyboard_check_pressedx(3); my_mouse_check_button(1)"
+        src = "my_keyboard_check(1); scr_randomize(); scr_randomise(); xaudio_is_playing(2); keyboard_check_pressedx(3); my_mouse_check_button(1)"
         self.check(src, src, 0)
 
     def test_idempotent(self):

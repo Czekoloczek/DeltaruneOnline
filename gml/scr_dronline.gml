@@ -823,11 +823,15 @@ function dro_game_restart()
     game_restart();
 }
 
+// Replaces randomize() and randomise() (patcher). Online every machine seeds with the session's seed. randomize()
+// returns the new seed and the game may use it (Chapter 5's canopy shadows seed the generator with it again), so this
+// returns the seed too: without it the game got undefined and both machines stopped with an error in the same frame.
 function dro_randomize()
 {
     if (!dronline_ready())
         return randomize();
     random_set_seed(global.dro_seed);
+    return global.dro_seed;
 }
 
 // Replaces get_timer() (patcher). Online every machine must read the same clock, so it counts lockstep frames:

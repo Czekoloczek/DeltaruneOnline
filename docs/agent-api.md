@@ -37,6 +37,69 @@ python3 tools/agent_client.py do "20 right; tap confirm 2 15"
 `tools/input_script.py`. Scripts of any length work: the client cuts them into commands and keeps the game's
 queue filled.
 
+## DeepSeek as a player
+
+`tools/deepseek_player.py` lets a DeepSeek model play through this API, toward a goal given in plain words:
+
+```
+python3 tools/deepseek_player.py "walk to the save point and open its menu" --until save_menu
+```
+
+Every turn it reads the state, sends DeepSeek a few lines about it (room, where the player is, the dialogue, a
+choice, the save point menu when the state has it, the nearest objects with their offset from the player, the
+walking speed measured so far), the goal and the last six turns, and plays the steps the model answers with (the
+text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s; an answer of more than 3600 frames is
+refused before it is built).
+
+- **One screen at a time.** The steps are played in pieces, a new piece at every press of confirm, cancel or
+  menu and every second of a long walk or wait, and the rest is dropped as soon as the screen changes (a dialogue,
+  choice, menu or room appears, changes or closes). A held direction is cut only while walking, since in a menu
+  pressing it again would move the cursor again. An answer is not played at all if the screen changed (or the save
+  menu's cursor moved) while the model was thinking; the model is asked again. In the first run in the game, four confirms in one turn ran
+  through the save point's dialogue, its menu and a save; now the model sees each screen.
+- **Dialogue without the model.** A box that is still typing is waited for in one turn, until it waits for
+  confirm or its text has not grown for 3 s (confirm does not skip typing, and the save point's text has pauses),
+  and a box that waits for confirm is confirmed, unless that changed nothing twice; the text still goes into the
+  turns the model is shown. `--no-auto-confirm` turns this off.
+- **No saving unless asked.** Without `--allow-save`, confirm is refused while the save point menu's cursor is on
+  a file slot or on Save in the overwrite question, and the model is told not to try again; the second refusal
+  ends the run (exit 1: the goal needs `--allow-save`). This needs the `save_menu` key of the state: with a game
+  build that does not have it, nothing stops a save.
+- **Ending the run.** The model says when the goal is reached (exit 0) or gives up (1); `--until <key>` or
+  `--until <key>=<value>` ends it as soon as the state meets that (exit 0, no call needed); a limit ends it with 3.
+- **Key.** The environment variable `DEEPSEEK_API_KEY`, or else the file `~/.config/deltarune-online/deepseek.env`
+  (`--key-file` picks another) with the line `DEEPSEEK_API_KEY=<key>`; `chmod 600` it, and never put it in the
+  repository. The key goes only into the requests to api.deepseek.com and is never printed or logged.
+- **Cost.** The default is `deepseek-flash` without thinking (`--model pro`, `--reasoning low|high|max` change
+  that). The system prompt is the same in every turn, so DeepSeek's context cache bills it at the cache-hit price
+  after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.05, counted
+  at the peak prices, and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause`
+  (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high;
+  the runs in the game cost about 0.0002 USD a call at peak prices.
+- **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
+  refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
+  the state as sent, the model's answer, the frames played, the tokens and their price.
+- **Without a key, or without the game.** `--prompt` prints the first turn's prompt and calls no DeepSeek API, and
+  `--fake <file>` takes the answers from a file instead of DeepSeek; both avoid needing an API key, but still
+  connect to the Agent API of a running game (or `native/test_agent.exe`). Without the game,
+  `tests/test_deepseek_player.py` runs the loop against a small game written in Python, shaped like the save point,
+  and against a fake API, and `native/test_agent.py solo` runs it against `drnet.dll`.
+- **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
+  the lockstep, so both games must be running.
+
+**Tried in the game** (2026-11-23, solo, `deepseek-flash`, a build with `save_menu`), every API call worked:
+
+| Run | Goal | Result |
+|---|---|---|
+| 1, before the pieces and the guard | walk to the save point and open its menu | 17 calls, 0.0033 USD; 8 turns of zig-zag to the save point, then four confirms in one turn ran through the menu and saved (in a test copy) |
+| 2, `--until save_menu` | the same | reached: 4 calls and 10 turns without the model, 0.0008 USD |
+| 3 | open its menu, then close it again without saving | reached: 5 calls, 0.0010 USD; the save files unchanged |
+| 4, `--max-steps 8` | open the menu and save to your current file | the guard refused confirm on file slot 2, nothing saved; the model then tried again until the step limit (the second refusal now ends the run), 0.0019 USD |
+
+Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn, ending the run
+after the second refusal, cutting long walks every second and dropping an answer when the screen changed during the
+call came after runs 2 to 4 and are not yet tried in the game.
+
 ## Protocol
 
 Messages are JSON objects, one per line (`\n`, a `\r` before it is ignored), UTF-8, in both directions. Every
