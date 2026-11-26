@@ -20,9 +20,11 @@ The **mouse** is not sent over the network, because DELTARUNE does not use it fo
 entries in Chapter 5 read it (7 editors, test objects and debug code, plus one battle attack: in
 `obj_attack_blue_flowerbullet` (Step) a flower bullet explodes as soon as the mouse cursor is over it, so
 different cursor positions would desync the machines). The patcher therefore rewrites mouse reads (`mouse_x`,
-`mouse_y`, `mouse_check_button*`, `mouse_wheel_*`, `window_mouse_get_*`, `device_mouse_*`) to `dro_*` functions:
-online (and in `solo`/`record`/`replay`) they return a constant off-screen position (`-100000`), `0` for deltas
-and `false` for buttons and wheel; offline they pass through to the real mouse. Not tested in the game yet.
+`mouse_y`, `mouse_check_button*`, `mouse_wheel_*`, `window_mouse_get_x/y`, `device_mouse_*`) to `dro_*` functions:
+online (and in `solo`/`record`/`replay`) they return a constant off-screen position (`-100000`) and `false` for
+buttons and wheel; offline they pass through to the real mouse. `window_mouse_get_delta_x/y` are left alone:
+DELTARUNE's runner doesn't have them, and a stand-in that calls a function the runner lacks stops the game while
+it loads ("Unable to find function", seen in the first build of this change).
 
 ## Virtual input layer (`gml/scr_dronline.gml`)
 

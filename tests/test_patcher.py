@@ -39,8 +39,11 @@ class RewriteRules(unittest.TestCase):
                    "a = dro_mouse_check(mb_right); b = dro_mouse_released(mb_middle);", 2)
         self.check("if (mouse_wheel_up() || mouse_wheel_down( ))",
                    "if (dro_mouse_wheel_up() || dro_mouse_wheel_down())", 2)
-        self.check("wx = window_mouse_get_x(); wy = window_mouse_get_y( ); dx = window_mouse_get_delta_x(); dy = window_mouse_get_delta_y();",
-                   "wx = dro_window_mouse_x(); wy = dro_window_mouse_y(); dx = dro_window_mouse_delta_x(); dy = dro_window_mouse_delta_y();", 4)
+        self.check("wx = window_mouse_get_x(); wy = window_mouse_get_y( );",
+                   "wx = dro_window_mouse_x(); wy = dro_window_mouse_y();", 2)
+        # DELTARUNE's runner has no window_mouse_get_delta_x/y: no rule, or the stand-in would stop the game on load
+        self.check("dx = window_mouse_get_delta_x(); dy = window_mouse_get_delta_y();",
+                   "dx = window_mouse_get_delta_x(); dy = window_mouse_get_delta_y();", 0)
         self.check("dx = device_mouse_x(0); dy = device_mouse_y(0); gx = device_mouse_x_to_gui(0); gy = device_mouse_y_to_gui(0);",
                    "dx = dro_device_mouse_x(0); dy = dro_device_mouse_y(0); gx = dro_device_mouse_x_to_gui(0); gy = dro_device_mouse_y_to_gui(0);", 4)
         self.check("a = device_mouse_check_button(0, mb_left); b = device_mouse_check_button_pressed(0, mb_left); c = device_mouse_check_button_released(0, mb_left);",

@@ -39,7 +39,9 @@ RULES = [
     (r"\bgamepad_is_connected\(", "dro_gp_connected("),
     (r"\bgamepad_get_device_count\(", "dro_gp_count("),
     # mouse reads: online every machine sees the same off-screen position and no buttons held
-    # (obj_attack_blue_flowerbullet explodes a bullet when the cursor is over it)
+    # (obj_attack_blue_flowerbullet explodes a bullet when the cursor is over it). Only functions that DELTARUNE's
+    # runner has: a stand-in that calls a missing one (window_mouse_get_delta_x/y) stops the game while it loads
+    # ("Unable to find function"), and code the runner can load can't call them either.
     (r"\bmouse_check_button_pressed\(", "dro_mouse_pressed("),
     (r"\bmouse_check_button_released\(", "dro_mouse_released("),
     (r"\bmouse_check_button\(", "dro_mouse_check("),
@@ -47,8 +49,6 @@ RULES = [
     (r"\bmouse_wheel_down\(\s*\)", "dro_mouse_wheel_down()"),
     (r"\bwindow_mouse_get_x\(\s*\)", "dro_window_mouse_x()"),
     (r"\bwindow_mouse_get_y\(\s*\)", "dro_window_mouse_y()"),
-    (r"\bwindow_mouse_get_delta_x\(\s*\)", "dro_window_mouse_delta_x()"),
-    (r"\bwindow_mouse_get_delta_y\(\s*\)", "dro_window_mouse_delta_y()"),
     (r"\bdevice_mouse_check_button_pressed\(", "dro_device_mouse_pressed("),
     (r"\bdevice_mouse_check_button_released\(", "dro_device_mouse_released("),
     (r"\bdevice_mouse_check_button\(", "dro_device_mouse_check("),

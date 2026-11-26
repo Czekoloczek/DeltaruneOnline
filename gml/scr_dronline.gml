@@ -742,20 +742,6 @@ function dro_window_mouse_y()
     return -100000;
 }
 
-function dro_window_mouse_delta_x()
-{
-    if (!dronline_ready())
-        return window_mouse_get_delta_x();
-    return 0;
-}
-
-function dro_window_mouse_delta_y()
-{
-    if (!dronline_ready())
-        return window_mouse_get_delta_y();
-    return 0;
-}
-
 function dro_device_mouse_x(d)
 {
     if (!dronline_ready())
