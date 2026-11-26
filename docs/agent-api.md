@@ -4,10 +4,15 @@ An AI agent (for example Claude Code on the player's PC) can play DELTARUNE from
 reads the game state as JSON and sends input such as "hold right for 30 frames, then press confirm". Version 1
 covers the **overworld and dialogue**. In a battle the agent can only see `"battle": true`.
 
-> **Status: not yet tested in the game.** The network side (protocol, input queue, timing) is tested without the
-> game, on Linux under Wine and on Windows (`native/test_agent.py`). The GML that reads the game state has never
-> been compiled by UndertaleModTool or run in the game, and the names of the game's objects and variables below
-> come from the first draft's specification: nobody has checked them in the game yet.
+> **Status: tried in the game, in `mode=solo` only.** In chapter 5 (Linux, under Proton) an agent connected, read
+> the state and played: the file select, loading a save, walking, talking to a save point, the Dark World menu
+> and one of its pages, a save point's menu up to the question whether to overwrite a file. `room`, player 1 in
+> `players_pos`, `nearby`, `dialogue`, `interact`, `menuno` and `save_menu` matched the screen. Not tried in the
+> game yet: an agent in an online game, a chapter change with an agent connected, a choice box (`choice`),
+> players 2 and 3 in `players_pos`, and saving itself (`save_menu` after a file was written). The names of the
+> game's objects and variables for those were looked up in the game, not seen working. The network side
+> (protocol, input queue, timing) is tested without the game, on Linux under Wine and on Windows
+> (`native/test_agent.py`).
 
 ## Turning it on
 
@@ -31,6 +36,69 @@ python3 tools/agent_client.py do "20 right; tap confirm 2 15"
 (standard library only; `python3 tools/agent_client.py --help`). Its steps use the text of
 `tools/input_script.py`. Scripts of any length work: the client cuts them into commands and keeps the game's
 queue filled.
+
+## DeepSeek as a player
+
+`tools/deepseek_player.py` lets a DeepSeek model play through this API, toward a goal given in plain words:
+
+```
+python3 tools/deepseek_player.py "walk to the save point and open its menu" --until save_menu
+```
+
+Every turn it reads the state, sends DeepSeek a few lines about it (room, where the player is, the dialogue, a
+choice, the save point menu when the state has it, the nearest objects with their offset from the player, the
+walking speed measured so far), the goal and the last six turns, and plays the steps the model answers with (the
+text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s; an answer of more than 3600 frames is
+refused before it is built).
+
+- **One screen at a time.** The steps are played in pieces, a new piece at every press of confirm, cancel or
+  menu and every second of a long walk or wait, and the rest is dropped as soon as the screen changes (a dialogue,
+  choice, menu or room appears, changes or closes). A held direction is cut only while walking, since in a menu
+  pressing it again would move the cursor again. An answer is not played at all if the screen changed (or the save
+  menu's cursor moved) while the model was thinking; the model is asked again. In the first run in the game, four confirms in one turn ran
+  through the save point's dialogue, its menu and a save; now the model sees each screen.
+- **Dialogue without the model.** A box that is still typing is waited for in one turn, until it waits for
+  confirm or its text has not grown for 3 s (confirm does not skip typing, and the save point's text has pauses),
+  and a box that waits for confirm is confirmed, unless that changed nothing twice; the text still goes into the
+  turns the model is shown. `--no-auto-confirm` turns this off.
+- **No saving unless asked.** Without `--allow-save`, confirm is refused while the save point menu's cursor is on
+  a file slot or on Save in the overwrite question, and the model is told not to try again; the second refusal
+  ends the run (exit 1: the goal needs `--allow-save`). This needs the `save_menu` key of the state: with a game
+  build that does not have it, nothing stops a save.
+- **Ending the run.** The model says when the goal is reached (exit 0) or gives up (1); `--until <key>` or
+  `--until <key>=<value>` ends it as soon as the state meets that (exit 0, no call needed); a limit ends it with 3.
+- **Key.** The environment variable `DEEPSEEK_API_KEY`, or else the file `~/.config/deltarune-online/deepseek.env`
+  (`--key-file` picks another) with the line `DEEPSEEK_API_KEY=<key>`; `chmod 600` it, and never put it in the
+  repository. The key goes only into the requests to api.deepseek.com and is never printed or logged.
+- **Cost.** The default is `deepseek-flash` without thinking (`--model pro`, `--reasoning low|high|max` change
+  that). The system prompt is the same in every turn, so DeepSeek's context cache bills it at the cache-hit price
+  after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.05, counted
+  at the peak prices, and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause`
+  (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high;
+  the runs in the game cost about 0.0002 USD a call at peak prices.
+- **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
+  refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
+  the state as sent, the model's answer, the frames played, the tokens and their price.
+- **Without a key, or without the game.** `--prompt` prints the first turn's prompt and calls no DeepSeek API, and
+  `--fake <file>` takes the answers from a file instead of DeepSeek; both avoid needing an API key, but still
+  connect to the Agent API of a running game (or `native/test_agent.exe`). Without the game,
+  `tests/test_deepseek_player.py` runs the loop against a small game written in Python, shaped like the save point,
+  and against a fake API, and `native/test_agent.py solo` runs it against `drnet.dll`.
+- **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
+  the lockstep, so both games must be running.
+
+**Tried in the game** (2026-11-23, solo, `deepseek-flash`, a build with `save_menu`), every API call worked:
+
+| Run | Goal | Result |
+|---|---|---|
+| 1, before the pieces and the guard | walk to the save point and open its menu | 17 calls, 0.0033 USD; 8 turns of zig-zag to the save point, then four confirms in one turn ran through the menu and saved (in a test copy) |
+| 2, `--until save_menu` | the same | reached: 4 calls and 10 turns without the model, 0.0008 USD |
+| 3 | open its menu, then close it again without saving | reached: 5 calls, 0.0010 USD; the save files unchanged |
+| 4, `--max-steps 8` | open the menu and save to your current file | the guard refused confirm on file slot 2, nothing saved; the model then tried again until the step limit (the second refusal now ends the run), 0.0019 USD |
+
+Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn, ending the run
+after the second refusal, cutting long walks every second and dropping an answer when the screen changed during the
+call came after runs 2 to 4 and are not yet tried in the game.
 
 ## Protocol
 
@@ -87,18 +155,28 @@ chapter does not have is `null`.
 | `chapter`, `room` | `global.chapter`, and the room's name |
 | `mode`, `player`, `players`, `online` | the `dronline.ini` mode, the local player (1 to 3), the number of players in the game (the mod's `global.playeramount`; online it starts as `players` of `dronline.ini`), whether the network is on |
 | `desync` | the frame of the first desync, -1 for none |
-| `interact` | `global.interact`: 0 free to move, 1 dialogue or cutscene, 6 the dark world menu, other values as they are |
-| `menuno`, `submenu` | `global.menuno` (-1: no menu), `global.submenu` |
+| `interact` | `global.interact`: 0 free to move, 1 dialogue, a cutscene or a save point's menu, 5 the Dark World menu is open, 6 a dialogue started from that menu (an item used, for example), other values as they are |
+| `menuno`, `submenu` | `global.menuno`: where the Dark World menu stands, 0 its top level, 1 to 5 one of its pages. It does not say whether the menu is open (`interact` 5 does): it is 0 in every room from the start and -1 only once the menu has been closed there. `global.submenu` as the game has it |
 | `battle`, `can_move` | `global.fighting == 1`; `interact == 0` and no battle |
 | `players_pos` | a list of `{"player","object","name","x","y","facing"}`. Player 1 is `obj_mainchara`; in the Local Multiplayer mod players 2 and 3 are the `obj_caterpillarchara` with `controls` 1 and 2 (`name`: `susie`, `ralsei`, `noelle`). `facing`: 0 down, 1 right, 2 up, 3 left. A player without an instance is left out |
 | `dialogue` | a list, one entry per `obj_writer` (at most 8): `raw` (the text with the game's control codes), `text` (without them), `shown` (characters typed so far), `length`, `waiting` (the box waits for confirm), `x`, `y` |
 | `choice` | `null`, or while an `obj_choicer_neo` exists: `options` (texts, at most 8), `selected` (-1: none), `can_choose`. A direction picks an option (0 left, 1 right, 2 up, 3 down), then confirm |
+| `save_menu` | `null`, or while a save point's menu (`obj_savemenu`) is open, the game's own numbers for it. `stage`: 0 the main box, 1 the list of file slots, 2 after saving to a slot. `x`, `y`: the cursor in the main box, `x` 0 left or 1 right, `y` 0 top row or 1 bottom row: Save (0,0), Return (1,0), Storage (0,1), Recruits (1,1); `x` 2 means the "saved" message waits for confirm. `slot`: the cursor in the list, 0 to 2 a file, 3 Return; it starts on the file the game was loaded from. `overwrite`: 1 while the question whether to overwrite a file is shown (0 none, 0.5 opening), `overwrite_x` its cursor, 0 Save or 1 Return |
 | `camera` | `x`, `y`, `w`, `h` of the view |
 | `nearby` | up to 30 instances with a sprite within 240 px of player 1, nearest first: `object`, `x`, `y`, `solid`, `visible`. The players themselves are left out |
 
 `text` is `raw` cleaned the way the game's writer reads it: `&` is a line break, `` ` `` keeps the next character,
 `/`, `%` and `|` are dropped, `^` goes with the one character after it and `\` with the two after it (`\E2`,
 `\cR`, `\M1`, ...).
+
+`interact`, `menuno`, `submenu` and the numbers of `save_menu` are the game's own, handed over as they are. What
+they mean is written here for chapter 5 with the mod; another chapter may use others. A save point's menu draws
+its labels itself, so the state has its cursors but not its texts, and the question "return to the title?" that
+the menu asks in the Light World of earlier chapters (`stage` 10 and 11) has its cursor outside the state.
+
+The numbers of one stage of `save_menu` keep their last values when the menu is in another: in `stage` 0, `slot`
+and `overwrite_x` still show where those cursors stood before. So read `x` and `y` in `stage` 0, `slot` in
+`stage` 1, and `overwrite_x` while `overwrite` is 1.
 
 ## Security
 

@@ -32,8 +32,50 @@ class RewriteRules(unittest.TestCase):
         self.check("gamepad_axis_value(0, gp_axislh); gamepad_is_connected(1); gamepad_get_device_count();",
                    "dro_gp_axis(0, gp_axislh); dro_gp_connected(1); dro_gp_count();", 3)
 
+    def test_mouse_reads(self):
+        # flower-bullet style hit check + button, wheel, window and device mouse reads
+        self.check("if (position_meeting(mouse_x, mouse_y, id) || mouse_check_button_pressed(mb_left))",
+                   "if (position_meeting(dro_mouse_x(), dro_mouse_y(), id) || dro_mouse_pressed(mb_left))", 3)
+        self.check("a = mouse_check_button(mb_right); b = mouse_check_button_released(mb_middle);",
+                   "a = dro_mouse_check(mb_right); b = dro_mouse_released(mb_middle);", 2)
+        self.check("if (mouse_wheel_up() || mouse_wheel_down( ))",
+                   "if (dro_mouse_wheel_up() || dro_mouse_wheel_down())", 2)
+        self.check("wx = window_mouse_get_x(); wy = window_mouse_get_y( );",
+                   "wx = dro_window_mouse_x(); wy = dro_window_mouse_y();", 2)
+        # DELTARUNE's runner has no window_mouse_get_delta_x/y: no rule, or the stand-in would stop the game on load
+        self.check("dx = window_mouse_get_delta_x(); dy = window_mouse_get_delta_y();",
+                   "dx = window_mouse_get_delta_x(); dy = window_mouse_get_delta_y();", 0)
+        self.check("dx = device_mouse_x(0); dy = device_mouse_y(0); gx = device_mouse_x_to_gui(0); gy = device_mouse_y_to_gui(0);",
+                   "dx = dro_device_mouse_x(0); dy = dro_device_mouse_y(0); gx = dro_device_mouse_x_to_gui(0); gy = dro_device_mouse_y_to_gui(0);", 4)
+        self.check("a = device_mouse_check_button(0, mb_left); b = device_mouse_check_button_pressed(0, mb_left); c = device_mouse_check_button_released(0, mb_left);",
+                   "a = dro_device_mouse_check(0, mb_left); b = dro_device_mouse_pressed(0, mb_left); c = dro_device_mouse_released(0, mb_left);", 3)
+        # comparisons and ternary still rewrite mouse_x/mouse_y
+        self.check("ok = (mouse_x == x && mouse_y <= y && mouse_x >= 0) ? mouse_x : mouse_y;",
+                   "ok = (dro_mouse_x() == x && dro_mouse_y() <= y && dro_mouse_x() >= 0) ? dro_mouse_x() : dro_mouse_y();", 5)
+        # strings, comments, field/member access (including across whitespace/comments), assignments and lookalikes stay untouched
+        untouched = (
+            'show_debug_message("mouse_x mouse_y mouse_check_button(mb_left) window_mouse_get_x()");\n'
+            "// mouse_x + mouse_y + mouse_check_button(mb_left)\n"
+            "/* mouse_x device_mouse_x(0) */ a = obj.mouse_x + other.mouse_y + my_mouse_x + mouse_y2;\n"
+            "b = obj.mouse_check_button(mb_left) + other.window_mouse_get_x() + mgr.device_mouse_x(0);\n"
+            "c = obj. mouse_x + obj . /* note */ mouse_y + obj.\nmouse_check_button(mb_left) + obj.\n// note\nwindow_mouse_get_x();\n"
+            "mouse_x = 0; mouse_y += 1; mouse_x();\n"
+            "mouse_x /* note */ = 0; mouse_y /* a */ /* b */ -= 1; mouse_x // note\n= 2; mouse_y // note\n<<= 1;\n"
+        )
+        self.check(untouched, untouched, 0)
+        # a comment before a comparison does not hide the read
+        self.check("if (mouse_x /* note */ == 0 || mouse_y // note\n>= 1)",
+                   "if (dro_mouse_x() /* note */ == 0 || dro_mouse_y() // note\n>= 1)", 2)
+        # an `=` further on, inside or after another comment, does not make a read an assignment
+        self.check("var cursor_x = mouse_x /* read */;\nx /* write */ = 0;\nb = mouse_y // c = d\n+ 1; e = mouse_x /* = */ + 1;",
+                   "var cursor_x = dro_mouse_x() /* read */;\nx /* write */ = 0;\nb = dro_mouse_y() // c = d\n+ 1; e = dro_mouse_x() /* = */ + 1;", 3)
+        # a dot inside a preceding comment must not suppress standalone rewrites
+        self.check("v = a + /* . */ mouse_x + /* . */ mouse_check_button(mb_left);",
+                   "v = a + /* . */ dro_mouse_x() + /* . */ dro_mouse_check(mb_left);", 2)
+
     def test_randomize_with_spaces(self):
-        self.check("randomize( );", "dro_randomize();", 1)
+        self.check("randomize( ); randomise(); randomise( );",
+                   "dro_randomize(); dro_randomize(); dro_randomize();", 3)
 
     def test_clock(self):
         # a made-up Draw-style line: an instance position that follows the clock must use the frame clock
@@ -56,12 +98,12 @@ class RewriteRules(unittest.TestCase):
 
     def test_word_boundaries(self):
         # names that only contain a rewritten name must stay as they are
-        src = "my_keyboard_check(1); scr_randomize(); xaudio_is_playing(2); keyboard_check_pressedx(3)"
+        src = "my_keyboard_check(1); scr_randomize(); scr_randomise(); xaudio_is_playing(2); keyboard_check_pressedx(3); my_mouse_check_button(1)"
         self.check(src, src, 0)
 
     def test_idempotent(self):
-        src = ("if (keyboard_check_pressed(vk_up)) { randomize(); audio_play_sound(a, 1, 0); }\n"
-               'n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
+        src = ("if (keyboard_check_pressed(vk_up) || mouse_check_button(mb_left)) { randomize(); audio_play_sound(a, 1, 0); }\n"
+               'x = mouse_x + mouse_y; n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
         once, _ = dp.rewrite(src)
         twice, n = dp.rewrite(once)
         self.assertEqual(once, twice)

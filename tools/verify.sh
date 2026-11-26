@@ -22,6 +22,7 @@ else
         # shellcheck disable=SC2086
         sh native/test_pair.sh $args
     done
+    sh native/test_handshake.sh
     "$PY" native/test_agent.py
 fi
 echo "verify: OK"

@@ -16,11 +16,15 @@ it reads keys from `global.input_k[]` and gamepad buttons from `global.input_g[]
 Besides that, about 330 direct reads (`keyboard_check*`, `gamepad_*`) are spread over ~66 code entries
 of the game and the mod (Chapter 5, game 0.253 + mod v19).
 
-The **mouse** is not part of the virtual input yet. 8 entries in Chapter 5 read it; all but one are editors,
-test objects and debug code. The exception is a battle attack: in `obj_attack_blue_flowerbullet` (Step) a flower
-bullet explodes as soon as the mouse cursor is over it, so with the cursor in a different place on each screen
-the machines would desync. Online, mouse reads must answer the same value everywhere (for example a position far
-off screen).
+The **mouse** is not sent over the network, because DELTARUNE does not use it for multiplayer controls, yet 8
+entries in Chapter 5 read it (7 editors, test objects and debug code, plus one battle attack: in
+`obj_attack_blue_flowerbullet` (Step) a flower bullet explodes as soon as the mouse cursor is over it, so
+different cursor positions would desync the machines). The patcher therefore rewrites mouse reads (`mouse_x`,
+`mouse_y`, `mouse_check_button*`, `mouse_wheel_*`, `window_mouse_get_x/y`, `device_mouse_*`) to `dro_*` functions:
+online (and in `solo`/`record`/`replay`) they return a constant off-screen position (`-100000`) and `false` for
+buttons and wheel; offline they pass through to the real mouse. `window_mouse_get_delta_x/y` are left alone:
+DELTARUNE's runner doesn't have them, and a stand-in that calls a function the runner lacks stops the game while
+it loads ("Unable to find function", seen in the first build of this change).
 
 ## Virtual input layer (`gml/scr_dronline.gml`)
 
@@ -32,7 +36,10 @@ off screen).
    only ever see the virtual keyboard.
 3. The patcher rewrites every built-in input read to the `dro_*` functions, which answer from the
    virtual keyboard (or pass through to the real device when the online mode is off).
-4. `randomize()` becomes `dro_randomize()`, which seeds every machine with the same seed.
+4. `randomize()` / `randomise()` becomes `dro_randomize()`, which seeds every machine with the same seed and, like
+   `randomize()`, returns it: the game may use the value (Chapter 5's canopy shadows seed the generator with it again).
+   Every `dro_*` stand-in for an engine function that returns a value must return one online too;
+   `tests/test_consistency.py` checks that.
 
 Because every machine feeds the same bits into the same game state, every machine computes the same frame.
 
@@ -44,8 +51,13 @@ the native DLL `native/drnet.c` (Windows build, also under Proton) handles UDP, 
 A network thread receives packets the moment they arrive, so the ping is measured exactly and the host relays
 input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
-last 16 frames, so a lost packet is covered by the next one. State fingerprints are exchanged every 30 frames
-to detect desyncs.
+last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
+`drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
+refusing to start if `data.win` cannot be read — and the host rejects clients with a build, protocol or player-count
+mismatch (showing both SHA-256 hash prefixes on a `data.win` mismatch) while keeping the lobby open for valid peers
+so an incompatible or stray packet cannot abort a session. All players must update `drnet.dll` together: mixing
+protocol 3 and protocol 4 peers can still hit the connection timeout on the protocol-3 side. State fingerprints are
+exchanged every 30 frames to detect desyncs.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -180,10 +192,16 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
+- `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect with identical checksums,
+  while mismatched `data.win` hashes (with both SHA-256 prefixes) and mismatched player counts are refused promptly
+  without aborting the host or waiting compatible peers, and a missing `data.win` (even on both sides) fails on
+  start (Wine on Linux, native on Windows).
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network
-  and checks that its limits and button names are the DLL's.
+  and checks that its limits and button names are the DLL's. `tests/test_deepseek_player.py` covers
+  `tools/deepseek_player.py` against a small game written in Python and a fake DeepSeek API (no key, no
+  network), and `test_agent.py solo` runs it once more against the DLL with its fake model.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
@@ -250,8 +268,10 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 
 `agent=<port>` in `[online]` (host, client and solo) lets a program on the same PC, such as an AI agent, read the
 game state as JSON and send input for the local player. The protocol, the keys of the state and the security
-notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module.
-**Not yet tested in the game:** the GML below has never been compiled by UndertaleModTool or run.
+notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module,
+and `tools/deepseek_player.py` lets a DeepSeek model play toward a goal given in words.
+**In the game** it has been tried in chapter 5 in `mode=solo` only; not yet online or across a chapter change
+(the status at the top of agent-api.md says what was seen).
 
 - **The DLL holds the protocol.** `drnet.dll` listens on 127.0.0.1 only, on a TCP socket of its own (the lockstep
   UDP socket is open to the network on the host and does not exist in `mode=solo`). A thread accepts one

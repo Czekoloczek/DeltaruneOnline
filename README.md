@@ -7,8 +7,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > Proton, about 14 ms ping): over 5 minutes on the file menu without a desync, and when one player quits, the other
 > game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
 > With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
-> input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, in the game it is
-> not tested yet.
+> input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, and in the game it
+> has been tried in `mode=solo` only (not yet online or across a chapter change). `tools/deepseek_player.py` lets
+> a DeepSeek model play through it toward a goal given in words (with your own API key; tried in the game in solo,
+> see its section there).
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
@@ -29,10 +31,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 1. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that returns
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
-3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
-   The virtual audio clock is done, and `get_timer()` uses a frame clock online; still open are the other system
-   clock reads in gameplay code (`current_time`, about 20 entries in Chapter 5)
-   and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
+3. **Determinism**: shared random seed; game logic must not depend on audio playback state, the mouse or the
+   system clock. The virtual audio clock, `get_timer()` frame clock and deterministic mouse reads (off-screen
+   cursor / no buttons online, not tested in the game yet) are done; still open are the other system clock reads
+   in gameplay code (`current_time`, about 20 entries in Chapter 5, and `delta_time`). See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
@@ -82,7 +84,8 @@ To install, whichever way you built it:
    `chapter5_online.win` if you ran the patcher yourself) and `drnet.dll` next to it.
 3. Compare the SHA-256 of that `data.win` with every other player's. `build.py` prints it; otherwise run
    `certutil -hashfile data.win SHA256` on Windows or `sha256sum data.win`. If they differ, the games will not stay
-   in sync: check that everyone started from the same game, mod and UndertaleModTool versions.
+   in sync (and `drnet.dll` refuses to connect with a message showing both hash prefixes): check that everyone started
+   from the same game, mod and UndertaleModTool versions.
 
 Without a config file the patched game behaves like the original. To enable a mode, copy
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it
