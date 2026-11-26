@@ -59,8 +59,9 @@ menu is meant only when the goal names the save point.
 - Some ways out have no door object: then walk off the edge where the floor goes on. Paths in the Dark World can
   be dark and hard to see on the screenshot; look along the edges of the room (room_size says how big it is),
   also at the corners and going down or up, not only left and right.
-- The exits lines also say where you came in ("you came in here from ..."): that is the way back, so do not take it
-  unless the goal is back there.
+- The exits lines also say where you came in ("you came in here from ..."): that is the way back. Take it when the
+  goal is back there, or when this room is a dead end and you need to try another way from the last room; do not
+  take it just because it is near.
 - Walls and solid objects stop you. If you held a direction and did not move, something is in the way: step
   sideways a little, then try again.
 - Walk in short steps (at most 45 frames) while you look for the way, and check the state after each: a long hold
