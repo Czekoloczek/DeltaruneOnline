@@ -38,6 +38,7 @@ RULES = [
     (r"\bgamepad_is_connected\(", "dro_gp_connected("),
     (r"\bgamepad_get_device_count\(", "dro_gp_count("),
     (r"\brandomize\(\s*\)", "dro_randomize()"),
+    (r"\brandomise\(\s*\)", "dro_randomize()"),
     # the system clock in microseconds -> a clock that counts lockstep frames (obj_spin_petal's Draw moves the
     # petals with it, so their x differed between machines from the first frame in the Chapter 5 garden)
     (r"\bget_timer\(\s*\)", "dro_get_timer()"),

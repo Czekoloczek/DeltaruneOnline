@@ -32,7 +32,10 @@ off screen).
    only ever see the virtual keyboard.
 3. The patcher rewrites every built-in input read to the `dro_*` functions, which answer from the
    virtual keyboard (or pass through to the real device when the online mode is off).
-4. `randomize()` becomes `dro_randomize()`, which seeds every machine with the same seed.
+4. `randomize()` / `randomise()` becomes `dro_randomize()`, which seeds every machine with the same seed and, like
+   `randomize()`, returns it: the game may use the value (Chapter 5's canopy shadows seed the generator with it again).
+   Every `dro_*` stand-in for an engine function that returns a value must return one online too;
+   `tests/test_consistency.py` checks that.
 
 Because every machine feeds the same bits into the same game state, every machine computes the same frame.
 

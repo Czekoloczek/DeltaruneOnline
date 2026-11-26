@@ -8,6 +8,9 @@
 - Every option name the GML passes to drnet_option must be one that drnet.c knows (it ignores the others).
 - Every dronline.ini key the GML reads must be in config/dronline.ini.example and in the settings comment at the
   top of gml/scr_dronline.gml (CLAUDE.md).
+- A dro_* function that stands in for an engine function with a return value must return a value on every path,
+  online too. The game may use the value: Chapter 5's canopy shadows seed the generator with what randomize()
+  returns, and an online path that returned nothing crashed both machines in the same frame.
 """
 import os
 import re
@@ -68,6 +71,71 @@ class PatcherTargetsExist(unittest.TestCase):
         self.assertEqual(missing, [], "patcher inserts calls to functions missing from gml/scr_dronline.gml")
         for name in generated:
             self.assertIn("function " + name, dp.HEART_OFF)
+
+
+# What the replaced engine functions return (checked against YoYoGames/GameMaker-Manual). A new rewrite rule must
+# be added to one of the sets, so that someone decides whether the game can use its result.
+RETURNS_VALUE = {
+    "keyboard_check", "keyboard_check_pressed", "keyboard_check_released", "keyboard_check_direct",
+    "gamepad_button_check", "gamepad_button_check_pressed", "gamepad_button_check_released", "gamepad_axis_value",
+    "gamepad_is_connected", "gamepad_get_device_count", "randomize", "randomise", "get_timer", "ini_read_real",
+    "audio_play_sound", "audio_play_sound_on", "audio_sound_get_track_position", "audio_is_playing", "audio_is_paused",
+}
+RETURNS_NOTHING = {
+    "keyboard_clear", "io_clear", "game_change", "game_restart", "audio_sound_set_track_position",
+    "audio_sound_pitch", "audio_pause_sound", "audio_resume_sound", "audio_stop_sound", "audio_stop_all",
+    "audio_pause_all", "audio_resume_all",
+}
+
+
+def gml_body(name):
+    """The body of a GML function, from its opening brace to the matching closing one."""
+    m = re.search(rf"^function\s+{re.escape(name)}\s*\([^)]*\)\s*\{{", GML, re.M)
+    if not m:
+        return None
+    depth, i, n = 1, m.end(), len(GML)
+    while depth and i < n:
+        c = GML[i]
+        if c == '"':
+            i += 1
+            while i < n and GML[i] != '"':
+                i += 2 if GML[i] == "\\" else 1
+        elif GML.startswith("//", i):
+            nl = GML.find("\n", i + 2)
+            i = n if nl < 0 else nl
+        elif GML.startswith("/*", i):
+            stop = GML.find("*/", i + 2)
+            i = n if stop < 0 else stop + 1
+        else:
+            depth += {"{": 1, "}": -1}.get(c, 0)
+        i += 1
+    return GML[m.end():i - 1] if depth == 0 else None
+
+
+def rule_pairs():
+    """(engine function, dro_* function) for every rewrite rule."""
+    return [(re.match(r"\\b(\w+)", rx.pattern).group(1), re.match(r"(\w+)\(", repl).group(1)) for rx, repl in dp.RULES]
+
+
+class ReturnValues(unittest.TestCase):
+    def test_every_replaced_function_is_classified(self):
+        self.assertEqual(RETURNS_VALUE & RETURNS_NOTHING, set(), "a function cannot be in both return-value sets")
+        for engine, _ in rule_pairs():
+            with self.subTest(engine=engine):
+                self.assertIn(engine, RETURNS_VALUE | RETURNS_NOTHING,
+                              "add it to RETURNS_VALUE or RETURNS_NOTHING (does the engine function return a value?)")
+
+    def test_stand_ins_return_a_value_on_every_path(self):
+        for engine, dro in rule_pairs():
+            if engine not in RETURNS_VALUE:
+                continue
+            with self.subTest(engine=engine, stand_in=dro):
+                body = gml_body(dro)
+                self.assertIsNotNone(body, "function missing from gml/scr_dronline.gml")
+                self.assertNotRegex(body, r"\breturn\s*;", "a bare return gives the game undefined")
+                last = [line.strip() for line in body.strip().splitlines()
+                        if line.strip() and not line.strip().startswith("//")][-1]
+                self.assertRegex(last, r"^return\s+\S", "the function can end without a return: the game gets undefined")
 
 
 class ExtensionMatchesDll(unittest.TestCase):
