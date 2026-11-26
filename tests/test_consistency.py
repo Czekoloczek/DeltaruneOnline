@@ -61,8 +61,12 @@ def csx_functions():
 class PatcherTargetsExist(unittest.TestCase):
     def test_rewrite_targets_are_defined(self):
         targets = {re.match(r"(\w+)\(", repl).group(1) for _, repl in dp.RULES}
+        targets |= {re.match(r"(\w+)\(", repl).group(1) for repl in dp.VAR_RULES.values()}
         missing = sorted(t for t in targets if t not in GML_FUNCS)
         self.assertEqual(missing, [], "rewrite rules point at functions missing from gml/scr_dronline.gml")
+        for var, repl in dp.VAR_RULES.items():
+            out, n = dp.rewrite(var)
+            self.assertEqual((out, n), (repl, 1), f"VAR_RULES entry {var!r} is not rewritten by VAR_TOKEN_RX")
 
     def test_inserted_hooks_are_defined(self):
         called = set(re.findall(r"\b(dronline_\w+)\(", PATCHER))
@@ -80,6 +84,10 @@ RETURNS_VALUE = {
     "gamepad_button_check", "gamepad_button_check_pressed", "gamepad_button_check_released", "gamepad_axis_value",
     "gamepad_is_connected", "gamepad_get_device_count", "randomize", "randomise", "get_timer", "ini_read_real",
     "audio_play_sound", "audio_play_sound_on", "audio_sound_get_track_position", "audio_is_playing", "audio_is_paused",
+    "mouse_check_button", "mouse_check_button_pressed", "mouse_check_button_released", "mouse_wheel_up",
+    "mouse_wheel_down", "window_mouse_get_x", "window_mouse_get_y", "device_mouse_x", "device_mouse_y",
+    "device_mouse_x_to_gui", "device_mouse_y_to_gui",
+    "device_mouse_check_button", "device_mouse_check_button_pressed", "device_mouse_check_button_released",
 }
 RETURNS_NOTHING = {
     "keyboard_clear", "io_clear", "game_change", "game_restart", "audio_sound_set_track_position",
@@ -117,6 +125,11 @@ def rule_pairs():
     return [(re.match(r"\\b(\w+)", rx.pattern).group(1), re.match(r"(\w+)\(", repl).group(1)) for rx, repl in dp.RULES]
 
 
+def var_pairs():
+    """(built-in variable, dro_* function) for every rewritten variable: a variable always has a value."""
+    return [(var, re.match(r"(\w+)\(", repl).group(1)) for var, repl in dp.VAR_RULES.items()]
+
+
 class ReturnValues(unittest.TestCase):
     def test_every_replaced_function_is_classified(self):
         self.assertEqual(RETURNS_VALUE & RETURNS_NOTHING, set(), "a function cannot be in both return-value sets")
@@ -126,8 +139,8 @@ class ReturnValues(unittest.TestCase):
                               "add it to RETURNS_VALUE or RETURNS_NOTHING (does the engine function return a value?)")
 
     def test_stand_ins_return_a_value_on_every_path(self):
-        for engine, dro in rule_pairs():
-            if engine not in RETURNS_VALUE:
+        for engine, dro in rule_pairs() + var_pairs():
+            if engine not in RETURNS_VALUE and engine not in dp.VAR_RULES:
                 continue
             with self.subTest(engine=engine, stand_in=dro):
                 body = gml_body(dro)

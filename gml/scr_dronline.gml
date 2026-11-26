@@ -676,6 +676,121 @@ function dro_gp_axis(d, a)
     return 0;
 }
 
+// In online/record/replay/solo modes mouse reads must return the same values on every machine (for example
+// obj_attack_blue_flowerbullet explodes a bullet when the cursor is over it): a position far off screen and
+// no buttons or wheel pressed. Offline they pass straight through to the real mouse.
+function dro_mouse_x()
+{
+    if (!dronline_ready())
+        return mouse_x;
+    return -100000;
+}
+
+function dro_mouse_y()
+{
+    if (!dronline_ready())
+        return mouse_y;
+    return -100000;
+}
+
+function dro_mouse_check(b)
+{
+    if (!dronline_ready())
+        return mouse_check_button(b);
+    return false;
+}
+
+function dro_mouse_pressed(b)
+{
+    if (!dronline_ready())
+        return mouse_check_button_pressed(b);
+    return false;
+}
+
+function dro_mouse_released(b)
+{
+    if (!dronline_ready())
+        return mouse_check_button_released(b);
+    return false;
+}
+
+function dro_mouse_wheel_up()
+{
+    if (!dronline_ready())
+        return mouse_wheel_up();
+    return false;
+}
+
+function dro_mouse_wheel_down()
+{
+    if (!dronline_ready())
+        return mouse_wheel_down();
+    return false;
+}
+
+function dro_window_mouse_x()
+{
+    if (!dronline_ready())
+        return window_mouse_get_x();
+    return -100000;
+}
+
+function dro_window_mouse_y()
+{
+    if (!dronline_ready())
+        return window_mouse_get_y();
+    return -100000;
+}
+
+function dro_device_mouse_x(d)
+{
+    if (!dronline_ready())
+        return device_mouse_x(d);
+    return -100000;
+}
+
+function dro_device_mouse_y(d)
+{
+    if (!dronline_ready())
+        return device_mouse_y(d);
+    return -100000;
+}
+
+function dro_device_mouse_x_to_gui(d)
+{
+    if (!dronline_ready())
+        return device_mouse_x_to_gui(d);
+    return -100000;
+}
+
+function dro_device_mouse_y_to_gui(d)
+{
+    if (!dronline_ready())
+        return device_mouse_y_to_gui(d);
+    return -100000;
+}
+
+function dro_device_mouse_check(d, b)
+{
+    if (!dronline_ready())
+        return device_mouse_check_button(d, b);
+    return false;
+}
+
+function dro_device_mouse_pressed(d, b)
+{
+    if (!dronline_ready())
+        return device_mouse_check_button_pressed(d, b);
+    return false;
+}
+
+function dro_device_mouse_released(d, b)
+{
+    if (!dronline_ready())
+        return device_mouse_check_button_released(d, b);
+    return false;
+}
+
 // Replaces game_change (patcher): the chapter select starts a new game process and this one exits. Every
 // machine does that in the same frame, so goodbyes that arrive meanwhile must not show "player left".
 function dro_game_change(_dir, _params)

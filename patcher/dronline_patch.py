@@ -2,7 +2,7 @@
 """DeltaruneOnline patcher.
 
 Takes a chapter data.win that the user already has (DELTARUNE + Local Multiplayer mod applied),
-decompiles it with UndertaleModTool CLI, rewrites every keyboard/gamepad read to the dro_* virtual
+decompiles it with UndertaleModTool CLI, rewrites every keyboard/gamepad/mouse read to the dro_* virtual
 input functions, hooks the lockstep driver into obj_time and compiles the result into a new data.win.
 Nothing from the game or the mod is stored in this repository: all edits are rules applied locally.
 
@@ -11,6 +11,7 @@ Usage:
   (--utmt may also point to UndertaleModCli.exe on Windows)
 """
 import argparse
+import bisect
 import os
 import re
 import shutil
@@ -37,6 +38,24 @@ RULES = [
     (r"\bgamepad_axis_value\(", "dro_gp_axis("),
     (r"\bgamepad_is_connected\(", "dro_gp_connected("),
     (r"\bgamepad_get_device_count\(", "dro_gp_count("),
+    # mouse reads: online every machine sees the same off-screen position and no buttons held
+    # (obj_attack_blue_flowerbullet explodes a bullet when the cursor is over it). Only functions that DELTARUNE's
+    # runner has: a stand-in that calls a missing one (window_mouse_get_delta_x/y) stops the game while it loads
+    # ("Unable to find function"), and code the runner can load can't call them either.
+    (r"\bmouse_check_button_pressed\(", "dro_mouse_pressed("),
+    (r"\bmouse_check_button_released\(", "dro_mouse_released("),
+    (r"\bmouse_check_button\(", "dro_mouse_check("),
+    (r"\bmouse_wheel_up\(\s*\)", "dro_mouse_wheel_up()"),
+    (r"\bmouse_wheel_down\(\s*\)", "dro_mouse_wheel_down()"),
+    (r"\bwindow_mouse_get_x\(\s*\)", "dro_window_mouse_x()"),
+    (r"\bwindow_mouse_get_y\(\s*\)", "dro_window_mouse_y()"),
+    (r"\bdevice_mouse_check_button_pressed\(", "dro_device_mouse_pressed("),
+    (r"\bdevice_mouse_check_button_released\(", "dro_device_mouse_released("),
+    (r"\bdevice_mouse_check_button\(", "dro_device_mouse_check("),
+    (r"\bdevice_mouse_x_to_gui\(", "dro_device_mouse_x_to_gui("),
+    (r"\bdevice_mouse_y_to_gui\(", "dro_device_mouse_y_to_gui("),
+    (r"\bdevice_mouse_x\(", "dro_device_mouse_x("),
+    (r"\bdevice_mouse_y\(", "dro_device_mouse_y("),
     (r"\brandomize\(\s*\)", "dro_randomize()"),
     (r"\brandomise\(\s*\)", "dro_randomize()"),
     # the system clock in microseconds -> a clock that counts lockstep frames (obj_spin_petal's Draw moves the
@@ -64,6 +83,21 @@ RULES = [
     (r"\baudio_resume_all\(\s*\)", "dro_audio_resume_all()"),
 ]
 RULES = [(re.compile(a), b) for a, b in RULES]
+
+# Built-in read-only variables rewritten outside strings, comments, field access and assignments.
+# The assignment check skips whitespace and comments: `mouse_x /* note */ = 0` stays as it is. Inside that check
+# a comment must match as a whole (a block comment ends at its first */, a line comment at the end of its line),
+# or the lookahead could stop inside one comment or run on into the next and find an `=` that is not code.
+_WHOLE_COMMENT = r'(?://[^\n]*(?![^\n])|/\*(?:[^*]|\*(?!/))*\*/)'
+VAR_RULES = {
+    "mouse_x": "dro_mouse_x()",
+    "mouse_y": "dro_mouse_y()",
+}
+VAR_TOKEN_RX = re.compile(
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(mouse_x|mouse_y)\b'
+    r'(?!(?:\s|' + _WHOLE_COMMENT + r')*(?:\(|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    re.S,
+)
 
 HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here
 HOOK_END = "gml_Object_obj_time_Other_3"      # Game End
@@ -152,11 +186,74 @@ def export_check(out):
     return int(m.group(1))
 
 
+SKIP_RX = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.S)
+
+
+def _preceded_by_dot(text, pos, comment_spans, comment_ends):
+    """True when the nearest non-whitespace, non-comment character before pos is '.'."""
+    i = pos - 1
+    while i >= 0:
+        if text[i].isspace():
+            i -= 1
+            continue
+        k = bisect.bisect_right(comment_ends, i)
+        if k < len(comment_spans) and comment_spans[k][0] <= i < comment_spans[k][1]:
+            i = comment_spans[k][0] - 1
+            continue
+        return text[i] == "."
+    return False
+
+
+def _rewrite_rule(rx, repl, text):
+    spans = []
+    comment_spans = []
+    comment_ends = []
+    for m in SKIP_RX.finditer(text):
+        span = (m.start(), m.end())
+        spans.append(span)
+        if text[span[0]] == "/":
+            comment_spans.append(span)
+            comment_ends.append(span[1])
+    si = 0
+    count = 0
+
+    def _sub(m):
+        nonlocal si, count
+        pos = m.start()
+        while si < len(spans) and spans[si][1] <= pos:
+            si += 1
+        if si < len(spans) and spans[si][0] <= pos:
+            return m.group(0)
+        if _preceded_by_dot(text, pos, comment_spans, comment_ends):
+            return m.group(0)
+        count += 1
+        return repl
+
+    return rx.sub(_sub, text), count
+
+
 def rewrite(text):
     total = 0
     for rx, repl in RULES:
-        text, n = rx.subn(repl, text)
+        text, n = _rewrite_rule(rx, repl, text)
         total += n
+
+    comment_spans = []
+    comment_ends = []
+    for m in SKIP_RX.finditer(text):
+        if text[m.start()] == "/":
+            comment_spans.append((m.start(), m.end()))
+            comment_ends.append(m.end())
+
+    def _sub_var(m):
+        nonlocal total
+        name = m.group(1)
+        if not name or _preceded_by_dot(text, m.start(1), comment_spans, comment_ends):
+            return m.group(0)
+        total += 1
+        return VAR_RULES[name]
+
+    text = VAR_TOKEN_RX.sub(_sub_var, text)
     return text, total
 
 
