@@ -85,12 +85,14 @@ RULES = [
 RULES = [(re.compile(a), b) for a, b in RULES]
 
 # Built-in read-only variables rewritten outside strings, comments, field access and assignments.
+# The assignment check skips whitespace and comments: `mouse_x /* note */ = 0` stays as it is.
 VAR_RULES = {
     "mouse_x": "dro_mouse_x()",
     "mouse_y": "dro_mouse_y()",
 }
 VAR_TOKEN_RX = re.compile(
-    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(mouse_x|mouse_y)\b(?!\s*(?:\(|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
+    r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/|(?<![.\w])(mouse_x|mouse_y)\b'
+    r'(?!(?:\s|//[^\n]*|/\*.*?\*/)*(?:\(|(?:[+\-*/%&|^]|<<|>>)?=(?!=)))',
     re.S,
 )
 

@@ -59,8 +59,12 @@ class RewriteRules(unittest.TestCase):
             "b = obj.mouse_check_button(mb_left) + other.window_mouse_get_x() + mgr.device_mouse_x(0);\n"
             "c = obj. mouse_x + obj . /* note */ mouse_y + obj.\nmouse_check_button(mb_left) + obj.\n// note\nwindow_mouse_get_x();\n"
             "mouse_x = 0; mouse_y += 1; mouse_x();\n"
+            "mouse_x /* note */ = 0; mouse_y /* a */ /* b */ -= 1; mouse_x // note\n= 2; mouse_y // note\n<<= 1;\n"
         )
         self.check(untouched, untouched, 0)
+        # a comment before a comparison does not hide the read
+        self.check("if (mouse_x /* note */ == 0 || mouse_y // note\n>= 1)",
+                   "if (dro_mouse_x() /* note */ == 0 || dro_mouse_y() // note\n>= 1)", 2)
         # a dot inside a preceding comment must not suppress standalone rewrites
         self.check("v = a + /* . */ mouse_x + /* . */ mouse_check_button(mb_left);",
                    "v = a + /* . */ dro_mouse_x() + /* . */ dro_mouse_check(mb_left);", 2)
