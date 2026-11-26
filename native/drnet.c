@@ -26,8 +26,10 @@
  *   drnet_set_host(host_ip)                                       -> 1 (client: address of the host)
  *   drnet_start(is_host, port, players, my_player, delay)         -> 1 ok, 0 error (delay -1 = automatic)
  *   (GameMaker refuses DLL functions with more than 4 arguments unless all are numbers.)
- *   drnet_connect(timeout_ms)                                     -> 1 all players connected, 0 timeout
- *                                                                    (the host welcomes clients once all are in)
+ *   drnet_connect(timeout_ms)                                     -> 1 all players connected, 0 timeout or refused
+ *                                                                    (the host checks protocol, player count and
+ *                                                                    data.win SHA-256 in HELLO and welcomes clients
+ *                                                                    once all are in)
  *   drnet_set_aux(value)                                          -> 1 (event sent with the next input, e.g. a hit)
  *   drnet_exchange(frame, my_bits)                                -> bits of all players for `frame`
  *                                                                    (p1 | p2 << 16 | p3 << 32), -1 on timeout,
@@ -70,6 +72,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <math.h>
+#include <wchar.h>
 
 #define EXPORT __declspec(dllexport)
 #define MAXP 3
@@ -77,15 +80,19 @@
 #define WINDOW 16
 #define HRING 64
 #define MAGIC 0x44524F4E /* "DRON" */
-#define PROTO 3   /* 3: BYE */
+#define PROTO 4   /* 4: data.win SHA-256 in HELLO and REJECT */
 #define LAG_BIT 0x0800
 #define FRAME_MS (1000.0 / 30.0)
 #define QSIZE 1024
 
-enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5 };   /* BYE: an input packet that also says goodbye */
+/* BYE: an input packet that also says goodbye; REJECT: host refuses a HELLO (version, player count or data.win) */
+enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5, T_REJECT = 6 };
+enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3 };
 
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t player; uint8_t players; uint8_t proto; } hdr_t;
+typedef struct { hdr_t h; uint8_t data_hash[32]; } hello_pkt;
+typedef struct { hdr_t h; uint8_t reason; uint8_t hash_prefix[6]; } reject_pkt;
 typedef struct {
     hdr_t h;
     uint32_t ts;        /* sender's clock in microseconds */
@@ -107,7 +114,11 @@ static CRITICAL_SECTION cs;
 static int cs_ready;
 static HANDLE ev_input, thr;
 static volatile LONG running;
-static int is_host, players, me, connected;
+static int is_host, players, me, connected, connect_err;
+static uint8_t my_data_hash[32];            /* SHA-256 of data.win, or all zeros when no data.win is present */
+static int has_data_hash;
+static char last_reject[192];               /* host: last refused peer reason (shown if connect times out) */
+static int reject_logged;
 static struct sockaddr_in peer[MAXP + 1];   /* host: client addresses; client: peer[1] = host */
 static int have_peer[MAXP + 1];
 static int32_t frame_of[MAXP + 1][RING];    /* which frame the slot currently holds */
@@ -300,11 +311,245 @@ static void measure(int q, const input_pkt *k, uint64_t now)
     }
 }
 
+/* ---- SHA-256 of data.win (FIPS 180-4, zero external dependencies) ---- */
+typedef struct { uint32_t s[8]; uint64_t len; uint8_t buf[64]; size_t fill; } sha256_ctx;
+
+static uint32_t rotr32(uint32_t x, unsigned n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_init(sha256_ctx *c)
+{
+    c->s[0] = 0x6a09e667u; c->s[1] = 0xbb67ae85u; c->s[2] = 0x3c6ef372u; c->s[3] = 0xa54ff53au;
+    c->s[4] = 0x510e527fu; c->s[5] = 0x9b05688cu; c->s[6] = 0x1f83d9abu; c->s[7] = 0x5be0cd19u;
+    c->len = 0; c->fill = 0;
+}
+
+static void sha256_block(sha256_ctx *c, const uint8_t b[64])
+{
+    static const uint32_t K[64] = {
+        0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
+        0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
+        0xe49b69c1u, 0xefbe4786u, 0x0fc19dc6u, 0x240ca1ccu, 0x2de92c6fu, 0x4a7484aau, 0x5cb0a9dcu, 0x76f988dau,
+        0x983e5152u, 0xa831c66du, 0xb00327c8u, 0xbf597fc7u, 0xc6e00bf3u, 0xd5a79147u, 0x06ca6351u, 0x14292967u,
+        0x27b70a85u, 0x2e1b2138u, 0x4d2c6dfcu, 0x53380d13u, 0x650a7354u, 0x766a0abbu, 0x81c2c92eu, 0x92722c85u,
+        0xa2bfe8a1u, 0xa81a664bu, 0xc24b8b70u, 0xc76c51a3u, 0xd192e819u, 0xd6990624u, 0xf40e3585u, 0x106aa070u,
+        0x19a4c116u, 0x1e376c08u, 0x2748774cu, 0x34b0bcb5u, 0x391c0cb3u, 0x4ed8aa4au, 0x5b9cca4fu, 0x682e6ff3u,
+        0x748f82eeu, 0x78a5636fu, 0x84c87814u, 0x8cc70208u, 0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u
+    };
+    uint32_t w[64], a, bb, cc, d, e, f, g, hh;
+    int i;
+    for (i = 0; i < 16; i++)
+        w[i] = ((uint32_t)b[i * 4] << 24) | ((uint32_t)b[i * 4 + 1] << 16) | ((uint32_t)b[i * 4 + 2] << 8) | b[i * 4 + 3];
+    for (i = 16; i < 64; i++) {
+        uint32_t s0 = rotr32(w[i - 15], 7) ^ rotr32(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = rotr32(w[i - 2], 17) ^ rotr32(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = c->s[0]; bb = c->s[1]; cc = c->s[2]; d = c->s[3];
+    e = c->s[4]; f = c->s[5]; g = c->s[6]; hh = c->s[7];
+    for (i = 0; i < 64; i++) {
+        uint32_t S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+        uint32_t ch = (e & f) ^ ((~e) & g);
+        uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+        uint32_t S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+        uint32_t maj = (a & bb) ^ (a & cc) ^ (bb & cc);
+        uint32_t t2 = S0 + maj;
+        hh = g; g = f; f = e; e = d + t1;
+        d = cc; cc = bb; bb = a; a = t1 + t2;
+    }
+    c->s[0] += a; c->s[1] += bb; c->s[2] += cc; c->s[3] += d;
+    c->s[4] += e; c->s[5] += f; c->s[6] += g; c->s[7] += hh;
+}
+
+static void sha256_update(sha256_ctx *c, const uint8_t *p, size_t n)
+{
+    c->len += n;
+    while (n > 0) {
+        size_t take = 64 - c->fill;
+        if (take > n) take = n;
+        memcpy(c->buf + c->fill, p, take);
+        c->fill += take; p += take; n -= take;
+        if (c->fill == 64) { sha256_block(c, c->buf); c->fill = 0; }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, uint8_t out[32])
+{
+    uint64_t bits = c->len * 8;
+    int i;
+    c->buf[c->fill++] = 0x80;
+    if (c->fill > 56) {
+        memset(c->buf + c->fill, 0, 64 - c->fill);
+        sha256_block(c, c->buf);
+        c->fill = 0;
+    }
+    memset(c->buf + c->fill, 0, 56 - c->fill);
+    for (i = 0; i < 8; i++) c->buf[56 + i] = (uint8_t)(bits >> (56 - i * 8));
+    sha256_block(c, c->buf);
+    for (i = 0; i < 8; i++) {
+        out[i * 4] = (uint8_t)(c->s[i] >> 24);
+        out[i * 4 + 1] = (uint8_t)(c->s[i] >> 16);
+        out[i * 4 + 2] = (uint8_t)(c->s[i] >> 8);
+        out[i * 4 + 3] = (uint8_t)c->s[i];
+    }
+}
+
+static void hex_bytes(const uint8_t *in, size_t n, char *out)
+{
+    static const char H[] = "0123456789abcdef";
+    size_t i;
+    for (i = 0; i < n; i++) { out[i * 2] = H[in[i] >> 4]; out[i * 2 + 1] = H[in[i] & 15]; }
+    out[n * 2] = 0;
+}
+
+static int hash_file_w(const wchar_t *path, uint8_t out[32])
+{
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, NULL);
+    uint8_t *chunk;
+    sha256_ctx ctx;
+    DWORD got = 0;
+    int ok = 1;
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    chunk = (uint8_t *)malloc(65536);
+    if (!chunk) { CloseHandle(f); return 0; }
+    sha256_init(&ctx);
+    for (;;) {
+        if (!ReadFile(f, chunk, 65536, &got, NULL)) { ok = 0; break; }
+        if (got == 0) break;
+        sha256_update(&ctx, chunk, got);
+    }
+    free(chunk);
+    CloseHandle(f);
+    if (!ok) return 0;
+    sha256_final(&ctx, out);
+    return 1;
+}
+
+/* Windows command-line tokenizer (matches CommandLineToArgvW quoting rules without linking shell32). */
+static int next_cmd_token(const wchar_t **pp, wchar_t *out, size_t cap)
+{
+    const wchar_t *p = *pp;
+    size_t len = 0;
+    int inq = 0, trunc = 0;
+    while (*p == L' ' || *p == L'\t') p++;
+    if (!*p) { *pp = p; return 0; }
+    while (*p) {
+        if (*p == L'\\') {
+            size_t bs = 0, k;
+            while (*p == L'\\') { bs++; p++; }
+            if (*p == L'"') {
+                for (k = 0; k < bs / 2; k++) { if (len + 1 < cap) out[len++] = L'\\'; else trunc = 1; }
+                if (bs & 1) { if (len + 1 < cap) out[len++] = L'"'; else trunc = 1; p++; }
+            } else {
+                for (k = 0; k < bs; k++) { if (len + 1 < cap) out[len++] = L'\\'; else trunc = 1; }
+            }
+            continue;
+        }
+        if (*p == L'"') {
+            if (inq && p[1] == L'"') { if (len + 1 < cap) out[len++] = L'"'; else trunc = 1; p += 2; }
+            else { inq = !inq; p++; }
+            continue;
+        }
+        if (!inq && (*p == L' ' || *p == L'\t')) break;
+        if (len + 1 < cap) out[len++] = *p; else trunc = 1;
+        p++;
+    }
+    out[len] = 0;
+    *pp = p;
+    return trunc ? -1 : 1;
+}
+
+static int dirname_join_w(wchar_t *dst, size_t cap, const wchar_t *base_file, const wchar_t *rel)
+{
+    const wchar_t *slash = NULL, *p;
+    size_t dlen, rlen;
+    for (p = base_file; *p; p++) if (*p == L'\\' || *p == L'/') slash = p;
+    dlen = slash ? (size_t)(slash - base_file + 1) : 0;
+    rlen = wcslen(rel);
+    if (dlen + rlen + 1 > cap) return 0;
+    memcpy(dst, base_file, dlen * sizeof(wchar_t));
+    memcpy(dst + dlen, rel, (rlen + 1) * sizeof(wchar_t));
+    return 1;
+}
+
+/* Hashes the running chapter's data.win so HELLO refuses mismatched builds before the game starts:
+ *   1. `-game <path>` on the process command line (what DELTARUNE's launcher passes, and what test_drnet uses),
+ *   2. `data.win` next to drnet.dll (the patcher always copies drnet.dll alongside the patched data.win).
+ * Never falls back to cwd `data.win`, which in DELTARUNE's root folder would be the launcher's own data.win. */
+static int load_data_hash(void)
+{
+    const wchar_t *cmd = GetCommandLineW();
+    wchar_t tok[1024], game_arg[1024], cand[1024], base[1024];
+    HMODULE mod = NULL;
+    char hex64[65];
+    memset(my_data_hash, 0, sizeof(my_data_hash));
+    has_data_hash = 0;
+    if (cmd && next_cmd_token(&cmd, tok, 1024) != 0) {
+        int r;
+        while ((r = next_cmd_token(&cmd, tok, 1024)) != 0) {
+            if (r > 0 && _wcsicmp(tok, L"-game") == 0) {
+                if (next_cmd_token(&cmd, game_arg, 1024) > 0 && game_arg[0]) {
+                    if (hash_file_w(game_arg, my_data_hash)) { has_data_hash = 1; break; }
+                    if (game_arg[0] != L'\\' && game_arg[0] != L'/' && !(game_arg[1] == L':')) {
+                        DWORD n = GetModuleFileNameW(NULL, base, 1024);
+                        if (n > 0 && n < 1024 && dirname_join_w(cand, 1024, base, game_arg) && hash_file_w(cand, my_data_hash)) {
+                            has_data_hash = 1; break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!has_data_hash &&
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)(const void *)load_data_hash, &mod)) {
+        DWORD n = GetModuleFileNameW(mod, base, 1024);
+        if (n > 0 && n < 1024 && dirname_join_w(cand, 1024, base, L"data.win") && hash_file_w(cand, my_data_hash))
+            has_data_hash = 1;
+    }
+    if (has_data_hash) {
+        hex_bytes(my_data_hash, 32, hex64);
+        logm("data.win sha256 %s", hex64);
+    } else {
+        logm("data.win not found via -game or next to drnet.dll");
+    }
+    return has_data_hash;
+}
+
+static int same_addr(const struct sockaddr_in *a, const struct sockaddr_in *b)
+{
+    return a->sin_addr.s_addr == b->sin_addr.s_addr && a->sin_port == b->sin_port;
+}
+
 /* Status text once player p's goodbye made drnet_exchange give up (lock held). */
 static void left_status(int p)
 {
     if (players == 2) snprintf(status, sizeof(status), "the other player left the game");
     else snprintf(status, sizeof(status), "player %d left the game", p);
+}
+
+/* Tell a peer why HELLO was refused; sent straight out (UDP, not delayed by test lag). One packet per HELLO avoids
+ * amplification; the host keeps listening, so a client whose REJECT was lost gets another on its 200 ms retry. Lock held. */
+static void send_reject(const struct sockaddr_in *to, uint8_t reason)
+{
+    reject_pkt r;
+    memset(&r, 0, sizeof(r));
+    fill_hdr(&r.h, T_REJECT, me);
+    r.reason = reason;
+    memcpy(r.hash_prefix, my_data_hash, sizeof(r.hash_prefix));
+    raw_send(to, &r, sizeof(r));
+}
+
+/* Record a host-side handshake refusal for drnet.log and timeout diagnostics without aborting the pending lobby. Lock held. */
+static void note_reject(const char *short_msg, const char *log_msg)
+{
+    if (!connected) {
+        snprintf(last_reject, sizeof(last_reject), "%s", short_msg);
+    }
+    if (reject_logged < 10) {
+        reject_logged++;
+        logm("%s", log_msg ? log_msg : short_msg);
+    }
 }
 
 /* Runs on the network thread, with the lock held. */
@@ -313,24 +558,93 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
     const hdr_t *h = (const hdr_t *)buf;
     if (len < (int)sizeof(hdr_t) || h->magic != MAGIC) return;
     /* a client repeats HELLO until it is welcomed: log the first one from each address */
-    if (h->type == T_WELCOME || (h->type == T_HELLO && h->player >= 1 && h->player <= MAXP &&
-        (!have_peer[h->player] || peer[h->player].sin_addr.s_addr != from->sin_addr.s_addr || peer[h->player].sin_port != from->sin_port)))
-        logm("got %s from %s:%d player %d", h->type == T_HELLO ? "HELLO" : "WELCOME", inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
+    if (!connect_err && (
+        (!is_host && have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT)) ||
+        (is_host && !connected && h->type == T_HELLO && h->player >= 2 && h->player <= MAXP &&
+         (!have_peer[h->player] || !same_addr(&peer[h->player], from)) && reject_logged < 10))) {
+        logm("got %s from %s:%d player %d",
+             h->type == T_HELLO ? "HELLO" : (h->type == T_WELCOME ? "WELCOME" : "REJECT"),
+             inet_ntoa(from->sin_addr), ntohs(from->sin_port), h->player);
+    }
     if (h->proto != PROTO) {
-        static int warned;
-        if (!warned++) { snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version"); logm("%s (protocol %d, mine %d)", status, h->proto, PROTO); }
+        if (is_host) {
+            if (h->type == T_HELLO && h->player >= 2 && h->player <= MAXP && h->players >= 2 && h->players <= MAXP) {
+                char msg[192];
+                send_reject(from, REJ_PROTO);
+                snprintf(msg, sizeof(msg), "player %d runs a different DeltaruneOnline version (protocol %d, mine %d)", h->player, h->proto, PROTO);
+                note_reject(msg, NULL);
+            }
+        } else if (have_peer[1] && same_addr(from, &peer[1]) && (h->type == T_WELCOME || h->type == T_REJECT)) {
+            if (!connected && !connect_err) {
+                connect_err = 1;
+                snprintf(status, sizeof(status), "other player runs a different DeltaruneOnline version (protocol %d, mine %d)", h->proto, PROTO);
+                logm("%s", status);
+            }
+        }
         return;
     }
-    if (h->type == T_HELLO && is_host && h->player >= 2 && h->player <= players) {
+    if (h->type == T_HELLO && is_host) {
+        const hello_pkt *hp = (const hello_pkt *)buf;
         hdr_t w; int q, all = 1;
+        if (h->player < 2 || h->player > MAXP || h->players < 2 || h->players > MAXP) return;
+        if (h->players != players) {
+            char msg[192];
+            send_reject(from, REJ_PLAYERS);
+            snprintf(msg, sizeof(msg), "player %d has players=%d, host has players=%d", h->player, h->players, players);
+            note_reject(msg, NULL);
+            return;
+        }
+        if (h->player > players) return;
+        if (len < (int)sizeof(hello_pkt)) {
+            send_reject(from, REJ_PROTO);
+            note_reject("other player runs a different DeltaruneOnline version", NULL);
+            return;
+        }
+        if (!has_data_hash || memcmp(hp->data_hash, my_data_hash, 32) != 0) {
+            char their12[13], mine12[13], their64[65], mine64[65], msg[192], lmsg[256];
+            send_reject(from, REJ_HASH);
+            hex_bytes(hp->data_hash, 6, their12); hex_bytes(my_data_hash, 6, mine12);
+            hex_bytes(hp->data_hash, 32, their64); hex_bytes(my_data_hash, 32, mine64);
+            snprintf(msg, sizeof(msg), "player %d has a different data.win (theirs %s..., mine %s...)", h->player, their12, mine12);
+            snprintf(lmsg, sizeof(lmsg), "data.win mismatch from player %d: theirs %s, mine %s", h->player, their64, mine64);
+            note_reject(msg, lmsg);
+            return;
+        }
+        if (connected) {
+            /* Only retransmit WELCOME to the already-accepted peer for this slot; never overwrite peer[] after connect. */
+            if (have_peer[h->player] && same_addr(&peer[h->player], from)) {
+                fill_hdr(&w, T_WELCOME, 1);
+                send_to(from, &w, sizeof(w));
+            }
+            return;
+        }
         peer[h->player] = *from; have_peer[h->player] = 1;
         /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
            exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
            HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. */
         for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
-        if (all) { fill_hdr(&w, T_WELCOME, 1); send_to(from, &w, sizeof(w)); }
-    } else if (h->type == T_WELCOME && !is_host) {
-        connected = 1;
+        if (all) {
+            fill_hdr(&w, T_WELCOME, 1);
+            connected = 1;
+            for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
+        }
+    } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
+        const reject_pkt *r = (const reject_pkt *)buf;
+        if (!connected && !connect_err) {
+            connect_err = 1;
+            if (r->reason == REJ_HASH) {
+                char mine12[13], host12[13];
+                hex_bytes(my_data_hash, 6, mine12); hex_bytes(r->hash_prefix, 6, host12);
+                snprintf(status, sizeof(status), "different data.win than the host (mine %s..., host %s...)", mine12, host12);
+            } else if (r->reason == REJ_PLAYERS) {
+                snprintf(status, sizeof(status), "different player count than the host (host has %d, mine %d)", r->h.players, players);
+            } else {
+                snprintf(status, sizeof(status), "different DeltaruneOnline version than the host (protocol %d, mine %d)", r->h.proto, PROTO);
+            }
+            logm("rejected by host: %s", status);
+        }
+    } else if (h->type == T_WELCOME && !is_host && have_peer[1] && same_addr(from, &peer[1])) {
+        if (!connect_err) connected = 1;
     } else if ((h->type == T_INPUT || h->type == T_BYE) && len >= (int)sizeof(input_pkt)) {
         const input_pkt *k = (const input_pkt *)buf; int i;
         if (k->h.player < 1 || k->h.player > players || k->h.player == me) return;
@@ -496,6 +810,12 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     delay_auto = dly < 0; delay = delay_auto ? 0 : (int)dly;
     if (players < 2 || players > MAXP || me < 1 || me > players || delay > 30) { snprintf(status, sizeof(status), "bad settings"); logm("bad settings"); WSACleanup(); return 0; }
     if (is_host && me != 1) { snprintf(status, sizeof(status), "host must be player 1"); logm("%s", status); WSACleanup(); return 0; }
+    if (!load_data_hash()) {
+        snprintf(status, sizeof(status), "cannot read data.win to verify build");
+        logm("%s", status);
+        WSACleanup();
+        return 0;
+    }
     /* DELTARUNE's chapter change (game_change) starts a new game process that inherits open handles, and the old
        process exits without Clean Up. An inherited socket keeps the port bound inside the new process, so hosting
        again fails until that process ends (Phase 1 test, 2026-11-23). So the socket is created non-inheritable;
@@ -524,7 +844,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
         if (inet_pton(AF_INET, host_ip, &peer[1].sin_addr) != 1) { snprintf(status, sizeof(status), "bad host address %s", host_ip); logm("%s", status); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return 0; }
         have_peer[1] = 1;
     }
-    connected = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
+    connected = 0; connect_err = 0; last_reject[0] = 0; reject_logged = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
     srand((unsigned)now_us());
     running = 1;
     thr = CreateThread(NULL, 0, net_thread, NULL, 0, NULL);
@@ -536,31 +856,39 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
 
 EXPORT double drnet_connect(double timeout_ms)
 {
-    DWORD start = GetTickCount(), last_hello = 0, last_note = GetTickCount();
+    DWORD start = GetTickCount(), last_hello = start - 201, last_note = start;
     logm("connect: begin (timeout %g ms, socket %s)", timeout_ms, sock == INVALID_SOCKET ? "INVALID" : "ok");
     if (sock == INVALID_SOCKET) return 0;
     while (GetTickCount() - start < (DWORD)timeout_ms) {
         int done = 0;
         lock();
-        if (is_host) {
-            int p, all = 1;
-            for (p = 2; p <= players; p++) if (!have_peer[p]) all = 0;
-            if (all) { connected = 1; done = 1; logm("all players connected"); }
-        } else {
-            if (connected) { done = 1; logm("connected to host"); }
-            else if (GetTickCount() - last_hello > 200) {
-                hdr_t h; fill_hdr(&h, T_HELLO, me);
-                send_to(&peer[1], &h, sizeof(h)); last_hello = GetTickCount();
-            }
+        if (connect_err) {
+            done = -1;
+        } else if (connected) {
+            done = 1;
+            update_status();
+            logm("%s", is_host ? "all players connected" : "connected to host");
+        } else if (!is_host && GetTickCount() - last_hello > 200) {
+            hello_pkt hp;
+            fill_hdr(&hp.h, T_HELLO, me);
+            memcpy(hp.data_hash, my_data_hash, sizeof(hp.data_hash));
+            send_to(&peer[1], &hp, sizeof(hp)); last_hello = GetTickCount();
         }
         unlock();
-        if (done) return 1;
+        if (done > 0) return 1;
+        if (done < 0) return 0;
         Sleep(10);
         pump_window_messages();
         if (GetTickCount() - last_note > 5000) { last_note = GetTickCount(); logm("connect: still waiting"); }
     }
-    snprintf(status, sizeof(status), "%s: nobody answered in %g s", is_host ? "host" : "client", timeout_ms / 1000);
+    lock();
+    if (is_host && last_reject[0]) {
+        snprintf(status, sizeof(status), "%s (timed out after %g s)", last_reject, timeout_ms / 1000);
+    } else {
+        snprintf(status, sizeof(status), "%s: nobody answered in %g s", is_host ? "host" : "client", timeout_ms / 1000);
+    }
     logm("%s", status);
+    unlock();
     return 0;
 }
 
