@@ -109,7 +109,7 @@ than 3600 frames is refused before it is built).
   after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.50, counted
   at the peak prices, and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause`
   (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high
-  (up to about 0.005 USD a call with the guide and a full history, an image counted as 1024 tokens); the runs in the game cost about 0.0002 USD a
+  (up to about 0.006 USD a call with the guide, a full history and notes, an image counted as 1024 tokens); the runs in the game cost about 0.0002 USD a
   call at peak prices before the guide and the longer history, and all four together less than 0.01 USD.
 - **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
   refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
@@ -119,8 +119,24 @@ than 3600 frames is refused before it is built).
   connect to the Agent API of a running game (or `native/test_agent.exe`). Without the game,
   `tests/test_deepseek_player.py` runs the loop against a small game written in Python, shaped like the save point,
   and against a fake API, and `native/test_agent.py solo` runs it against `drnet.dll`.
+- **Exits.** The state lines include the room's size and its `exits`, each with the edge it is at, its box and
+  its offset from the player, and the program notes where this run came into and left each room ("you came in
+  here from room_x" goes with the door next to that place, or gets a line of its own when there is no door
+  object), so the way back is known and a way out without a door shows up once it has been used. The system
+  prompt says how to cross a door (line up with its box, then walk into it) and to walk at most 45 frames at a
+  time without a target in `nearby` or `exits`.
+- **Walking back and forth.** When the player's place at the last 8 calls went back and forth along one line (3 or
+  more changes of direction along x or y, moves of 16 px or more, while the other way stayed within 48 px), the
+  prompt warns the model that the way on is not along that line. In the first co-op run both players walked
+  left and right in 60 to 120-frame steps for 140 turns past a dark path going down at the left end.
 - **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
-  the lockstep, so both games must be running.
+  the lockstep, so both games must be running. With two copies of the game on one PC (`tools/local_test.bat`,
+  each with its own `agent=` port), give both players the same `--notes <file>`: every time its model answers,
+  each player appends a JSON line to it (player number, turn, time, room and place, the answer's `why`, and the
+  `note` the model wrote for the others), and each turn it shows its model the other players' last line and their
+  last 4 notes (lines older than an hour are left out; use a new file for each session). Player 2's screenshot is
+  centred on player 1, whom the camera follows, and its model is told so. `nearby` and `exits` are counted from
+  the local player. None of this has run in the game yet.
 
 **Tried in the game** (2026-11-23, solo, `deepseek-flash`, a build with `save_menu`), every API call worked:
 
@@ -201,7 +217,15 @@ chapter does not have is `null`.
 | `choice` | `null`, or while an `obj_choicer_neo` exists: `options` (texts, at most 8), `selected` (-1: none), `can_choose`. A direction picks an option (0 left, 1 right, 2 up, 3 down), then confirm |
 | `save_menu` | `null`, or while a save point's menu (`obj_savemenu`) is open, the game's own numbers for it. `stage`: 0 the main box, 1 the list of file slots, 2 after saving to a slot. `x`, `y`: the cursor in the main box, `x` 0 left or 1 right, `y` 0 top row or 1 bottom row: Save (0,0), Return (1,0), Storage (0,1), Recruits (1,1); `x` 2 means the "saved" message waits for confirm. `slot`: the cursor in the list, 0 to 2 a file, 3 Return; it starts on the file the game was loaded from. `overwrite`: 1 while the question whether to overwrite a file is shown (0 none, 0.5 opening), `overwrite_x` its cursor, 0 Save or 1 Return |
 | `camera` | `x`, `y`, `w`, `h` of the view |
-| `nearby` | up to 30 instances with a sprite within 240 px of player 1, nearest first: `object`, `x`, `y`, `solid`, `visible`. The players themselves are left out |
+| `room_size` | `w`, `h`: `room_width` and `room_height` |
+| `nearby` | up to 30 instances with a sprite within 240 px of the local player (of player 1 when the local player has no instance), nearest first: `object`, `x`, `y`, `solid`, `visible`. The players themselves are left out |
+| `exits` | the room's doors: up to 16 instances anywhere in the room, visible or not, with or without a sprite, whose object or an object it inherits from has `_door` or `transition` in its name, nearest to the local player first: `object`, `x`, `y`, the box `left`, `top`, `right`, `bottom`, `edge` (`left`, `right`, `top` or `bottom` when the box is within 40 px of that edge of the room, else `inside`), `to`, `visible`. `to` is the name of the room held by the first variable of the door with `room` in its name (a room index above 1, not this room), else `null` |
+
+`exits` and `to` are found by name, since the game has no list of its ways out: its doors are objects like
+`obj_doorA` and `obj_doorX`, mostly invisible boxes at the edges of a room that change the room when player 1 walks
+into them. `to` is a guess from a variable's name, so check it against the room you arrive in. A way out that is
+done some other way (an event of the room, or a door object with another name) is not in the list. Neither key
+has been tried in the game yet.
 
 `text` is `raw` cleaned the way the game's writer reads it: `&` is a line break, `` ` `` keeps the next character,
 `/`, `%` and `|` are dropped, `^` goes with the one character after it and `\` with the two after it (`\E2`,

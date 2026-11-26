@@ -1351,7 +1351,9 @@ function dronline_agent_state()
         + ",\"save_menu\":" + dronline_agent_savemenu()
         + ",\"camera\":{\"x\":" + dronline_agent_num(camera_get_view_x(cam)) + ",\"y\":" + dronline_agent_num(camera_get_view_y(cam))
         + ",\"w\":" + dronline_agent_num(camera_get_view_width(cam)) + ",\"h\":" + dronline_agent_num(camera_get_view_height(cam)) + "}"
+        + ",\"room_size\":{\"w\":" + dronline_agent_num(room_width) + ",\"h\":" + dronline_agent_num(room_height) + "}"
         + ",\"nearby\":" + dronline_agent_nearby()
+        + ",\"exits\":" + dronline_agent_exits()
         + "}";
 }
 
@@ -1507,14 +1509,39 @@ function dronline_agent_savemenu()
         + ",\"overwrite_x\":" + dronline_agent_ivar(m, "overcoord") + "}";
 }
 
-// Up to 30 instances with a sprite within 240 px of player 1, nearest first, without the players themselves.
+// The instance the local player moves (players_pos): obj_mainchara for player 1, for players 2 and 3 the
+// obj_caterpillarchara with controls == player - 1. Player 1's when the local player has none; noone without either.
+function dronline_agent_local()
+{
+    if (global.dro_player >= 2)
+    {
+        var cat = asset_get_index("obj_caterpillarchara");
+        if (cat >= 0)
+        {
+            var n = instance_number(cat);
+            for (var i = 0; i < n; i++)
+            {
+                var c = instance_find(cat, i);
+                if (c != noone && variable_instance_exists(c, "controls")
+                    && variable_instance_get(c, "controls") == global.dro_player - 1)
+                    return c;
+            }
+        }
+    }
+    var main = asset_get_index("obj_mainchara");
+    if (main >= 0 && instance_exists(main))
+        return instance_find(main, 0);
+    return noone;
+}
+
+// Up to 30 instances with a sprite within 240 px of the local player, nearest first, without the players themselves.
 function dronline_agent_nearby()
 {
-    var main = asset_get_index("obj_mainchara");
-    if (main < 0 || !instance_exists(main))
+    var me = dronline_agent_local();
+    if (me == noone)
         return "[]";
+    var main = asset_get_index("obj_mainchara");
     var cat = asset_get_index("obj_caterpillarchara");
-    var me = instance_find(main, 0);
     var px = me.x;
     var py = me.y;
     var names = [];
@@ -1555,6 +1582,111 @@ function dronline_agent_nearby()
             + ",\"solid\":" + ((flags[best] & 1) ? "true" : "false")
             + ",\"visible\":" + ((flags[best] & 2) ? "true" : "false") + "}";
         dist[best] = -1;
+    }
+    return "[" + out + "]";
+}
+
+// Whether instances of this object are room exits: the object, or one it inherits from, has "_door" or "transition"
+// in its name. The game's doors (obj_doorA, obj_doorX, ...) are mostly invisible boxes at the edges of a room that
+// change the room when player 1 walks into them.
+function dronline_agent_is_exit(obj)
+{
+    var o = obj;
+    for (var k = 0; k < 8 && o >= 0; k++)
+    {
+        var nm = string_lower(object_get_name(o));
+        if (string_pos("_door", nm) > 0 || string_pos("transition", nm) > 0)
+            return true;
+        o = object_get_parent(o);
+    }
+    return false;
+}
+
+// The room a door leads to, as a JSON string: the first variable of the door with "room" in its name that holds
+// another room of the game (a room index above 1: rooms 0 and 1 are the game's start rooms). null without one. Only
+// a guess from the variable's name; docs/agent-api.md says so.
+function dronline_agent_exit_to(inst)
+{
+    var names = variable_instance_get_names(inst);
+    var n = min(array_length(names), 64);
+    for (var i = 0; i < n; i++)
+    {
+        if (string_pos("room", string_lower(names[i])) == 0)
+            continue;
+        var v = variable_instance_get(inst, names[i]);
+        if (dronline_agent_isnum(v) && !is_bool(v) && v >= 2 && v == floor(v) && v != room && room_exists(v))
+            return dronline_agent_str(room_get_name(v));
+    }
+    return "null";
+}
+
+// Room exits: up to 16 instances anywhere in the room whose object is an exit (dronline_agent_is_exit), visible or
+// not, with or without a sprite, nearest to the local player first. Each with its box and the edge of the room it
+// is at (within 40 px of it, else "inside").
+function dronline_agent_exits()
+{
+    var me = dronline_agent_local();
+    var px = room_width / 2;
+    var py = room_height / 2;
+    if (me != noone)
+    {
+        px = me.x;
+        py = me.y;
+    }
+    var ids = [];
+    var dist = [];
+    var n = 0;
+    with (all)
+    {
+        if (n < 64 && dronline_agent_is_exit(object_index))
+        {
+            var cx = (bbox_left + bbox_right) / 2;
+            var cy = (bbox_top + bbox_bottom) / 2;
+            ids[n] = id;
+            dist[n] = (cx - px) * (cx - px) + (cy - py) * (cy - py);
+            n++;
+        }
+    }
+    var out = "";
+    var count = min(n, 16);
+    for (var k = 0; k < count; k++)
+    {
+        var best = -1;
+        for (var i = 0; i < n; i++)
+        {
+            if (dist[i] >= 0 && (best < 0 || dist[i] < dist[best]))
+                best = i;
+        }
+        var d = ids[best];
+        dist[best] = -1;
+        // the nearest edge of the room (plain variables: no array literals for UndertaleModTool's compiler)
+        var side = "left";
+        var gap = d.bbox_left;
+        if (room_width - d.bbox_right < gap)
+        {
+            side = "right";
+            gap = room_width - d.bbox_right;
+        }
+        if (d.bbox_top < gap)
+        {
+            side = "top";
+            gap = d.bbox_top;
+        }
+        if (room_height - d.bbox_bottom < gap)
+        {
+            side = "bottom";
+            gap = room_height - d.bbox_bottom;
+        }
+        out += ((k > 0) ? "," : "") + "{\"object\":" + dronline_agent_str(object_get_name(d.object_index))
+            + ",\"x\":" + dronline_agent_num(d.x)
+            + ",\"y\":" + dronline_agent_num(d.y)
+            + ",\"left\":" + dronline_agent_num(d.bbox_left)
+            + ",\"top\":" + dronline_agent_num(d.bbox_top)
+            + ",\"right\":" + dronline_agent_num(d.bbox_right)
+            + ",\"bottom\":" + dronline_agent_num(d.bbox_bottom)
+            + ",\"edge\":" + dronline_agent_str((gap <= 40) ? side : "inside")
+            + ",\"to\":" + dronline_agent_exit_to(d)
+            + ",\"visible\":" + (d.visible ? "true" : "false") + "}";
     }
     return "[" + out + "]";
 }

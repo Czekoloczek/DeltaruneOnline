@@ -53,10 +53,26 @@ menu is meant only when the goal names the save point.
 ## Walking around
 
 - Rooms join through doors and openings, often at the edge of the room. Walking through one changes the room
-  (state: room). Exits often have no object in nearby: walk off the edge where the floor goes on.
+  (state: room). The doors are mostly invisible, so they are not in the picture: the exits lines list them for
+  the whole room, with the edge each is at and its box. A door at the left or right edge is crossed by lining up
+  with its y range and walking toward that edge; one at the top or bottom by lining up with its x range.
+- Some ways out have no door object: then walk off the edge where the floor goes on. Paths in the Dark World can
+  be dark and hard to see on the screenshot; look along the edges of the room (room_size says how big it is),
+  also at the corners and going down or up, not only left and right.
+- The exits lines also say where you came in ("you came in here from ..."): that is the way back, so do not take it
+  unless the goal is back there.
 - Walls and solid objects stop you. If you held a direction and did not move, something is in the way: step
   sideways a little, then try again.
-- nearby lists only objects with a picture, within 240 px, nearest first.
+- Walk in short steps (at most 45 frames) while you look for the way, and check the state after each: a long hold
+  runs past an opening. If the program warns that you walk back and forth, the way on is not along that line.
+- nearby lists only objects with a picture, within 240 px of you, nearest first.
+
+## Playing with another player
+
+- In a game of two or three players, players_pos lists everyone; "you" is the one you play. The camera follows
+  player 1 (Kris), so as player 2 or 3 you may be off-centre on the screenshot.
+- With shared notes, "Other players" says what the others are doing and what they wrote. Split the search, tell
+  them what you find (an exit, a dead end, a puzzle), and go where one of you found the way on.
 
 ## Battles
 

@@ -26,7 +26,15 @@ What the model is told:
     --screenshot-cmd gives a command that prints the image. When a capture fails, the turn goes without a picture
     and the model is told why;
   - with --until, whether the program's goal check is met yet. The program then judges the goal: an answer
-    "done" before the check is met is told back to the model and the run goes on (the third one ends it, exit 1).
+    "done" before the check is met is told back to the model and the run goes on (the third one ends it, exit 1);
+  - the room's exits: the doors the state lists anywhere in the room (exits, also invisible ones), with their box,
+    the edge they are at and the offset from the player, and where this run came into and left the room (the way
+    back is where it came in; a way out without a door object shows up there once it has been used);
+  - a warning when the player walked back and forth along one line in its last 8 turns (in the first co-op run
+    both players walked left and right for 140 turns past a dark path going down);
+  - with --notes, what the other players are doing and the notes they wrote (see "Two players on one PC").
+The system prompt tells the model to walk at most 45 frames at a time when it has no target in nearby or exits, so
+it does not run past an opening, and how to leave through a door.
 
 A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece; a long walk
 or wait is cut every second), and the rest is dropped as soon as the screen changes: a dialogue, choice, menu or
@@ -50,7 +58,7 @@ Limits (each ends the run with exit code 3):
                       confirming one that waits) do not count, but at most 5 times as many of them
   --max-usd <usd>     spending on DeepSeek, default 0.50. Counted from the tokens the API reports, at the peak
                       prices, so the real cost is the same or lower. The run stops before a call that could pass it
-                      (a call is reckoned at its worst: the whole prompt uncached, up to about 0.005 USD)
+                      (a call is reckoned at its worst: the whole prompt uncached, up to about 0.006 USD)
   --max-minutes <m>   wall time, default 20
   --max-frames <n>    input frames of a model's turn, 30 to 3600, default 150 (5 s); a longer answer is cut
                       there, and one of more than 3600 frames is refused (the program's own turns are short:
@@ -72,6 +80,8 @@ Other options:
                       instead; only if no other window overlaps the game just before and just after the copy,
                       since the picture goes to DeepSeek (see tools/screen_capture.py)
   --frames-dir <dir>  also save every screenshot sent, as turn-NNN.png (to see what the model saw)
+  --notes <file>      a notes file shared with the other players' programs on this PC (JSON lines; made if it is
+                      missing): see "Two players on one PC"
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
   --reasoning <r>     none (default: fast and cheap), low, high, max. Thinking costs many more output tokens, and
@@ -94,13 +104,22 @@ at every exit.
 Two players online: run one player on each PC, each against its own game, with its own goal. Online, every turn
 waits for the lockstep, so both games must be running.
 
+Two players on one PC (two copies of the game, as tools/local_test.bat starts them, each with its own agent= port):
+give both programs the same --notes file. Every time its model answers, each program appends one line to it (its
+player number, turn, time, room and place, the answer's "why" and the "note" the model wrote for the others), and
+each turn it shows its model the other players' latest line and their last 4 notes (lines older than an hour are
+left out). Use a new file for each session. A player's own place is in players_pos anyway; the notes add what the
+others plan and found. Player 2's screenshot is centred on player 1, whom the camera follows, and the model is
+told so.
+
 Tested without the game and without a key (tests/test_deepseek_player.py; native/test_agent.py solo, against
 drnet.dll). In the game (2026-11-23, solo, deepseek-flash): the first run ran through the save menu and saved,
 which the pieces, the save guard, --until and the walking hints came from; with them two runs reached their goal
 and a third, asked to save, was stopped by the guard, with nothing saved, for 0.0008 to 0.0019 USD each. The game
 guide, the "done so far" list, the 30-turn history, the words for the game's numbers, the goal check and the
 screenshots came after a run that kept going back to the save point when asked to open "the menu"; they are not yet
-tried in the game, and the window capture on Windows is not yet tried at all.
+tried in the game, and the window capture on Windows is not yet tried at all. The exits, the back-and-forth warning
+and the notes came after the first co-op run (two players on one PC) and are not yet tried in the game either.
 """
 import argparse
 import base64
@@ -133,6 +152,15 @@ MAX_EARLY_DONE = 3      # answers "done" while --until is not met before the run
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_GUIDE = os.path.join(HERE, "deepseek_guide.md")
 MAX_NEARBY = 12         # objects of the state's nearby list in the prompt
+MAX_EXITS = 8           # doors of the state's exits list in the prompt
+MAX_SEEN_EXITS = 8      # places per room where this run came in or left
+SEEN_NEAR = 64          # px: a place seen within this far of a door's box is put with that door
+SWING_TURNS = 8         # the model's turns looked at for walking back and forth
+SWING_STEP, SWING_TURNS_MIN, SWING_BAND = 16, 3, 48     # px a move, changes of direction, px the other way
+MAX_NOTE = 200          # characters of a note to the other players
+NOTES_SHOWN = 4         # notes of each other player in the prompt
+NOTES_MAX_AGE = 3600    # s: older lines of the --notes file are left out
+NOTES_TAIL = 256 * 1024     # bytes read from the end of the --notes file
 MAX_TEXT = 300          # characters of one dialogue box in the prompt
 MAX_BAD = 3             # unusable answers in a row before the run gives up
 MAX_REFUSED = 2         # confirms refused by the save guard before the run gives up
@@ -154,13 +182,22 @@ Buttons: down right up left confirm cancel menu (or d r u l z x c). Steps, separ
   tap <buttons> [times] [gap]   press for 1 frame, then nothing for <gap> frames, e.g. "tap confirm 2 10"
 At most {max_frames} frames a turn. The program plays your steps until the screen changes (a dialogue, menu,
 choice or room appears, changes or closes), drops the rest and asks you again. So in a menu or a choice send one
-press a turn; to walk somewhere, send one long hold.{vision_rule}
+press a turn. To walk to something whose place you know (in nearby or exits), send one hold of about its distance
+divided by the walking speed; without such a target, hold a direction for at most 45 frames, then look at the new
+state.{vision_rule}
 
 Moving: x grows to the right, y grows downward. Walking speeds up to about 7 px a frame within a few frames (30
 frames of right moved 218 px in one test); the speed measured in this run is shown once you have walked. nearby
 lists objects with (dx,dy), where they are from you: hold right for about dx/7 frames when dx > 0, left when dx < 0,
 down when dy > 0, up when dy < 0. To use an object, stop about 20 px (one tile) from it, facing it, and tap
 confirm once.
+
+Exits: "exits" lists the doors of the room, anywhere in it and also when they are invisible: the edge of the room
+each is at, its box, and (dx,dy) from you. To leave through one, first line up with its box (its y range for a door
+at the left or right edge, its x range at the top or bottom), then walk into it. Not every way out has a door:
+some rooms are left by walking off the edge where the floor goes on. The program remembers where you came into and
+left each room in this run and shows that with the exits; the way back is where you came in. If the program says
+you are walking back and forth, stop doing that and try another direction or an exit.
 
 Dialogue: "typing" means the text is still appearing; confirm does nothing then (cancel shows the rest at once).
 The program waits for typing boxes and confirms boxes that wait for it, so you are asked when something needs a
@@ -171,7 +208,7 @@ If your last input changed nothing, try something else.
 Memory: "Done so far" is kept for the whole run: what the program saw happen (rooms entered, menus opened and
 closed, choices, dialogue) and the notes you asked it to keep. Read it before you act, and do not do again what
 it says is done. To keep a note there, add "remember": "<at most 15 words>" to your answer (where something is,
-what you tried, what is left of the goal).{until_rule}
+what you tried, what is left of the goal).{notes_rule}{until_rule}
 
 {guide}
 
@@ -179,15 +216,27 @@ Goal: {goal}
 
 Answer with one JSON object and nothing else:
 {{"why": "<at most 15 words>", "do": "<steps>", "done": false}}
-or with a note to keep: {{"why": "...", "do": "...", "done": false, "remember": "<at most 15 words>"}}
+or with a note to keep: {{"why": "...", "do": "...", "done": false, "remember": "<at most 15 words>"}}{notes_answer}
 "done": true only when the goal is reached (then "do" may be empty). If the goal cannot be reached, answer
 "done": true and say why in "why", starting with "give up:"."""
 VISION_RULE = """
-Screenshot: each turn comes with a picture of the game screen as it is now (the game's own 640x480). The camera
-follows you, so it shows only the part of the room around you; the state lines are exact, the picture shows what
-they cannot (walls, paths, puzzles, where things are). To look again partway through a long move, put the step
+Screenshot: each turn comes with a picture of the game screen as it is now (the game's own 640x480). {camera} The
+state lines are exact; the picture shows what they cannot (walls, paths, puzzles, where things are), but dark paths
+can be hard to see on it, so check the exits line too. To look again partway through a long move, put the step
 "look" among your steps, e.g. "60 right; look; 40 up": the program plays the steps before it, then asks you again
 with a new screenshot; the steps after "look" are not played."""
+CAMERA_ME = "The camera follows you, so it shows only the part of the room around you."
+CAMERA_P1 = ("The camera follows player 1 (Kris), not you (player {player}): you can be off-centre or off the "
+             "screen, so go by your x and y in the state.")
+NOTES_ANSWER = """
+or with a note for the other players: {"why": "...", "do": "...", "done": false, "note": "<at most 25 words>"}"""
+NOTES_RULE = """
+
+Other players: the other players of this game are played by programs like this one, and you share notes with them.
+Each turn "Other players" shows what each of them is doing now (its last "why") and the notes it wrote. To tell
+them something, add "note": "<at most 25 words>" to your answer: your plan, what you found (an exit, a dead end, a
+puzzle), or what you want them to do. Work together: do not both search the same place, and when one of you finds
+the way on, say where it is."""
 SAVE_ALLOWED = "Saving to a file is allowed in this run, but only if the goal asks for it."
 SAVE_REFUSED = ("Saving to a file is not allowed in this run: the program refuses confirm on a file slot and on "
                 "Save in the overwrite question. Use Return or cancel there.")
@@ -249,8 +298,76 @@ def save_menu_text(sm):
     return "stage %s" % stage
 
 
-def summarize(state):
-    """The state as a few short lines for the prompt. Keys the state lacks are left out."""
+def compass(dx, dy):
+    """An offset from the player in words: "left", "down-left", "here" (within 20 px both ways)."""
+    ax, ay = abs(dx), abs(dy)
+    if ax < 20 and ay < 20:
+        return "here"
+    h, v = ("right" if dx > 0 else "left"), ("down" if dy > 0 else "up")
+    if ay < 20 or ay * 2 < ax:
+        return h
+    if ax < 20 or ax * 2 < ay:
+        return v
+    return v + "-" + h
+
+
+def exit_box(o):
+    """(left, top, right, bottom) of an entry of exits; its x, y as a point without a box; None without either."""
+    box = tuple(o.get(k) for k in ("left", "top", "right", "bottom"))
+    if all(_is_num(v) for v in box):
+        return box
+    if _is_num(o.get("x")) and _is_num(o.get("y")):
+        return o["x"], o["y"], o["x"], o["y"]
+    return None
+
+
+def box_gap(box, x, y):
+    """How far the point (x, y) is from the box, 0 inside it."""
+    return max(box[0] - x, 0, x - box[2]) + max(box[1] - y, 0, y - box[3])
+
+
+EDGES = {"left": "at the left edge", "right": "at the right edge", "top": "at the top edge",
+         "bottom": "at the bottom edge", "inside": "inside the room"}
+
+
+def exit_lines(state, mx, my, seen=()):
+    """The exits of the state as lines for the prompt, with (dx,dy) from the player at (mx, my) when it is known,
+    and what this run saw there: `seen` holds (x, y, words) of this room ("you came in here from room_x"). A place
+    within SEEN_NEAR px of a door's box goes with the door nearest to it; the others get a line of their own."""
+    doors = []
+    for o in (state.get("exits") or [])[:MAX_EXITS]:
+        if isinstance(o, dict) and exit_box(o) is not None:
+            doors.append((o, exit_box(o), []))
+    alone = []
+    for x, y, words in seen:
+        near = [(box_gap(box, x, y), i) for i, (_, box, _) in enumerate(doors) if box_gap(box, x, y) <= SEEN_NEAR]
+        if near:
+            doors[min(near)[1]][2].append(words)
+        else:
+            alone.append((x, y, words))
+    know = _is_num(mx) and _is_num(my)
+
+    def where(x, y):
+        if not know:
+            return "at x=%s y=%s" % (_num(x), _num(y))
+        return "(%+d,%+d) %s" % (round(x - mx), round(y - my), compass(x - mx, y - my))
+    out = []
+    for o, box, words in doors:
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        line = "%s %s, box x=%s..%s y=%s..%s, %s" % (o.get("object"), EDGES.get(o.get("edge"), "in the room"),
+                                                    _num(box[0]), _num(box[2]), _num(box[1]), _num(box[3]),
+                                                    where(cx, cy))
+        if o.get("to"):
+            line += ", leads to %s (going by its variables)" % o["to"]
+        out.append(line + "".join("; " + w for w in words))
+    for x, y, words in alone:
+        out.append("no door object: %s %s" % (words, where(x, y)))
+    return out
+
+
+def summarize(state, seen_exits=()):
+    """The state as a few short lines for the prompt. Keys the state lacks are left out. `seen_exits`: what this run
+    saw of the exits of this room (exit_lines)."""
     s = state or {}
     out = []
     head = []
@@ -258,6 +375,9 @@ def summarize(state):
         if s.get(k) is None or (k == "desync" and s.get(k) == -1):
             continue
         head.append("%s=%s" % (k, json.dumps(s[k]) if isinstance(s[k], bool) else _num(s[k])))
+    size = s.get("room_size")
+    if isinstance(size, dict) and _is_num(size.get("w")) and _is_num(size.get("h")):
+        head.append("room_size=%sx%s" % (_num(size["w"]), _num(size["h"])))
     if head:
         out.append(" ".join(head))
     if s.get("interact") is not None:
@@ -313,6 +433,11 @@ def summarize(state):
                                    " solid" if o.get("solid") else ""))
     if near:
         out.append("nearby: " + "; ".join(near))
+    ways = exit_lines(s, mx, my, seen_exits) if isinstance(s.get("exits"), list) or seen_exits else []
+    if ways:
+        out.append("exits:" + "".join("\n  " + w for w in ways))
+    elif isinstance(s.get("exits"), list):
+        out.append("exits: no door objects in this room")
     return "\n".join(out) if out else json.dumps(s)[:1000]
 
 
@@ -341,6 +466,116 @@ def change(before, after):
     if isinstance(a, dict) and isinstance(b, dict) and a != b:
         bits.append("save point menu %s" % json.dumps(b, separators=(",", ":"))[:120])
     return ", ".join(bits) or "nothing changed"
+
+
+def learn_exits(seen, states):
+    """Notes in `seen` (room -> [(x, y, words)]) where this run left a room and came into the next: for every room
+    change between two states in a row, where the player was last seen in the old room ("you left here to <new>")
+    and first seen in the new one ("you came in here from <old>"; the way back is there). The newest
+    MAX_SEEN_EXITS of a room are kept, one per text."""
+    prev = None
+    for st in states:
+        if not isinstance(st, dict):
+            continue
+        if prev is not None and prev.get("room") and st.get("room") and prev.get("room") != st.get("room"):
+            for room, at, words in ((prev["room"], me_of(prev), "you left here to %s" % st["room"]),
+                                    (st["room"], me_of(st), "you came in here from %s" % prev["room"])):
+                if at and _is_num(at.get("x")) and _is_num(at.get("y")):
+                    places = [e for e in seen.get(room, []) if e[2] != words] + [(at["x"], at["y"], words)]
+                    seen[room] = places[-MAX_SEEN_EXITS:]
+        prev = st
+    return seen
+
+
+def back_and_forth(track):
+    """A warning when the player's last SWING_TURNS positions (one per call to the model, all in this room) went
+    back and forth along one line: SWING_TURNS_MIN or more changes of direction along x (or y), counting moves of
+    SWING_STEP px or more, while the other way stayed within SWING_BAND px. None otherwise."""
+    pts = track[-SWING_TURNS:]
+    if len(pts) < SWING_TURNS:
+        return None
+    for axis, name, other, instead in ((0, "x", "y", "up or down"), (1, "y", "x", "left or right")):
+        moves = [b[axis] - a[axis] for a, b in zip(pts, pts[1:]) if abs(b[axis] - a[axis]) >= SWING_STEP]
+        swings = sum(1 for m, n in zip(moves, moves[1:]) if (m > 0) != (n > 0))
+        side = [q[1 - axis] for q in pts]
+        if swings >= SWING_TURNS_MIN and max(side) - min(side) < SWING_BAND:
+            line = [q[axis] for q in pts]
+            return ("in your last %d turns you walked back and forth between %s=%d and %s=%d (%s about %d) and did "
+                    "not find the way on. Going further along that line will not help: try %s, an exit from the "
+                    "exits lines, or a path on the screenshot that you have not tried." % (
+                        len(pts), name, round(min(line)), name, round(max(line)), other,
+                        round(sum(side) / len(side)), instead))
+    return None
+
+
+class Notes:
+    """The notes file of --notes, shared by the players of one game on one PC. Every time the model answers, each
+    player appends one JSON line: its player number, the turn, the time, its room and place, what it is doing (the
+    answer's "why") and the note it wrote for the others ("" for none). Each turn it reads the end of the file and
+    shows the model what the other players are doing and their latest notes. A line is written with one write call;
+    a line that two players wrote at the same moment and that came out broken is skipped."""
+
+    def __init__(self, path, clock=time.time):
+        self.path, self.clock = path, clock
+
+    def write(self, player, turn, state, doing, note):
+        """Appends this player's line. Returns "" or what went wrong."""
+        me = me_of(state or {}) or {}
+        rec = {"player": player, "turn": turn, "time": round(self.clock(), 3), "room": (state or {}).get("room"),
+               "x": _num(me.get("x")), "y": _num(me.get("y")), "doing": doing, "note": note}
+        try:
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except OSError as e:
+            return "cannot write the notes file: %s" % e
+        return ""
+
+    def read(self):
+        """The lines at the end of the file (the last NOTES_TAIL bytes) that are whole JSON objects."""
+        try:
+            with open(self.path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - NOTES_TAIL))
+                data = f.read()
+        except OSError:
+            return []
+        lines = data.decode("utf-8", "replace").splitlines()
+        if size > NOTES_TAIL:
+            lines = lines[1:]       # cut at the start
+        out = []
+        for line in lines:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(rec, dict) and _is_num(rec.get("player")) and _is_num(rec.get("time")):
+                out.append(rec)
+        return out
+
+    def lines(self, me):
+        """The prompt's lines about the other players than `me`: for each, its last line (when, where, what it is
+        doing) and its latest NOTES_SHOWN notes. Lines older than NOTES_MAX_AGE are left out."""
+        now = self.clock()
+        recs = [r for r in self.read() if _num(r["player"]) != me and now - r["time"] <= NOTES_MAX_AGE]
+        clean = lambda v, n: " ".join(str(v or "").split())[:n]   # noqa: E731
+        out = []
+        for pl in sorted({_num(r["player"]) for r in recs}):
+            theirs = [r for r in recs if _num(r["player"]) == pl]
+            last = theirs[-1]
+            out.append("player %s, %s ago (its turn %s), in %s at x=%s y=%s, doing: %s" % (
+                pl, ago(now - last["time"]), _num(last.get("turn")), last.get("room"), _num(last.get("x")),
+                _num(last.get("y")), json.dumps(clean(last.get("doing"), 200), ensure_ascii=False)))
+            for r in [r for r in theirs if clean(r.get("note"), MAX_NOTE)][-NOTES_SHOWN:]:
+                out.append("  player %s wrote %s ago, in %s: %s" % (pl, ago(now - r["time"]), r.get("room"),
+                                                                     json.dumps(clean(r.get("note"), MAX_NOTE),
+                                                                                ensure_ascii=False)))
+        return out
+
+
+def ago(seconds):
+    seconds = max(0, seconds)
+    return "%d s" % seconds if seconds < 90 else "%d min" % round(seconds / 60)
 
 
 def events(before, after, between=()):
@@ -474,20 +709,27 @@ def read_guide(path=None):
 
 
 def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False, until=None, speed=None,
-             done=None, guide=None, vision=False, shot=None, no_shot=""):
+             done=None, guide=None, vision=False, shot=None, no_shot="", player=1, others=None, swing=None,
+             seen_exits=()):
     """The system prompt (with the game guide) stays the same for the whole run, so DeepSeek's context cache bills
     it at the cache-hit price from the second call on; only the user message changes: the list of what is done so
-    far, the last HISTORY turns and the state."""
+    far, what the other players are doing (`others`: lines from Notes.lines, None without --notes), the last
+    HISTORY turns, a warning about walking back and forth (`swing`), and the state with what this run saw of the
+    room's exits (`seen_exits`). `player` is the local player, the same for the whole run."""
     recent = "\n".join(history[-HISTORY:]) or "(first turn)"
     user = "Turn %d of %d.\n" % (turn, max_steps)
     user += "Done so far in this run (kept for the whole run):\n%s\n" % ("\n".join(done or []) or "(nothing yet)")
+    if others is not None:
+        user += "Other players (from the notes you share):\n%s\n" % ("\n".join(others) or "(nothing from them yet)")
     if until:
         user += "Goal check by the program (the state has %s): %s.\n" % (
             until_text(until), "met" if met(state, until) else "not met yet")
     user += "Last turns:\n%s\n" % recent
     if speed:
         user += "Walking speed measured in this run: about %.1f px a frame.\n" % speed
-    user += "State now:\n%s" % summarize(state)
+    if swing:
+        user += "Warning from the program: %s\n" % swing
+    user += "State now:\n%s" % summarize(state, seen_exits)
     if vision and shot is None:
         user += "\n(no screenshot this turn: %s)" % (no_shot or "the capture failed")
     until_rule = ""
@@ -496,10 +738,13 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
                       "turn says whether that is met yet. Until then the goal is not reached, so do not answer "
                       "\"done\": true (except to give up)." % until_text(until))
     text = read_guide(guide)
+    camera = CAMERA_ME if not _is_num(player) or player <= 1 else CAMERA_P1.format(player=_num(player))
     system = SYSTEM.format(goal=goal, max_frames=max_frames, until_rule=until_rule,
                            guide=("About the game:\n\n" + text) if text else "",
-                           vision_rule=VISION_RULE if vision else "",
-                           save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED)
+                           vision_rule=VISION_RULE.format(camera=camera) if vision else "",
+                           save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED,
+                           notes_rule=NOTES_RULE if others is not None else "",
+                           notes_answer=NOTES_ANSWER if others is not None else "")
     content = user
     if vision and shot is not None:
         # https://api-docs.deepseek.com/guides/vision: an OpenAI-style list of blocks, the image as a data: URL
@@ -556,7 +801,7 @@ def frames_in(text):
     return total
 
 
-Answer = collections.namedtuple("Answer", "why do frames done asked remember look")
+Answer = collections.namedtuple("Answer", "why do frames done asked remember look note")
 
 
 def split_look(do):
@@ -575,7 +820,8 @@ def split_look(do):
 
 def parse_answer(content, max_frames):
     """The model's text -> Answer(why, steps text as given, per-frame bits cut to max_frames, done, frames asked for,
-    the note it asks to keep or "", whether the steps stop at a "look"). Raises ValueError with what is wrong."""
+    the note it asks to keep or "", whether the steps stop at a "look", the note for the other players or "").
+    Raises ValueError with what is wrong."""
     text = (content or "").strip()
     try:
         obj = json.loads(text)
@@ -603,9 +849,11 @@ def parse_answer(content, max_frames):
     except OverflowError:
         raise ValueError("a step makes too many frames")
     agent_client.frames_to_steps(frames)            # only the seven buttons of the agent
-    note = obj.get("remember")
-    note = " ".join(note.split())[:MAX_REMEMBER] if isinstance(note, str) else ""
-    return Answer(why, do.strip(), frames[:max_frames], done, len(frames), note, look)
+    keep = obj.get("remember")
+    keep = " ".join(keep.split())[:MAX_REMEMBER] if isinstance(keep, str) else ""
+    tell = obj.get("note")
+    tell = " ".join(tell.split())[:MAX_NOTE] if isinstance(tell, str) else ""
+    return Answer(why, do.strip(), frames[:max_frames], done, len(frames), keep, look, tell)
 
 
 # ---------------------------------------------------------------------------------------------- models
@@ -826,10 +1074,11 @@ def play_turn(game, frames, state, allow_save, until, seen=None):
 
 def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_frames=150, pause=0.5,
          prices=PRICES["deepseek-flash"], auto_confirm=True, allow_save=False, until=None, log=None, tally=None,
-         guide=None, capture=None, frames_dir=None, clock=time.monotonic, sleep=time.sleep):
+         guide=None, capture=None, frames_dir=None, notes=None, clock=time.monotonic, sleep=time.sleep):
     """The loop. Returns (0, why it ended) when the model says the goal is reached or `until` is met, raises Stop
     otherwise. tally["usd"] holds the USD spent so far, also after a Stop. With `until`, the model's own "done" does
-    not end the run: it is told that the program's check is not met yet."""
+    not end the run: it is told that the program's check is not met yet. `notes`: the Notes shared with the other
+    players (--notes), or None."""
     log = log or Log(None)
     tally = {} if tally is None else tally
     tally["usd"] = spent = 0.0
@@ -844,7 +1093,10 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
             done_list.append("turn %d: %s" % (turn, item))
         del done_list[:-MAX_DONE]
     walk = None                 # (frames a direction was held, px) of the longest walk so far
+    seen_exits = {}             # room -> [(x, y, words)]: where this run came into and left each room
+    track, track_room = [], None    # the player's place at each call to the model, in this room
     state = game.state()
+    player = _num(state.get("player")) if _is_num(state.get("player")) else 1
     log.write({"event": "start", "goal": goal, "state": summarize(state)},
               "goal: %s\nstart: %s" % (goal, short(state)))
     turn = 0
@@ -867,6 +1119,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
                 state = game.do(do)
             what = change(before, state)
             keep(turn, events(before, state))
+            learn_exits(seen_exits, [before, state])
             auto_stuck = auto_stuck + 1 if progress(before) == progress(state) else 0
             said = " / ".join(" ".join(str(d.get("text") or "").split()) for d in boxes(before))
             if do.startswith("tap"):
@@ -895,8 +1148,16 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
                     f.write(shot.data)
             except OSError:
                 shot_file = None
+        if state.get("room") != track_room:
+            track, track_room = [], state.get("room")
+        me = me_of(state)
+        if me and _is_num(me.get("x")) and _is_num(me.get("y")):
+            track.append((me["x"], me["y"]))
+        swing = back_and_forth(track)
+        others = notes.lines(player) if notes is not None else None
         msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed, done_list,
-                        guide, vision=capture is not None, shot=shot, no_shot=no_shot)
+                        guide, vision=capture is not None, shot=shot, no_shot=no_shot, player=player, others=others,
+                        swing=swing, seen_exits=seen_exits.get(state.get("room"), ()))
         # The next call costs at most: the whole prompt at the cache-miss price, a token for every byte (a token
         # of the byte-level tokenizer holds at least one) plus the chat template, and the whole output cap.
         prompt = prompt_tokens_max(msgs)
@@ -921,8 +1182,10 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
             record["screenshot"] = shot.describe() if shot is not None else "none: " + no_shot
             if shot_file:
                 record["screenshot_file"] = shot_file
+        if swing:
+            record["swing"] = swing
         try:
-            why, do, frames, done, asked, remember, look = parse_answer(content, max_frames)
+            why, do, frames, done, asked, remember, look, tell = parse_answer(content, max_frames)
         except ValueError as e:
             bad += 1
             history.append("turn %d: your answer was unusable (%s); answer only the JSON object" % (turn, e))
@@ -936,6 +1199,13 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         if remember:
             record["remember"] = remember
             keep(turn, ["(your note) " + remember])
+        if tell:
+            record["to_others"] = tell
+            keep(turn, ["(your note to the other players) " + tell])
+        if notes is not None:
+            failed = notes.write(player, turn, state, why, tell)
+            if failed:
+                record["notes_error"] = failed
         now = game.state()
         if clock() - start > max_minutes * 60:
             log.write(record, "%3d  %-34s  %s | %s (not played: time is up)  [%.4f USD]" % (
@@ -949,6 +1219,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
             history.append("turn %d: %s -> %s (%s)" % (turn, do or "(nothing)", change(state, now), note))
             record.update(result=change(state, now), played=0, note=note)
             keep(turn, events(state, now))
+            learn_exits(seen_exits, [state, now])
             log.write(record, "%3d  %-34s  %s | %s (%s)  [%.4f USD]" % (
                 turn, short(state)[:34], why, do or "-", note, spent))
             state = now
@@ -981,6 +1252,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         refused += note.startswith("refused")
         keep(turn, events(before, state, seen) + (["the save guard refused confirm (%s)" % save_risk(before)]
                                             if note.startswith("refused") else []))
+        learn_exits(seen_exits, [before] + seen + [state])
         w = walked(frames[:played], before, state)
         if w and (walk is None or w[0] >= walk[0]):
             walk = w
@@ -1024,6 +1296,7 @@ def parse_args(argv):
     ap.add_argument("--window-pid", type=int, default=None)
     ap.add_argument("--screen-grab", action="store_true")
     ap.add_argument("--frames-dir", default=None)
+    ap.add_argument("--notes", default=None)
     args = ap.parse_args(argv)
     if args.model.lower() not in MODELS:
         ap.error("unknown model %s: flash or pro" % args.model)
@@ -1079,6 +1352,14 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
         except OSError as e:
             print("error: --frames-dir: %s" % e, file=sys.stderr)
             return 2
+    notes = None
+    if args.notes:
+        try:
+            open(args.notes, "a", encoding="utf-8").close()     # made now, so a wrong path is seen at once
+        except OSError as e:
+            print("error: --notes: %s" % e, file=sys.stderr)
+            return 2
+        notes = Notes(args.notes)
     game = agent_client.AgentClient(args.host, args.port, args.timeout)
     log = Log(path, out)
     code, why, tally = 0, "", {"usd": 0.0}
@@ -1091,9 +1372,11 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
                     shot = capture()
                 except screen_capture.CaptureError as e:
                     no_shot = str(e)
-            for m in messages(goal, args.max_frames, game.state(), [], 1, args.max_steps, args.allow_save,
+            st = game.state()
+            me = _num(st.get("player")) if _is_num(st.get("player")) else 1
+            for m in messages(goal, args.max_frames, st, [], 1, args.max_steps, args.allow_save,
                               args.until, guide=args.guide, vision=capture is not None, shot=shot,
-                              no_shot=no_shot):
+                              no_shot=no_shot, player=me, others=notes.lines(me) if notes else None):
                 print("--- %s\n%s" % (m["role"], text_of(m["content"])), file=out)
                 if not isinstance(m["content"], str):
                     print("[screenshot: %s]" % shot.describe(), file=out)
@@ -1110,16 +1393,16 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
                     vision += "; " + capture.note
             except screen_capture.CaptureError as e:
                 vision = "on, but the first screenshot failed: %s" % e
-        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; vision %s; log %s" % (
+        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; vision %s; %slog %s" % (
             "fake" if args.fake else args.model, args.reasoning, args.max_steps, args.max_usd, args.max_minutes,
             "allowed" if args.allow_save else "refused", "; until " + until_text(args.until) if args.until else "",
-            vision, path), file=out)
+            vision, "notes %s; " % args.notes if notes else "", path), file=out)
         code, why = play(game, model, goal, max_steps=args.max_steps, max_usd=args.max_usd,
                          max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,
                          prices=PRICES.get(args.model, PRICES["deepseek-v4-pro"]),
                          auto_confirm=not args.no_auto_confirm, allow_save=args.allow_save,
                          until=args.until, log=log, tally=tally, guide=args.guide, capture=capture,
-                         frames_dir=args.frames_dir)
+                         frames_dir=args.frames_dir, notes=notes)
     except Stop as e:
         code, why = e.code, e.why
     except agent_client.AgentError as e:

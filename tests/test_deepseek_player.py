@@ -182,10 +182,12 @@ def a_frames(text):
     return agent_client.text_to_frames(text)
 
 
-def answer(do="", why="", done=False, remember=None):
+def answer(do="", why="", done=False, remember=None, note=None):
     obj = {"why": why, "do": do, "done": done}
     if remember is not None:
         obj["remember"] = remember
+    if note is not None:
+        obj["note"] = note
     return json.dumps(obj)
 
 
@@ -284,12 +286,126 @@ class Prompt(unittest.TestCase):
         self.assertIn("150 frames", a[0]["content"])
         self.assertIn("turn 1: 20 right", b[1]["content"])
 
+    def test_exits_in_the_summary(self):
+        s = {"room": "r", "player": 1, "room_size": {"w": 640, "h": 480},
+             "players_pos": [{"player": 1, "x": 300, "y": 200}],
+             "exits": [{"object": "obj_doorA", "x": 0, "y": 220, "left": -10, "top": 200, "right": 10, "bottom": 280,
+                        "edge": "left", "to": None, "visible": False},
+                       {"object": "obj_doorX", "x": 310, "y": 470, "left": 300, "top": 470, "right": 340,
+                        "bottom": 490, "edge": "bottom", "to": "room_b", "visible": False},
+                       {"object": "obj_door_old"}]}
+        text = p.summarize(s)
+        self.assertIn("room=r room_size=640x480", text)
+        self.assertIn("exits:\n  obj_doorA at the left edge, box x=-10..10 y=200..280, (-300,+40) left\n"
+                      "  obj_doorX at the bottom edge, box x=300..340 y=470..490, (+20,+280) down, "
+                      "leads to room_b (going by its variables)", text)
+        self.assertNotIn("obj_door_old", text)       # no place: left out
+        self.assertIn("exits: no door objects in this room", p.summarize({"room": "r", "exits": []}))
+        self.assertNotIn("exits", p.summarize({"room": "r"}))     # an older game build without the key
+        self.assertEqual([p.compass(*d) for d in ((5, -5), (-100, 30), (100, 80), (10, -200), (-60, 60))],
+                         ["here", "left", "down-right", "up", "down-left"])
+
+    def test_where_this_run_came_in_and_left_goes_with_the_exits(self):
+        a = {"room": "a", "player": 1, "players_pos": [{"player": 1, "x": 20, "y": 230}]}
+        b = {"room": "b", "player": 1, "players_pos": [{"player": 1, "x": 600, "y": 100}]}
+        seen = p.learn_exits({}, [dict(a, players_pos=[{"player": 1, "x": 200, "y": 230}]), a, b, b])
+        self.assertEqual(seen, {"a": [(20, 230, "you left here to b")], "b": [(600, 100, "you came in here from a")]})
+        p.learn_exits(seen, [b, dict(a, players_pos=[{"player": 1, "x": 30, "y": 240}])])
+        self.assertEqual(seen["a"], [(20, 230, "you left here to b"), (30, 240, "you came in here from b")])
+        p.learn_exits(seen, [a, b])        # the same way again: one entry a text, the newest place
+        self.assertEqual(seen["a"], [(30, 240, "you came in here from b"), (20, 230, "you left here to b")])
+        s = dict(a, players_pos=[{"player": 1, "x": 300, "y": 200}],
+                 exits=[{"object": "obj_doorA", "left": -10, "top": 200, "right": 10, "bottom": 280, "edge": "left"}])
+        text = p.summarize(s, seen["a"] + [(320, 10, "you came in here from c")])
+        self.assertIn("obj_doorA at the left edge, box x=-10..10 y=200..280, (-300,+40) left; you came in here "
+                      "from b; you left here to b", text)
+        self.assertIn("no door object: you came in here from c (+20,-190) up", text)
+        # no exits key in the state: what the run saw is still shown
+        self.assertIn("exits:\n  no door object: you left here to a (+0,+0) here\n"
+                      "  no door object: you came in here from a (+0,+0) here", p.summarize(b, seen["b"]))
+
+    def test_walking_back_and_forth_is_told(self):
+        swing = [(0, 100), (120, 100), (10, 104), (130, 100), (0, 96), (125, 100), (5, 100), (120, 102)]
+        warn = p.back_and_forth(swing)
+        self.assertIn("in your last 8 turns you walked back and forth between x=0 and x=130 (y about 100)", warn)
+        self.assertIn("try up or down", warn)
+        self.assertIsNone(p.back_and_forth(swing[:7]))                          # too few turns yet
+        self.assertIsNone(p.back_and_forth([(x, y * 30) for y, (x, _) in enumerate(swing)]))   # it goes down too
+        self.assertIsNone(p.back_and_forth([(i * 40, 100) for i in range(8)]))   # one way only
+        self.assertIsNone(p.back_and_forth([(i % 2 * 5, 100) for i in range(8)]))   # small steps on one spot
+        up_down = p.back_and_forth([(y, x) for x, y in swing])
+        self.assertIn("between y=0 and y=130 (x about 100)", up_down)
+        self.assertIn("try left or right", up_down)
+
+    def test_camera_rule_for_player_2(self):
+        one = p.messages("go", 150, {"player": 1}, [], 1, 40, vision=True, no_shot="x", player=1)[0]["content"]
+        two = p.messages("go", 150, {"player": 2}, [], 1, 40, vision=True, no_shot="x", player=2)[0]["content"]
+        self.assertIn("The camera follows you", one)
+        self.assertIn("The camera follows player 1 (Kris), not you (player 2)", two)
+
     def test_change(self):
         a = {"room": "r", "player": 1, "players_pos": [{"player": 1, "x": 0, "y": 0}], "can_move": True}
         b = {"room": "r", "player": 1, "players_pos": [{"player": 1, "x": 30, "y": -6}], "can_move": False,
              "choice": {"options": []}}
         self.assertEqual(p.change(a, a), "nothing changed")
         self.assertEqual(p.change(a, b), "moved (+30,-6), can_move True -> False, choice appeared")
+
+
+class NotesFile(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "notes.jsonl")
+        self.now = 1000.0
+
+    def notes(self):
+        return p.Notes(self.path, clock=lambda: self.now)
+
+    def state(self, player, x, y, room="r"):
+        return {"room": room, "player": player, "players_pos": [{"player": player, "x": x, "y": y}]}
+
+    def test_each_player_sees_the_others(self):
+        one, two = self.notes(), self.notes()
+        self.assertEqual(one.lines(1), [])              # no file yet
+        self.assertEqual(two.write(2, 3, self.state(2, 50.4, 60), "walk left", ""), "")
+        self.now += 5
+        two.write(2, 4, self.state(2, 10, 60), "go down the path", "the way on is at the bottom left")
+        one.write(1, 7, self.state(1, 300, 200), "walk right", "nothing on the right side")
+        self.now += 120
+        self.assertEqual(one.lines(1), [
+            'player 2, 2 min ago (its turn 4), in r at x=10 y=60, doing: "go down the path"',
+            '  player 2 wrote 2 min ago, in r: "the way on is at the bottom left"'])
+        self.assertEqual(two.lines(2), [
+            'player 1, 2 min ago (its turn 7), in r at x=300 y=200, doing: "walk right"',
+            '  player 1 wrote 2 min ago, in r: "nothing on the right side"'])
+        with open(self.path, encoding="utf-8") as f:
+            first = json.loads(f.readline())
+        self.assertEqual(first, {"player": 2, "turn": 3, "time": 1000.0, "room": "r", "x": 50, "y": 60,
+                                 "doing": "walk left", "note": ""})
+
+    def test_old_broken_and_many_lines(self):
+        n = self.notes()
+        n.write(2, 1, self.state(2, 0, 0), "old", "an old note")
+        self.now += p.NOTES_MAX_AGE + 1
+        self.assertEqual(n.lines(1), [])                # older than an hour
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write('{"player": 2, "turn": 2, "ti\n[1, 2]\nnot json\n')
+        for i in range(6):
+            n.write(2, 10 + i, self.state(2, i, 0), "step %d" % i, "note %d" % i)
+        lines = n.lines(1)
+        self.assertEqual(lines[0], 'player 2, 0 s ago (its turn 15), in r at x=5 y=0, doing: "step 5"')
+        self.assertEqual([line.split(": ", 1)[1] for line in lines[1:]],
+                         ['"note 2"', '"note 3"', '"note 4"', '"note 5"'])    # the latest NOTES_SHOWN
+        # only the end of a big file is read, and the line cut at its start is skipped
+        with open(self.path, "a", encoding="utf-8") as f:
+            f.write(("x" * 1000 + "\n") * (p.NOTES_TAIL // 1000 + 2))
+        n.write(2, 30, self.state(2, 1, 1), "late", "")
+        self.assertEqual(n.lines(1), ['player 2, 0 s ago (its turn 30), in r at x=1 y=1, doing: "late"'])
+
+    def test_unwritable_file(self):
+        bad = p.Notes(os.path.join(self.path, "no", "such", "dir.jsonl"))
+        self.assertIn("cannot write the notes file", bad.write(1, 1, {}, "x", ""))
+        self.assertEqual(bad.lines(1), [])
 
 
 class Vision(unittest.TestCase):
@@ -389,9 +505,9 @@ class Vision(unittest.TestCase):
 
 class Answers(unittest.TestCase):
     def test_plain_json(self):
-        why, do, frames, done, asked, note, look = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        why, do, frames, done, asked, note, look, tell = p.parse_answer(answer("20 right; tap z", "walk"), 150)
         self.assertFalse(look)
-        self.assertEqual(note, "")
+        self.assertEqual((note, tell), ("", ""))
         self.assertEqual((why, do, done, asked), ("walk", "20 right; tap z", False, 22))
         self.assertEqual(len(frames), 22)
 
@@ -750,6 +866,60 @@ class Loop(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.parse_until("=5")
 
+    def test_notes_between_two_players(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "notes.jsonl")
+            other = p.Notes(path)
+            other.write(2, 5, {"room": "room_test", "player": 2, "players_pos": [{"player": 2, "x": 7, "y": 8}]},
+                        "look on the left", "I take the left side")
+            http = Http([answer("10 right", "walk", note="I go right"), answer("", "ok", True)])
+            code, out, records = run_main(self.game, ["go", "--notes", path], {"DEEPSEEK_API_KEY": KEY}, http)
+            self.assertEqual(code, 0, out)
+            self.assertIn("notes %s" % path, out)
+            first = http.requests[0][3]["messages"]
+            self.assertIn('Other players: the other players of this game are played by programs', first[0]["content"])
+            self.assertIn('"note": "<at most 25 words>"}', first[0]["content"])
+            self.assertIn('Other players (from the notes you share):\nplayer 2, 0 s ago (its turn 5), in room_test '
+                          'at x=7 y=8, doing: "look on the left"\n  player 2 wrote 0 s ago, in room_test: '
+                          '"I take the left side"', first[1]["content"])
+            self.assertEqual(http.requests[1][3]["messages"][0], first[0])     # the system prompt stays cached
+            self.assertIn("(your note to the other players) I go right", http.requests[1][3]["messages"][1]["content"])
+            with open(path, encoding="utf-8") as f:
+                mine = [json.loads(line) for line in f][1:]
+            self.assertEqual([(r["player"], r["turn"], r["doing"], r["note"], r["x"]) for r in mine],
+                             [(1, 1, "walk", "I go right", 0), (1, 2, "ok", "", 30)])
+            self.assertEqual(records[1]["to_others"], "I go right")
+        http = Http([answer("", "ok", True)])
+        code, _, _ = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0)
+        self.assertNotIn("you share notes with them", http.requests[0][3]["messages"][0]["content"])
+        self.assertNotIn("Other players", http.requests[0][3]["messages"][1]["content"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = p.main(["go", "--port", str(self.game.port), "--no-vision", "--notes",
+                           os.path.join(tmp, "gone", "notes.jsonl")], {"DEEPSEEK_API_KEY": KEY}, io.StringIO(),
+                          Http([]))
+        self.assertEqual(code, 2)
+        self.assertIn("error: --notes:", err.getvalue())
+
+    def test_where_the_room_changed_is_remembered(self):
+        self.game.door = 45
+        http = Http([answer("20 right", "walk to the door"), answer("", "ok", True)])
+        code, out, _ = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        self.assertIn("exits:\n  no door object: you came in here from room_test (+0,+0) here",
+                      http.requests[1][3]["messages"][1]["content"])
+
+    def test_back_and_forth_is_told_to_the_model(self):
+        http = Http([answer("10 right"), answer("10 left")] * 4 + [answer("", "ok", True)])
+        code, out, records = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        users = [r[3]["messages"][1]["content"] for r in http.requests]
+        self.assertFalse(any("Warning from the program" in u for u in users[:7]))
+        self.assertIn("Warning from the program: in your last 8 turns you walked back and forth between x=0 and "
+                      "x=30 (y about 0)", users[8])
+        self.assertIn("back and forth", records[-2]["swing"])
+
     def test_measured_speed_goes_into_the_prompt(self):
         http = Http([answer("20 right"), answer("", "ok", True)])
         code, _, _ = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
@@ -801,10 +971,10 @@ class Loop(unittest.TestCase):
 
     def test_spending_limit_stops_before_the_call(self):
         http = Http([answer("wait 1")] * 10)
-        code, out, records = run_main(self.game, ["go", "--max-usd", "0.003"], {"DEEPSEEK_API_KEY": KEY}, http)
+        code, out, records = run_main(self.game, ["go", "--max-usd", "0.0035"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 3)
         self.assertIn("spending limit", out)
-        self.assertLessEqual(records[-1]["usd_total"], 0.003)
+        self.assertLessEqual(records[-1]["usd_total"], 0.0035)
         self.assertGreater(len(http.requests), 0)
 
     def test_unusable_answers_and_giving_up(self):
