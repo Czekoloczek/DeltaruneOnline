@@ -74,8 +74,9 @@ while [ "$p" -le "$players" ]; do
         desync=$(echo "$done_line" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
         echo "  player $p: final sum $sum, desync $desync"
         [ "$desync" = "-1" ] || ok=0
-        # the host asks for session flags 5, the clients for 0: every side must use the host's
-        grep -q ' session 5$' "$out/$p.txt" || { echo "  player $p does not use the host's session flags:"; grep ' session ' "$out/$p.txt" | sed 's/^/    /'; ok=0; }
+        # the host asks for session flags 5, the clients for 0: every side must use the host's (Wine's printf
+        # ends lines with \r\n, so the \r goes first)
+        tr -d '\r' < "$out/$p.txt" | grep -q ' session 5$' || { echo "  player $p does not use the host's session flags:"; grep ' session ' "$out/$p.txt" | sed 's/^/    /'; ok=0; }
         if [ -z "$first" ]; then first=$sum; elif [ "$sum" != "$first" ]; then ok=0; fi
     fi
     p=$((p + 1))
