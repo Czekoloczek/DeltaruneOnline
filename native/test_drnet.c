@@ -37,11 +37,19 @@ static unsigned bits_for(int player, int frame) { return (unsigned)((frame * 265
 
 int main(int argc, char **argv)
 {
-    if (argc < 5) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip] [quit_at]\n", argv[0]); return 2; }
-    const char *role = argv[1]; int players = atoi(argv[2]), me = atoi(argv[3]), frames = atoi(argv[4]);
-    double lag = argc > 5 ? atof(argv[5]) : 0, dly = argc > 6 ? atof(argv[6]) : -1;
-    const char *ip = argc > 7 ? argv[7] : "127.0.0.1";
-    int quit_at = argc > 8 ? atoi(argv[8]) : -1;
+    /* Optional `-game <path>` (same flag DELTARUNE uses) is read from the process command line by drnet.dll;
+       strip it here so positional arguments keep their indices. */
+    const char *pos[16];
+    int npos = 0, ai;
+    for (ai = 1; ai < argc && npos < 16; ai++) {
+        if (strcmp(argv[ai], "-game") == 0 && ai + 1 < argc) { ai++; continue; }
+        pos[npos++] = argv[ai];
+    }
+    if (npos < 4) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip] [quit_at] [-game path]\n", argv[0]); return 2; }
+    const char *role = pos[0]; int players = atoi(pos[1]), me = atoi(pos[2]), frames = atoi(pos[3]);
+    double lag = npos > 4 ? atof(pos[4]) : 0, dly = npos > 5 ? atof(pos[5]) : -1;
+    const char *ip = npos > 6 ? pos[6] : "127.0.0.1";
+    int quit_at = npos > 7 ? atoi(pos[7]) : -1;
     int f, p;
     unsigned long long sum = 1469598103934665603ull;
     /* Windows rounds Sleep() up to its 15.6 ms timer, so a 33 ms frame took 46.8 ms (3 ticks) on native Windows
@@ -71,7 +79,7 @@ int main(int argc, char **argv)
     if (lag > 0) option("lag", lag);
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
     printf("%s: connecting...\n", status());
-    if (!connect(30000)) { printf("connect timeout\n"); return 1; }
+    if (!connect(30000)) { printf("connect failed: %s\n", status()); stop(); return 1; }
     double t0 = now_ms(), tblock = t0;
     for (f = 0; f < frames; f++) {
         double tf = now_ms();

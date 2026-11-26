@@ -16,11 +16,15 @@ it reads keys from `global.input_k[]` and gamepad buttons from `global.input_g[]
 Besides that, about 330 direct reads (`keyboard_check*`, `gamepad_*`) are spread over ~66 code entries
 of the game and the mod (Chapter 5, game 0.253 + mod v19).
 
-The **mouse** is not part of the virtual input yet. 8 entries in Chapter 5 read it; all but one are editors,
-test objects and debug code. The exception is a battle attack: in `obj_attack_blue_flowerbullet` (Step) a flower
-bullet explodes as soon as the mouse cursor is over it, so with the cursor in a different place on each screen
-the machines would desync. Online, mouse reads must answer the same value everywhere (for example a position far
-off screen).
+The **mouse** is not sent over the network, because DELTARUNE does not use it for multiplayer controls, yet 8
+entries in Chapter 5 read it (7 editors, test objects and debug code, plus one battle attack: in
+`obj_attack_blue_flowerbullet` (Step) a flower bullet explodes as soon as the mouse cursor is over it, so
+different cursor positions would desync the machines). The patcher therefore rewrites mouse reads (`mouse_x`,
+`mouse_y`, `mouse_check_button*`, `mouse_wheel_*`, `window_mouse_get_x/y`, `device_mouse_*`) to `dro_*` functions:
+online (and in `solo`/`record`/`replay`) they return a constant off-screen position (`-100000`) and `false` for
+buttons and wheel; offline they pass through to the real mouse. `window_mouse_get_delta_x/y` are left alone:
+DELTARUNE's runner doesn't have them, and a stand-in that calls a function the runner lacks stops the game while
+it loads ("Unable to find function", seen in the first build of this change).
 
 ## Virtual input layer (`gml/scr_dronline.gml`)
 
@@ -32,7 +36,10 @@ off screen).
    only ever see the virtual keyboard.
 3. The patcher rewrites every built-in input read to the `dro_*` functions, which answer from the
    virtual keyboard (or pass through to the real device when the online mode is off).
-4. `randomize()` becomes `dro_randomize()`, which seeds every machine with the same seed.
+4. `randomize()` / `randomise()` becomes `dro_randomize()`, which seeds every machine with the same seed and, like
+   `randomize()`, returns it: the game may use the value (Chapter 5's canopy shadows seed the generator with it again).
+   Every `dro_*` stand-in for an engine function that returns a value must return one online too;
+   `tests/test_consistency.py` checks that.
 
 Because every machine feeds the same bits into the same game state, every machine computes the same frame.
 
@@ -44,8 +51,13 @@ the native DLL `native/drnet.c` (Windows build, also under Proton) handles UDP, 
 A network thread receives packets the moment they arrive, so the ping is measured exactly and the host relays
 input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
-last 16 frames, so a lost packet is covered by the next one. State fingerprints are exchanged every 30 frames
-to detect desyncs.
+last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
+`drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
+refusing to start if `data.win` cannot be read — and the host rejects clients with a build, protocol or player-count
+mismatch (showing both SHA-256 hash prefixes on a `data.win` mismatch) while keeping the lobby open for valid peers
+so an incompatible or stray packet cannot abort a session. All players must update `drnet.dll` together: mixing
+protocol 3 and protocol 4 peers can still hit the connection timeout on the protocol-3 side. State fingerprints are
+exchanged every 30 frames to detect desyncs.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -102,6 +114,32 @@ The price: the other players' hearts on your screen lag behind what they see by 
 bullet seems to pass through another player's heart without a hit, or to hit it from a distance. Every hit
 follows what the dodging player saw.
 
+**Other players' SOULs are faint.** Several hearts of the same shape on one screen get mixed up, so each machine
+draws only its own player's SOUL fully; the others are drawn at `other_souls` opacity from `dronline.ini` (default
+0.1, 0 hides them, 1 draws them as the game does). The setting is local: players may choose different values, and
+they don't need to match. It is drawing only. The patcher multiplies the alpha argument of the calls that draw a SOUL
+by a factor that is 1 offline, in solo and for the local player's own heart, and adds, removes or reorders no
+statement, so every heart still moves, dodges, grazes and is hit on every machine and the state hash is unchanged
+(obj_heart's Draw advances the animation of hearts 2 and 3 itself, and obj_grazebox counts down its timer there:
+both keep running). The calls it changes:
+
+- obj_heart's Draw, which draws all hearts of the Local Multiplayer mod (heart *k* at x/y, x2/y2, x3/y3): a call
+  belongs to the heart whose coordinates its position names. That covers the heart, the invulnerability animation
+  (a sprite animation, no blink), the death break and the yellow and orange extras. A position that names no heart
+  (an orange tail at `tx, ty`) goes to the nearest heart, with ties going to the local player; a position that
+  contains a call is not evaluated twice and stays as it is. `draw_self()` becomes `dronline_draw_self(factor)`.
+  In the purple SOUL's mode 7 only the heart at x/y is drawn, for whoever plays the turn, so it stays full.
+- The purple SOUL draws the hearts a second time inside `with (obj_heart)` in obj_purplecontrols' Draw: the same
+  rule, only inside that block.
+- Objects that hold one player's SOUL and say whose in `controls`: obj_grazebox (graze sparkles, 1–3),
+  obj_orangeheart (the orange chase SOUL with its afterimages, 0–2), obj_date_heart (0–2) and obj_heart_slime
+  (0–2; it draws into a surface, so only the surface on the screen is dimmed). -1 means no owner and stays full.
+
+Not covered yet: the heart shards after a death (plain obj_marker instances without an owner, whose alpha is game
+state), obj_dashpath (the mod draws it at heart 1 for every player) and the mod's outline in obj_fusebomb_big
+(also always at heart 1). The patcher prints how many calls it changed per object after "other players' SOULs
+drawn faint".
+
 `native/test_drnet.c` checks the DLL alone: host and client exchange pseudo-random input and events under
 Wine, optionally with test latency, and print running checksums of everything they received; they must match.
 Results: no latency → delay 0, 33 ms frames; 30 ms each way → ping 61 ms, delay 1, 33 ms frames; 60 ms each
@@ -140,8 +178,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 
 - `python3 -m unittest discover -s tests -v` (standard library only):
   - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
-    settings) and the obj_heart hooks, including "all or nothing" when the game's code looks different. The GML
-    snippets are written for the tests and only imitate the game's code.
+    settings), the obj_heart hooks, including "all or nothing" when the game's code looks different, and the faint
+    SOULs of the other players (which heart a draw belongs to, nothing but the alpha changes). The GML snippets are
+    written for the tests and only imitate the game's code.
   - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
     types, with no function of more than 4 arguments taking a string (the pitfalls below). Every option the GML
@@ -153,10 +192,16 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
+- `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect with identical checksums,
+  while mismatched `data.win` hashes (with both SHA-256 prefixes) and mismatched player counts are refused promptly
+  without aborting the host or waiting compatible peers, and a missing `data.win` (even on both sides) fails on
+  start (Wine on Linux, native on Windows).
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network
-  and checks that its limits and button names are the DLL's.
+  and checks that its limits and button names are the DLL's. `tests/test_deepseek_player.py` covers
+  `tools/deepseek_player.py` against a small game written in Python and a fake DeepSeek API (no key, no
+  network), and `test_agent.py solo` runs it once more against the DLL with its fake model.
 
 Tests that need the game and the mod (the headless test, record/replay, battle tests) stay local, because those
 files must not be in the repository or in CI.
@@ -223,8 +268,10 @@ every state hash (room, instance count, summed x and y, plot), so the first diff
 
 `agent=<port>` in `[online]` (host, client and solo) lets a program on the same PC, such as an AI agent, read the
 game state as JSON and send input for the local player. The protocol, the keys of the state and the security
-notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module.
-**Not yet tested in the game:** the GML below has never been compiled by UndertaleModTool or run.
+notes are in [agent-api.md](agent-api.md); `tools/agent_client.py` is a client for the command line and a module,
+and `tools/deepseek_player.py` lets a DeepSeek model play toward a goal given in words.
+**In the game** it has been tried in chapter 5 in `mode=solo` only; not yet online or across a chapter change
+(the status at the top of agent-api.md says what was seen).
 
 - **The DLL holds the protocol.** `drnet.dll` listens on 127.0.0.1 only, on a TCP socket of its own (the lockstep
   UDP socket is open to the network on the host and does not exist in `mode=solo`). A thread accepts one
@@ -285,20 +332,21 @@ shows exactly the frames of the input, also while the automatic delay grows and 
 Random calls are fine as long as every machine consumes the RNG in the same order with the same seed.
 Clock, audio and fps reads are the real risks; record/replay shows which ones matter in practice.
 
-**System clock.** Audio state already goes through the virtual audio clock; of the clock reads, only `get_timer()`
-goes through a frame clock (below). Of the 52 clock entries in Chapter 5, 30 are Draw events. Most of them only change the picture, but a Draw event can also
-change the game state: `obj_spin_petal` sets its `x` from `get_timer()`, so in the Chapter 5 garden the petals
-stood in different places on each machine and the games desynced on the first frame after loading a save there
-(found by the scripted two-player run). `get_timer()` (5 entries) therefore goes through `dro_get_timer()`, which
-counts lockstep frames online (`frames × 1000000 / 30` µs) and is the real timer offline; `current_time` is still
-read directly. Of the 22 entries outside Draw events, `scr_save`
-only writes the date into the save file, and `scr_screenspace` only uses the clock as a cache key for the camera
-position and is called from Draw events alone. The remaining **20 are game logic** and need a frame-based clock
-(`frames × 1000 / 30` ms): `scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
-`obj_cliff_petalwarp` (and its `_old` copy), `obj_dw_flowerydash`, `obj_dw_post_fountain_close`,
-`obj_flowery_runner`, `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, and the platformer objects `obj_plat_coin`,
-`obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
-`obj_plat_stringed_object`. The rhythm game times itself with `delta_time`, counted under fps / delta time.
+**System clock.** Audio state already goes through the virtual audio clock, and the monotonic timers used in
+gameplay go through the lockstep frame clock online (and the real built-ins offline):
+
+- `get_timer()` (5 entries, including `obj_spin_petal`'s Draw which sets `x` and desynced the Chapter 5 garden on
+  the first frame) → `dro_get_timer()`, returning `frames × 1000000 / 30` µs.
+- `current_time` → `dro_current_time()`, returning `frames × 1000 / 30` ms (tested online in a two-player battle,
+  where `obj_heart`'s Draw reads it, without a desync; the game-logic entries below are not tested in the game yet).
+  That covers the 20 Chapter 5 game-logic entries (`scr_wave`, `obj_caterpillar_dash`, `obj_climb_susie`,
+  `obj_cliff_petalwarp` and `_old`, `obj_dw_flowerydash`, `obj_dw_post_fountain_close`, `obj_flowery_runner`,
+  `obj_flowery_shooter`, `obj_towery_flowery`, `obj_rotating_bullet_new`, `obj_waterpit`, `obj_plat_coin`,
+  `obj_plat_enm_yellow_miniboss`, `obj_plat_finalflowery`, `obj_plat_hanging_key`, `obj_plat_pinatabell`,
+  `obj_plat_stringed_object`), as well as Draw animations and `scr_screenspace`'s per-frame cache key (which still
+  changes once every lockstep frame). `date_current_datetime()` is left untouched so `scr_save` writes the real date.
+- `delta_time` → `dro_delta_time()`, returning `1000000 / 30` µs (one fixed 30 fps frame, matching `dro_get_timer()`
+  and the virtual audio clock; covers the rhythm game, not tested in the game yet).
 
 **Other chapters** (same scanner, game 0.253 + mod v19, uses / entries):
 
@@ -363,13 +411,11 @@ WireGuard puts both PCs on one private network, so the game works as on a LAN:
 invisible `gamescope --backend headless` instances and prints both `drnet.log` files. Result on Chapter 5
 (Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync.
 
-## Own SOUL, own camera and arrows
+## Own camera and arrows
 
-All three are drawing-only changes, so they must never change game state or consume the shared RNG:
+The faint SOULs of the other players are done (see "Own SOUL" above). The own camera and the arrows are
+drawing-only changes too, so they must never change game state or consume the shared RNG:
 
-- **Own SOUL**: in battle, draw the local player's heart normally and the other players' hearts with lower
-  alpha or an outline. Only the Draw event of the heart objects changes; their positions and collisions stay
-  identical on every machine.
 - **Own camera** (a draft, `camera=own`, default `shared`; it replaces the split screen planned before): online
   every player has a screen of their own, so instead of splitting one screen, each machine shows the view around
   its own character once that character leaves the shared view, and glides back when it returns. Game logic

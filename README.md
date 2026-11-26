@@ -7,8 +7,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 > Proton, about 14 ms ping): over 5 minutes on the file menu without a desync, and when one player quits, the other
 > game shows it within 50 ms. Not tested yet: battles, a chapter change, and people actually playing.
 > With `agent=<port>` a program on the same PC, such as an AI agent, can read the game state as JSON and send
-> input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, in the game it is
-> not tested yet.
+> input ([docs/agent-api.md](docs/agent-api.md)); its network side is tested without the game, and in the game it
+> has been tried in `mode=solo` only (not yet online or across a chapter change). `tools/deepseek_player.py` lets
+> a DeepSeek model play through it toward a goal given in words (with your own API key; tried in the game in solo,
+> see its section there).
 
 > **Vibecoded:** this project is made with AI (Claude): code, analysis and documentation.
 
@@ -21,25 +23,25 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
   same result, so no game objects need to be synchronized over the network.
 - **No input lag, no slowdown.** Each game measures its ping and sends its input just early enough that nobody ever
   waits, so the game keeps its full 30 fps. Your own SOUL is still drawn without delay, and bullets hit it where you
-  see it: your game decides your hits and tells the others, so dodging feels like single player.
+  see it: your game decides your hits and tells the others, so dodging feels like single player. The other players'
+  hearts are drawn faint on your screen (`other_souls`, 10 % by default), so you never mistake one for your own.
 
 ### Roadmap
 
 1. **Virtual input layer**: route every keyboard and gamepad read (game and mod) through one layer that returns
    network input for remote players.
 2. **Transport**: a small native DLL (UDP, star topology through the host, automatic input delay from the ping).
-3. **Determinism**: shared random seed; game logic must not depend on audio playback state or the system clock.
-   The virtual audio clock is done, and `get_timer()` uses a frame clock online; still open are the other system
-   clock reads in gameplay code (`current_time`, about 20 entries in Chapter 5)
-   and the mouse (a Chapter 5 battle attack reacts to the cursor). See [docs/DESIGN.md](docs/DESIGN.md).
+3. **Determinism**: shared random seed; game logic must not depend on audio playback state, the mouse or the
+   system clock. The virtual audio clock, the lockstep frame clock (`get_timer()`, plus `current_time` and
+   `delta_time`) and deterministic mouse reads (off-screen cursor, no buttons online) are done.
+   See [docs/DESIGN.md](docs/DESIGN.md).
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
-6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL); next: your
-   character in the overworld and the FIGHT timing bar.
+6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL), and the
+   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; not yet
+   checked in the game); next: your character in the overworld and the FIGHT timing bar.
 7. **Online-only quality of life** (planned):
-   - **your own SOUL stands out in battles**: each player's heart is drawn clearly on their own screen and the
-     other players' hearts are dimmed, so several hearts are no longer confused;
    - **your own camera and arrows** (draft, not tested in the game yet): in the overworld your screen follows your
      own character when it walks away from the others (`camera=own`), and an arrow at the screen edge points to
      every player you can't see (`arrows=1`).
@@ -83,7 +85,8 @@ To install, whichever way you built it:
    `chapter5_online.win` if you ran the patcher yourself) and `drnet.dll` next to it.
 3. Compare the SHA-256 of that `data.win` with every other player's. `build.py` prints it; otherwise run
    `certutil -hashfile data.win SHA256` on Windows or `sha256sum data.win`. If they differ, the games will not stay
-   in sync: check that everyone started from the same game, mod and UndertaleModTool versions.
+   in sync (and `drnet.dll` refuses to connect with a message showing both hash prefixes): check that everyone started
+   from the same game, mod and UndertaleModTool versions.
 
 Without a config file the patched game behaves like the original. To enable a mode, copy
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it

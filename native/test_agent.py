@@ -7,7 +7,7 @@ tools/agent_client.py and through plain sockets.
 
   solo    one game: state, input and its exact effect, ids, every kind of refused command, the limits, clear,
           a second connection, input that ends with its connection, a browser's HTTP request, the command line,
-          the port closed and opened again as at a chapter change
+          the port closed and opened again as at a chapter change, tools/deepseek_player.py with its fake model
   long    a game whose state is 300 KB: long replies arrive whole, and an agent that stops reading is dropped
   online  host and client in lockstep, an agent on each: "done" comes only when the delayed input was applied,
           and both sides see the same; once with a fixed delay, once with an automatic delay that grows and
@@ -20,6 +20,7 @@ builds the real state is not part of this: it needs the game. Used by tools/veri
 """
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -30,6 +31,7 @@ import traceback
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 BUILD = os.path.join(ROOT, "native", "build")
 CLIENT = os.path.join(ROOT, "tools", "agent_client.py")
+PLAYER = os.path.join(ROOT, "tools", "deepseek_player.py")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 from agent_client import AgentClient, AgentError, LineReader, decode_line, encode_line  # noqa: E402
 
@@ -67,13 +69,14 @@ class Game:
     """test_agent.exe, under Wine or natively."""
 
     def __init__(self, tmp, mode, port, fps=100, pad=0, delay=-1, lag=0, wave=0):
+        stage = os.path.join(tmp, "bin")
         cmd, env = runner()
-        cmd = cmd + [os.path.join(BUILD, "test_agent.exe")]
+        cmd = cmd + [os.path.join(stage, "test_agent.exe")]
         self.name = "%s game" % mode
         self.log = os.path.join(tmp, "%s-%d.txt" % (mode, port))
         self.out = open(self.log, "wb")
         self.proc = subprocess.Popen(cmd + [mode, str(port), str(fps), str(pad), str(delay), str(lag), str(wave)],
-                                     cwd=BUILD, env=env, stdin=subprocess.DEVNULL, stdout=self.out, stderr=subprocess.STDOUT)
+                                     cwd=stage, env=env, stdin=subprocess.DEVNULL, stdout=self.out, stderr=subprocess.STDOUT)
         games.append(self)
 
     def output(self):
@@ -386,6 +389,32 @@ def test_chapter_change(port, game):
     print("  ok: the port is closed and opened again as at a chapter change, with the old connection still held")
 
 
+def test_player(port, tmp):
+    # tools/deepseek_player.py with its fake model: no key, no network; the answers come from a file.
+    answers = os.path.join(tmp, "answers.txt")
+    with open(answers, "w") as f:
+        f.write('10 right\n{"why": "press twice", "do": "tap confirm 2 3", "done": false}\n')
+    log = os.path.join(tmp, "player.jsonl")
+    r = Raw(port)
+    at = pos(still(r))
+    r.close()
+    env = dict(os.environ)
+    env.pop("DEEPSEEK_API_KEY", None)
+    p = subprocess.run([sys.executable, PLAYER, "walk right, then press confirm twice", "--port", str(port),
+                        "--fake", answers, "--log", log, "--pause", "0"], capture_output=True, text=True, timeout=120,
+                       env=env)
+    check(p.returncode == 0, "deepseek_player.py --fake failed", p.stdout, p.stderr)
+    with open(log, encoding="utf-8") as f:
+        records = [json.loads(line) for line in f]
+    turns = [r for r in records if r["event"] == "turn"]
+    check([t.get("do") for t in turns] == ["10 right", "tap confirm 2 3", ""], "the turns of the fake model", turns)
+    check(turns[0]["result"] == "moved (+10,+0)", "the player sees what its input did", turns[0])
+    r = Raw(port)
+    check(pos(still(r)) == dict(at, x=at["x"] + 10, confirm=at["confirm"] + 2), "the player's input was played", at)
+    r.close()
+    print("  ok: tools/deepseek_player.py plays its fake model's answers")
+
+
 def quit_game(port, game):
     r = Raw(port)
     r.send({"cmd": "input", "steps": [hold(1, *ALL)]})
@@ -405,6 +434,7 @@ def solo(tmp):
     test_connections(port)
     test_command_line(port)
     test_chapter_change(port, game)
+    test_player(port, tmp)
     quit_game(port, game)
 
 
@@ -542,6 +572,12 @@ def main(argv):
             print("warning: creating the Wine prefix %s failed" % env["WINEPREFIX"])
     failed = 0
     with tempfile.TemporaryDirectory() as tmp:
+        stage = os.path.join(tmp, "bin")
+        os.makedirs(stage)
+        for name in ("drnet.dll", "test_agent.exe"):
+            shutil.copy2(os.path.join(BUILD, name), os.path.join(stage, name))
+        with open(os.path.join(stage, "data.win"), "wb") as f:
+            f.write(b"DELTARUNE_AGENT_TEST_DATA\n")
         runs = [("solo", "one game", lambda: solo(tmp)), ("long", "long replies", lambda: long_replies(tmp)),
                 ("online", "host and client, delay 3", lambda: online(tmp, 3, 0)),
                 ("online", "host and client, automatic delay, 60 ms test latency that comes and goes", lambda: online(tmp, -1, 60))]
