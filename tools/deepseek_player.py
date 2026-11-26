@@ -69,7 +69,8 @@ Other options:
   --window <title>    part of the game window's title on Windows (default DELTARUNE); --window-pid <pid> picks
                       one of two copies on one PC
   --screen-grab       on Windows, when PrintWindow gives a black picture, copy the game's part of the screen
-                      instead; only while no other window overlaps the game, since the picture goes to DeepSeek
+                      instead; only if no other window overlaps the game just before and just after the copy,
+                      since the picture goes to DeepSeek (see tools/screen_capture.py)
   --frames-dir <dir>  also save every screenshot sent, as turn-NNN.png (to see what the model saw)
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)

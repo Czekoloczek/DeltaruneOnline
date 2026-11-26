@@ -26,6 +26,34 @@ KEY = "sk-test0123456789abcdef"
 PRINT_FILE = "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())"
 
 
+def process_alive(pid):
+    """Whether process pid still runs (a zombie waiting to be reaped counts as stopped)."""
+    if os.name == "nt":
+        out = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/NH"], capture_output=True, text=True).stdout
+        return str(pid) in out.split()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def kill_process(pid):
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
 def shell(*args):
     """A command line for the shell that subprocess uses here, each argument kept whole (paths with spaces)."""
     return subprocess.list2cmdline(args) if os.name == "nt" else " ".join(shlex.quote(a) for a in args)
@@ -325,13 +353,38 @@ class Vision(unittest.TestCase):
             screen_capture.CommandCapture(shell(sys.executable, "-c", "import sys; sys.exit(3)"))()
 
     def test_command_capture_timeout_stops_its_children(self):
-        # the command starts a child that keeps the output pipe open; the timeout must still end the capture
+        # the command starts a child that keeps the output pipe open; the timeout must end the capture and stop
+        # the child too
         hang = ("import subprocess, sys, time; "
-                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)")
-        start = time.monotonic()
-        with self.assertRaisesRegex(screen_capture.CaptureError, "more than 1 s"):
-            screen_capture.CommandCapture(shell(sys.executable, "-c", hang), timeout=1)()
-        self.assertLess(time.monotonic() - start, 15)
+                "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                "open(sys.argv[1], 'w').write(str(c.pid)); time.sleep(60)")
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = os.path.join(tmp, "child.pid")
+            result = []
+
+            def capture():
+                try:
+                    screen_capture.CommandCapture(shell(sys.executable, "-c", hang, pid_file), timeout=1)()
+                    result.append(None)
+                except screen_capture.CaptureError as e:
+                    result.append(e)
+
+            t = threading.Thread(target=capture, daemon=True)
+            t.start()
+            t.join(20)      # a hang fails the test instead of holding up the whole run
+            with open(pid_file) as f:
+                child = int(f.read())
+            try:
+                self.assertFalse(t.is_alive(), "the capture did not return after its timeout")
+                self.assertRegex(str(result[0]), "more than 1 s")
+                for _ in range(50):
+                    if not process_alive(child):
+                        break
+                    time.sleep(0.1)
+                self.assertFalse(process_alive(child), "the command's child %d still runs" % child)
+            finally:
+                if process_alive(child):
+                    kill_process(child)
 
 
 class Answers(unittest.TestCase):

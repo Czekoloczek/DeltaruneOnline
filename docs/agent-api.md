@@ -66,8 +66,9 @@ than 3600 frames is refused before it is built).
   captures the game's window itself (`tools/screen_capture.py`, GDI through ctypes: the client area, cut to the
   4:3 picture when fullscreen). It uses PrintWindow, which asks the game's window for its own pixels, so a window
   over the game is never in the picture. If PrintWindow gives black, that turn has no picture, unless
-  `--screen-grab` is given: then the game's part of the screen is copied, but only while no visible window of
-  another program overlaps the game (such a copy would send that window to DeepSeek). Elsewhere `--screenshot-cmd`
+  `--screen-grab` is given: then the game's part of the screen is copied, but only if no visible window of another
+  program overlaps the game just before and just after the copy (such a copy would send that window to DeepSeek; a
+  window that comes and goes within those few milliseconds is not seen). Elsewhere `--screenshot-cmd`
   gives a command that prints the image, for example under Proton on X11/XWayland
   `import -window "$(xdotool search --name '^DELTARUNE$' | head -1)" -resize 640x480 png:-`; it has 10 s, then it
   and everything it started are stopped. A failed capture costs only that turn's picture (the model is told why).

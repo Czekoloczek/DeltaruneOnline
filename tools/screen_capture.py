@@ -14,8 +14,10 @@ with nearest neighbour to fit 640x480, the game's own resolution, so pixel art s
 
 If PrintWindow gives a black picture (some GPU-drawn windows do), there is no screenshot, unless --screen-grab is
 given: then the game's part of the screen is copied instead. That copy would hold any window over the game (a chat,
-a browser) and the picture is sent to DeepSeek, so it is taken only when no other visible window overlaps the
-game; otherwise that turn goes without a picture and says which kind of window (its class) is in the way.
+a browser) and the picture is sent to DeepSeek, so the windows over the game are checked just before and just
+after the copy, and the picture is used only if no visible window of another program overlapped the game either
+time; otherwise that turn goes without a picture and says which kind of window (its class) was in the way. A
+window that comes over the game and goes away again between the two checks (a few milliseconds) is not seen.
 
 On other systems a command does the capture (--cmd): it must print one PNG, JPEG, GIF or WebP image on its
 standard output; it is sent as it is, so let it crop and scale. It has 10 s; then it and everything it started
@@ -170,11 +172,10 @@ def stop_tree(p):
     try:
         p.communicate(timeout=2)
     except (subprocess.TimeoutExpired, ValueError):
-        for f in (p.stdout, p.stderr):
-            try:
-                f.close()
-            except OSError:
-                pass
+        # Something outside the tree still holds the pipes. Leave them: on Windows a reader thread of
+        # communicate() is blocked in read() and holds the stream's lock, so closing the stream here could block
+        # too. The threads are daemon threads and end when the pipes close or the program does.
+        pass
 
 
 class WindowsCapture:
@@ -380,6 +381,11 @@ class WindowsCapture:
             raw = self.grab(hwnd, w, h, True)
             if raw is None:
                 raise CaptureError("the game window could not be captured")
+            # and again after the copy: a window that came over the game meanwhile may be in it
+            cover = self.covered_by(hwnd, w, h)
+            if cover is not None:
+                raise CaptureError("another window (class %s) came over the game during the screen copy; the "
+                                   "picture was thrown away" % cover)
         area = game_area(w, h)
         size = fit(area[2], area[3])
         return Shot(png(size[0], size[1], bgra_to_rgb(raw, w * 4, area, size)), "image/png", size[0], size[1])
