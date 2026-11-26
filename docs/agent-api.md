@@ -58,6 +58,19 @@ than 3600 frames is refused before it is built).
   at the cache-hit price. The state's numbers come in words too: `interact=5: the Dark World menu is open`, the
   save point menu as "the list of file slots, cursor on file slot 2", `obj_savepoint (save point)`, and `menuno`
   only while the Dark World menu is open (it keeps an old value otherwise).
+- **What it sees.** With `deepseek-flash` every turn comes with a screenshot of the game, scaled to the game's own
+  640x480 (about 206 image tokens by DeepSeek's calculator, so about 0.00006 USD a turn at the peak price; DeepSeek
+  counts at most 1024 tokens an image, and an image below about 544x544 is scaled up, so a smaller one saves
+  nothing). The camera follows the player, so a picture is only good for its turn: the model can put `look` among
+  its steps ("60 right; look; 40 up") to stop there and be asked again with a new picture. On Windows the player
+  captures the game's window itself (`tools/screen_capture.py`, GDI through ctypes: the client area, cut to the
+  4:3 picture when fullscreen). Elsewhere `--screenshot-cmd` gives a command that prints the image, for example
+  under Proton on X11/XWayland `import -window "$(xdotool search --name '^DELTARUNE$' | head -1)" -resize 640x480
+  png:-`. A failed capture costs only that turn's picture (the model is told why). `--no-vision` turns it off,
+  `--frames-dir <dir>` saves every picture sent, and `python3 tools/screen_capture.py shot.png` checks the capture
+  without DeepSeek. The image goes as a `data:` URL in the user message
+  ([api-docs.deepseek.com/guides/vision](https://api-docs.deepseek.com/guides/vision/)); `deepseek-v4-pro` takes
+  no images.
 - **What it remembers.** "Done so far" is kept for the whole run (the newest 60 entries): rooms entered, menus
   opened and closed, choices and what was picked, battles, the start of each dialogue, a save the guard refused,
   and notes the model asks to keep by adding `"remember": "..."` to its answer. The last 30 turns come after it.
@@ -91,7 +104,7 @@ than 3600 frames is refused before it is built).
   after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.50, counted
   at the peak prices, and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause`
   (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high
-  (up to about 0.005 USD a call with the guide and a full history); the runs in the game cost about 0.0002 USD a
+  (up to about 0.005 USD a call with the guide and a full history, an image counted as 1024 tokens); the runs in the game cost about 0.0002 USD a
   call at peak prices before the guide and the longer history, and all four together less than 0.01 USD.
 - **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
   refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
@@ -116,8 +129,9 @@ than 3600 frames is refused before it is built).
 Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn, ending the run
 after the second refusal, cutting long walks every second and dropping an answer when the screen changed during the
 call came after runs 2 to 4 and are not yet tried in the game. So are the guide, the "done so far" list, the 30
-turns, the words for the game's numbers and the goal check, which came after a later run in which the model, asked
-to open "the menu", kept going back to the save point.
+turns, the words for the game's numbers, the goal check and the screenshots, which came after a later run in which
+the model, asked to open "the menu", kept going back to the save point. The window capture on Windows has not
+run at all yet.
 
 ## Protocol
 

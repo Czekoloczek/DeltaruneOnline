@@ -1,6 +1,7 @@
 """tools/deepseek_player.py without the game and without DeepSeek: a small game in Python that speaks the Agent API
 on a local port (a player who walks, a save point with a dialogue and a choice), a fake model, and a fake HTTP
 layer in place of api.deepseek.com. The player against the real drnet.dll is part of `native/test_agent.py solo`."""
+import base64
 import contextlib
 import io
 import json
@@ -10,11 +11,13 @@ import sys
 import tempfile
 import threading
 import unittest
+import zlib
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 import agent_client  # noqa: E402
 import deepseek_player as p  # noqa: E402
+import screen_capture  # noqa: E402
 
 KEY = "sk-test0123456789abcdef"
 
@@ -210,6 +213,10 @@ class Prompt(unittest.TestCase):
         choice = dict(free, choice={"options": ["Yes", "No"], "selected": 1})
         self.assertEqual(p.events(free, choice), ['a choice appeared: ["Yes", "No"]'])
         self.assertEqual(p.events(choice, free), ['the choice closed (last selected: "No")'])
+        # moved and confirmed in one turn: the selection is taken from the last state that still had the choice
+        moved = dict(free, choice={"options": ["Yes", "No"], "selected": 0})
+        self.assertEqual(p.events(moved, free, [choice]), ['the choice closed (last selected: "No")'])
+        self.assertEqual(p.events(moved, free, [free]), ['the choice closed (last selected: "Yes")'])
         self.assertEqual(p.events(free, dict(free, battle=True)), ["a battle started"])
         self.assertEqual(p.events(free, free), [])
 
@@ -248,16 +255,90 @@ class Prompt(unittest.TestCase):
         self.assertEqual(p.change(a, b), "moved (+30,-6), can_move True -> False, choice appeared")
 
 
+class Vision(unittest.TestCase):
+    def shot(self):
+        return screen_capture.Shot(screen_capture.png(2, 1, b"\x01\x02\x03\x04\x05\x06"), "image/png", 2, 1)
+
+    def test_the_screenshot_goes_into_the_user_message(self):
+        m = p.messages("go", 150, {"room": "r"}, [], 1, 40, vision=True, shot=self.shot())
+        self.assertIn('put the step\n"look" among your steps', m[0]["content"])
+        content = m[1]["content"]
+        self.assertEqual(content[0]["type"], "text")
+        self.assertIn("State now:\nroom=r", content[0]["text"])
+        url = content[1]["image_url"]["url"]
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        self.assertEqual(base64.b64decode(url.split(",", 1)[1]), self.shot().data)
+        self.assertEqual(p.text_of(content), content[0]["text"])
+        self.assertEqual(p.prompt_tokens_max(m), len(m[0]["content"].encode()) + len(content[0]["text"].encode())
+                         + 2 * p.TEMPLATE_TOKENS + p.IMAGE_TOKENS)
+        # the system prompt is the same with or without a picture this turn, so it stays cached
+        n = p.messages("go", 150, {"room": "r"}, [], 2, 40, vision=True, no_shot="the game window is minimized")
+        self.assertEqual(m[0], n[0])
+        self.assertTrue(n[1]["content"].endswith("(no screenshot this turn: the game window is minimized)"))
+        off = p.messages("go", 150, {"room": "r"}, [], 1, 40)
+        self.assertNotIn("Screenshot:", off[0]["content"])
+        self.assertIsInstance(off[1]["content"], str)
+
+    def test_png_and_its_size(self):
+        data = screen_capture.png(3, 2, bytes(range(18)))
+        self.assertEqual(screen_capture.image_info(data), ("image/png", 3, 2))
+        chunks, i = {}, 8
+        while i < len(data):
+            n = int.from_bytes(data[i:i + 4], "big")
+            chunks[data[i + 4:i + 8]] = data[i + 8:i + 8 + n]
+            i += 12 + n
+        self.assertEqual(zlib.decompress(chunks[b"IDAT"]), b"\x00" + bytes(range(9)) + b"\x00" + bytes(range(9, 18)))
+        self.assertEqual(screen_capture.image_info(b"\xff\xd8\xff\xe0rest")[0], "image/jpeg")
+        with self.assertRaises(screen_capture.CaptureError):
+            screen_capture.image_info(b"hello")
+
+    def test_window_area_and_scaling(self):
+        self.assertEqual(screen_capture.game_area(1920, 1080), (240, 0, 1440, 1080))
+        self.assertEqual(screen_capture.game_area(640, 480), (0, 0, 640, 480))
+        self.assertEqual(screen_capture.game_area(800, 800), (0, 100, 800, 600))
+        self.assertEqual(screen_capture.fit(1440, 1080), (640, 480))
+        self.assertEqual(screen_capture.fit(320, 240), (320, 240))
+        # 4x2 BGRA, the right half kept and halved: one pixel a row, B and R swapped
+        src = bytes([1, 2, 3, 0, 4, 5, 6, 0, 7, 8, 9, 0, 10, 11, 12, 0,
+                     13, 14, 15, 0, 16, 17, 18, 0, 19, 20, 21, 0, 22, 23, 24, 0])
+        self.assertEqual(screen_capture.bgra_to_rgb(src, 16, (2, 0, 2, 2), (1, 2)), bytes([9, 8, 7, 21, 20, 19]))
+
+    def test_command_capture(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "shot.png")
+            with open(path, "wb") as f:
+                f.write(self.shot().data)
+            shot = screen_capture.CommandCapture("%s -c \"import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb')"
+                                                 ".read())\" %s" % (sys.executable, path))()
+            self.assertEqual((shot.mime, shot.width, shot.height, shot.data), ("image/png", 2, 1, self.shot().data))
+        with self.assertRaises(screen_capture.CaptureError):
+            screen_capture.CommandCapture("%s -c \"print('not an image')\"" % sys.executable)()
+        with self.assertRaises(screen_capture.CaptureError):
+            screen_capture.CommandCapture("%s -c \"import sys; sys.exit(3)\"" % sys.executable)()
+
+
 class Answers(unittest.TestCase):
     def test_plain_json(self):
-        why, do, frames, done, asked, note = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        why, do, frames, done, asked, note, look = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        self.assertFalse(look)
         self.assertEqual(note, "")
         self.assertEqual((why, do, done, asked), ("walk", "20 right; tap z", False, 22))
         self.assertEqual(len(frames), 22)
 
     def test_json_inside_other_words(self):
-        why, do, frames, done, _, _ = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)
+        why, do, frames, done = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)[:4]
         self.assertEqual((do, done, len(frames)), ("5 up", True, 5))
+
+    def test_look_stops_the_steps(self):
+        a = p.parse_answer(answer("20 right; look; 40 up"), 150)
+        self.assertTrue(a.look)
+        self.assertEqual(a.do, "20 right; look; 40 up")
+        self.assertEqual(a.frames, a_frames("20 right"))
+        self.assertEqual(p.split_look("10 up\n LOOK # see the room\nwait 5"), ("10 up", True))
+        self.assertEqual(p.split_look("look"), ("", True))
+        self.assertEqual(p.split_look("20 right"), ("20 right", False))
+        self.assertEqual(p.parse_answer(answer("look"), 150).frames, [])
+        self.assertEqual(p.parse_answer(answer("look; 99999 right"), 150).frames, [])    # never played
 
     def test_frames_are_cut(self):
         self.assertEqual(len(p.parse_answer(answer("10s right"), 150)[2]), 150)
@@ -518,6 +599,52 @@ class Loop(unittest.TestCase):
         self.assertIn('dialogue: "* A save point. & * Determination."', last)
         self.assertNotIn("turn 2: tap confirm", last.split("Last turns:")[1])
         self.assertEqual(records[1]["remember"], "the star is at x=90")
+
+    def screenshot_cmd(self, tmp):
+        path = os.path.join(tmp, "shot.png")
+        with open(path, "wb") as f:
+            f.write(screen_capture.png(2, 1, b"\x01\x02\x03\x04\x05\x06"))
+        return "%s -c \"import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())\" %s" % (
+            sys.executable, path)
+
+    def test_a_screenshot_every_turn_and_look(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = os.path.join(tmp, "frames")
+            http = Http([answer("30 right; look; 30 right", "walk, then look"), answer("", "ok", True)])
+            code, out, records = run_main(self.game, ["go", "--screenshot-cmd", self.screenshot_cmd(tmp),
+                                                      "--frames-dir", frames], {"DEEPSEEK_API_KEY": KEY}, http)
+            self.assertEqual(code, 0, out)
+            self.assertIn("vision on (command, 2x1 PNG", out)
+            self.assertEqual(sorted(os.listdir(frames)), ["turn-001.png", "turn-002.png"])
+        self.assertEqual(self.game.x, 90)       # the steps after "look" were not played
+        for req in http.requests:
+            msgs = req[3]["messages"]
+            self.assertIn("Screenshot: each turn comes with a picture", msgs[0]["content"])
+            self.assertTrue(msgs[1]["content"][1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertIn("stopped at look: the steps after it were not played",
+                      http.requests[1][3]["messages"][1]["content"][0]["text"])
+        turns = [r for r in records if r["event"] == "turn"]
+        self.assertTrue(turns[0]["screenshot"].startswith("2x1 PNG"))
+        self.assertTrue(turns[0]["state"].startswith("chapter=1 room=room_test"))
+        self.assertNotIn("base64", json.dumps(records))     # the log keeps no image
+
+    def test_failed_screenshot_and_no_vision(self):
+        http = Http([answer("", "ok", True)])
+        code, out, records = run_main(self.game, ["go", "--screenshot-cmd", "%s -c \"pass\"" % sys.executable],
+                                      {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        self.assertIn("vision on, but the first screenshot failed", out)
+        user = http.requests[0][3]["messages"][1]["content"]
+        self.assertIn("(no screenshot this turn: the screenshot command failed (exit 0))", user)
+        for args, why in ((["--no-vision"], "vision off (--no-vision)"),
+                          (["--model", "pro"], "vision off (deepseek-v4-pro does not take images)")):
+            http = Http([answer("", "ok", True)])
+            code, out, _ = run_main(self.game, ["go", "--screenshot-cmd", "false"] + args, {"DEEPSEEK_API_KEY": KEY},
+                                    http)
+            self.assertEqual(code, 0, out)
+            self.assertIn(why, out)
+            self.assertIsInstance(http.requests[0][3]["messages"][1]["content"], str)
+            self.assertNotIn("Screenshot:", http.requests[0][3]["messages"][0]["content"])
 
     def test_guide_option_and_default_limit(self):
         self.assertEqual(p.parse_args(["go"]).max_usd, 0.5)

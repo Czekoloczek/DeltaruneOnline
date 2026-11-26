@@ -17,6 +17,12 @@ What the model is told:
   - "done so far", kept for the whole run (the newest 60 entries): rooms entered, menus opened and closed, choices,
     battles, the start of each dialogue, refused saves, and notes the model asks to keep ("remember" in its
     answer), so it does not redo what it already did after the turn has scrolled out of the last 30;
+  - a screenshot of the game every turn (vision, on by default with deepseek-flash): the game's window scaled to its
+    own 640x480, about 206 image tokens, about 0.00006 USD at the peak price. The camera follows the player, so a
+    picture is only good for the turn it was taken in; the model can put "look" among its steps to be asked again
+    with a new picture partway through a long move (the steps after "look" are not played). On Windows the window
+    is captured directly (tools/screen_capture.py); elsewhere --screenshot-cmd gives a command that prints the
+    image. When a capture fails, the turn goes without a picture and the model is told why;
   - with --until, whether the program's goal check is met yet. The program then judges the goal: an answer
     "done" before the check is met is told back to the model and the run goes on (the third one ends it, exit 1).
 
@@ -55,6 +61,12 @@ Other options:
                       is a string: --until room=room_town_school). The model is told about it
   --allow-save        let the model save to a file (the guard above is off)
   --guide <file>      the game guide for the system prompt (default tools/deepseek_guide.md); none: no guide
+  --no-vision         send no screenshots (deepseek-v4-pro takes none anyway)
+  --screenshot-cmd <c>  a shell command that prints one PNG/JPEG/GIF/WebP image of the game (needed off Windows;
+                      see tools/screen_capture.py for an X11/XWayland example)
+  --window <title>    part of the game window's title on Windows (default DELTARUNE); --window-pid <pid> picks
+                      one of two copies on one PC
+  --frames-dir <dir>  also save every screenshot sent, as turn-NNN.png (to see what the model saw)
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
   --reasoning <r>     none (default: fast and cheap), low, high, max. Thinking costs many more output tokens, and
@@ -81,10 +93,13 @@ Tested without the game and without a key (tests/test_deepseek_player.py; native
 drnet.dll). In the game (2026-11-23, solo, deepseek-flash): the first run ran through the save menu and saved,
 which the pieces, the save guard, --until and the walking hints came from; with them two runs reached their goal
 and a third, asked to save, was stopped by the guard, with nothing saved, for 0.0008 to 0.0019 USD each. The game
-guide, the "done so far" list, the 30-turn history, the words for the game's numbers and the goal check came after
-a run that kept going back to the save point when asked to open "the menu"; they are not yet tried in the game.
+guide, the "done so far" list, the 30-turn history, the words for the game's numbers, the goal check and the
+screenshots came after a run that kept going back to the save point when asked to open "the menu"; they are not yet
+tried in the game, and the window capture on Windows is not yet tried at all.
 """
 import argparse
+import base64
+import collections
 import datetime
 import json
 import os
@@ -96,6 +111,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import agent_client  # noqa: E402
 import deepseek_review  # noqa: E402
 import input_script  # noqa: E402
+import screen_capture  # noqa: E402
 
 MODELS = {"flash": "deepseek-flash", "deepseek-flash": "deepseek-flash", "deepseek-v4-flash": "deepseek-flash",
           "pro": "deepseek-v4-pro", "deepseek-v4-pro": "deepseek-v4-pro"}
@@ -118,6 +134,8 @@ MAX_REFUSED = 2         # confirms refused by the save guard before the run give
 WAIT_STEP, WAIT_QUIET, WAIT_MAX = 5, 90, 300    # waiting for a typing box: frames a step, without progress, in all
 MAX_ANSWER_FRAMES = 3600    # an answer whose steps make more frames than this is refused, not cut
 TEMPLATE_TOKENS = 20    # tokens of the chat template around each message (role, separators), at most
+IMAGE_TOKENS = 1024     # tokens of one image at most (api-docs.deepseek.com/guides/vision; 640x480 is about 206)
+VISION_MODELS = ("deepseek-flash",)     # deepseek-v4-pro does not take images (Models & Pricing, 2026-11)
 AUTO_PER_STEP = 5       # turns without the model allowed per --max-steps
 PIECE = 30              # frames: a long walk or wait is played in pieces this long, the screen checked after each
 CONFIRM, PRESSES, DIRECTIONS = 16, 16 | 32 | 64, 1 | 2 | 4 | 8      # action bits (agent_client.AGENT_BUTTONS)
@@ -131,7 +149,7 @@ Buttons: down right up left confirm cancel menu (or d r u l z x c). Steps, separ
   tap <buttons> [times] [gap]   press for 1 frame, then nothing for <gap> frames, e.g. "tap confirm 2 10"
 At most {max_frames} frames a turn. The program plays your steps until the screen changes (a dialogue, menu,
 choice or room appears, changes or closes), drops the rest and asks you again. So in a menu or a choice send one
-press a turn; to walk somewhere, send one long hold.
+press a turn; to walk somewhere, send one long hold.{vision_rule}
 
 Moving: x grows to the right, y grows downward. Walking speeds up to about 7 px a frame within a few frames (30
 frames of right moved 218 px in one test); the speed measured in this run is shown once you have walked. nearby
@@ -159,6 +177,12 @@ Answer with one JSON object and nothing else:
 or with a note to keep: {{"why": "...", "do": "...", "done": false, "remember": "<at most 15 words>"}}
 "done": true only when the goal is reached (then "do" may be empty). If the goal cannot be reached, answer
 "done": true and say why in "why", starting with "give up:"."""
+VISION_RULE = """
+Screenshot: each turn comes with a picture of the game screen as it is now (the game's own 640x480). The camera
+follows you, so it shows only the part of the room around you; the state lines are exact, the picture shows what
+they cannot (walls, paths, puzzles, where things are). To look again partway through a long move, put the step
+"look" among your steps, e.g. "60 right; look; 40 up": the program plays the steps before it, then asks you again
+with a new screenshot; the steps after "look" are not played."""
 SAVE_ALLOWED = "Saving to a file is allowed in this run, but only if the goal asks for it."
 SAVE_REFUSED = ("Saving to a file is not allowed in this run: the program refuses confirm on a file slot and on "
                 "Save in the overwrite question. Use Return or cancel there.")
@@ -314,9 +338,10 @@ def change(before, after):
     return ", ".join(bits) or "nothing changed"
 
 
-def events(before, after):
+def events(before, after, between=()):
     """What happened between two states that is worth keeping for the whole run ("done so far"): rooms, menus,
-    choices, battles, the start of a dialogue. Positions are left out: they change every turn."""
+    choices, battles, the start of a dialogue. Positions are left out: they change every turn. `between` holds the
+    states seen in between (after each piece of a turn): a choice's last selection is read there."""
     if not before or not after:
         return []
     out = []
@@ -345,8 +370,10 @@ def events(before, after):
         out.append("a choice appeared: %s" % json.dumps([" ".join(str(o).split())[:40] for o in
                                                           (cb.get("options") or [])], ensure_ascii=False))
     elif isinstance(ca, dict) and not isinstance(cb, dict):
-        sel = ca.get("selected")
-        opts = ca.get("options") or []
+        last = next((st.get("choice") for st in reversed(list(between))
+                     if isinstance(st, dict) and isinstance(st.get("choice"), dict)), ca)
+        sel = last.get("selected")
+        opts = last.get("options") or []
         picked = opts[sel] if isinstance(sel, int) and 0 <= sel < len(opts) else sel
         out.append("the choice closed (last selected: %s)" % json.dumps(picked, ensure_ascii=False))
     if before.get("battle") is not True and after.get("battle") is True:
@@ -442,7 +469,7 @@ def read_guide(path=None):
 
 
 def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False, until=None, speed=None,
-             done=None, guide=None):
+             done=None, guide=None, vision=False, shot=None, no_shot=""):
     """The system prompt (with the game guide) stays the same for the whole run, so DeepSeek's context cache bills
     it at the cache-hit price from the second call on; only the user message changes: the list of what is done so
     far, the last HISTORY turns and the state."""
@@ -456,6 +483,8 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
     if speed:
         user += "Walking speed measured in this run: about %.1f px a frame.\n" % speed
     user += "State now:\n%s" % summarize(state)
+    if vision and shot is None:
+        user += "\n(no screenshot this turn: %s)" % (no_shot or "the capture failed")
     until_rule = ""
     if until:
         until_rule = ("\nThe program checks the goal itself: it ends the run as soon as the state has %s, and each "
@@ -464,8 +493,33 @@ def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False
     text = read_guide(guide)
     system = SYSTEM.format(goal=goal, max_frames=max_frames, until_rule=until_rule,
                            guide=("About the game:\n\n" + text) if text else "",
+                           vision_rule=VISION_RULE if vision else "",
                            save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED)
-    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    content = user
+    if vision and shot is not None:
+        # https://api-docs.deepseek.com/guides/vision: an OpenAI-style list of blocks, the image as a data: URL
+        content = [{"type": "text", "text": user},
+                   {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (
+                       shot.mime, base64.b64encode(shot.data).decode("ascii"))}}]
+    return [{"role": "system", "content": system}, {"role": "user", "content": content}]
+
+
+def text_of(content):
+    """The text of a message's content: the string itself, or the text blocks of a list."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
+def prompt_tokens_max(msgs):
+    """At most how many input tokens a request is: a token for every byte of text (a token of the byte-level
+    tokenizer holds at least one), the chat template, and IMAGE_TOKENS for every image."""
+    total = 0
+    for m in msgs:
+        c = m["content"]
+        images = 0 if isinstance(c, str) else sum(1 for b in c if isinstance(b, dict) and b.get("type") == "image_url")
+        total += len(text_of(c).encode("utf-8")) + TEMPLATE_TOKENS + images * IMAGE_TOKENS
+    return total
 
 
 # ---------------------------------------------------------------------------------------------- the answer
@@ -497,9 +551,21 @@ def frames_in(text):
     return total
 
 
+Answer = collections.namedtuple("Answer", "why do frames done asked remember look")
+
+
+def split_look(do):
+    """Steps text -> (the steps before the first "look" step, True), or (the text, False) without one."""
+    parts = re.split(r"(;|\n)", do)
+    for i in range(0, len(parts), 2):
+        if parts[i].split("#", 1)[0].strip().lower() == "look":
+            return "".join(parts[:i]).strip().rstrip(";").strip(), True
+    return do, False
+
+
 def parse_answer(content, max_frames):
-    """The model's text -> (why, steps text as given, per-frame bits cut to max_frames, done, frames asked for,
-    the note it asks to keep or ""). Raises ValueError with what is wrong."""
+    """The model's text -> Answer(why, steps text as given, per-frame bits cut to max_frames, done, frames asked for,
+    the note it asks to keep or "", whether the steps stop at a "look"). Raises ValueError with what is wrong."""
     text = (content or "").strip()
     try:
         obj = json.loads(text)
@@ -518,17 +584,18 @@ def parse_answer(content, max_frames):
     if not isinstance(do, str):
         raise ValueError('"do" must be a string of steps, not %r' % (do,))
     done = obj.get("done") is True
-    asked = frames_in(do)
+    play_do, look = split_look(do)
+    asked = frames_in(play_do)
     if asked > max(MAX_ANSWER_FRAMES, max_frames):
         raise ValueError("the steps make %d frames; send at most %d a turn" % (asked, max_frames))
     try:
-        frames = agent_client.text_to_frames(do)    # ScriptError is a ValueError
+        frames = agent_client.text_to_frames(play_do)   # ScriptError is a ValueError
     except OverflowError:
         raise ValueError("a step makes too many frames")
     agent_client.frames_to_steps(frames)            # only the seven buttons of the agent
     note = obj.get("remember")
     note = " ".join(note.split())[:MAX_REMEMBER] if isinstance(note, str) else ""
-    return why, do.strip(), frames[:max_frames], done, len(frames), note
+    return Answer(why, do.strip(), frames[:max_frames], done, len(frames), note, look)
 
 
 # ---------------------------------------------------------------------------------------------- models
@@ -595,7 +662,7 @@ class FakeModel:
     def ask(self, msgs, seconds=120):
         self.asked.append(msgs)
         text = self.answers.pop(0) if self.answers else '{"why": "fake answers ran out", "do": "", "done": true}'
-        chars = sum(len(m["content"]) for m in msgs)
+        chars = sum(len(text_of(m["content"])) for m in msgs)
         return text, {"prompt_tokens": chars // 4, "prompt_cache_hit_tokens": 0, "completion_tokens": len(text) // 4}
 
 
@@ -718,8 +785,9 @@ def walking(state):
         and not s.get("battle")
 
 
-def play_turn(game, frames, state, allow_save, until):
-    """Plays a turn's frames piece by piece. Returns (state after, frames played, why the rest was dropped or "")."""
+def play_turn(game, frames, state, allow_save, until, seen=None):
+    """Plays a turn's frames piece by piece. Returns (state after, frames played, why the rest was dropped or "").
+    The state after each piece is appended to `seen` when it is given."""
     played = 0
     parts = pieces(frames)
     i = 0
@@ -737,6 +805,8 @@ def play_turn(game, frames, state, allow_save, until):
                                    "goal needs saving, give up" % risk)
         before = state
         state = game.send_steps(agent_client.frames_to_steps(part))
+        if seen is not None:
+            seen.append(state)
         played += len(part)
         if i + 1 < len(parts) and (screen(state) != screen(before) or met(state, until)):
             return state, played, "the rest (%d frames) dropped: the screen changed" % (len(frames) - played)
@@ -746,7 +816,7 @@ def play_turn(game, frames, state, allow_save, until):
 
 def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_frames=150, pause=0.5,
          prices=PRICES["deepseek-flash"], auto_confirm=True, allow_save=False, until=None, log=None, tally=None,
-         guide=None, clock=time.monotonic, sleep=time.sleep):
+         guide=None, capture=None, frames_dir=None, clock=time.monotonic, sleep=time.sleep):
     """The loop. Returns (0, why it ended) when the model says the goal is reached or `until` is met, raises Stop
     otherwise. tally["usd"] holds the USD spent so far, also after a Stop. With `until`, the model's own "done" does
     not end the run: it is told that the program's check is not met yet."""
@@ -801,11 +871,25 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         calls += 1
         auto_stuck = 0
         speed = walk[1] / walk[0] if walk else None
+        shot, no_shot = None, ""
+        if capture is not None:
+            try:
+                shot = capture()
+            except screen_capture.CaptureError as e:
+                no_shot = str(e)
+        shot_file = None
+        if shot is not None and frames_dir:
+            shot_file = os.path.join(frames_dir, "turn-%03d.%s" % (turn, shot.mime.split("/")[1]))
+            try:
+                with open(shot_file, "wb") as f:
+                    f.write(shot.data)
+            except OSError:
+                shot_file = None
         msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed, done_list,
-                        guide)
+                        guide, vision=capture is not None, shot=shot, no_shot=no_shot)
         # The next call costs at most: the whole prompt at the cache-miss price, a token for every byte (a token
         # of the byte-level tokenizer holds at least one) plus the chat template, and the whole output cap.
-        prompt = sum(len(m["content"].encode("utf-8")) + TEMPLATE_TOKENS for m in msgs)
+        prompt = prompt_tokens_max(msgs)
         worst = (prompt * prices[1] + model.max_tokens * prices[2]) / 1e6
         if spent + worst > max_usd:
             raise Stop(3, "spending limit: %.4f of %.4f USD spent, the next call could cost %.4f" % (
@@ -821,10 +905,14 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         spent += cost
         tally["usd"] = spent
         record = {"event": "turn", "turn": turn, "call": calls,
-                  "state": msgs[1]["content"].split("State now:\n", 1)[1],
+                  "state": text_of(msgs[1]["content"]).split("State now:\n", 1)[1].split("\n(no screenshot", 1)[0],
                   "answer": content, "usage": usage, "usd": round(cost, 6), "usd_total": round(spent, 6)}
+        if capture is not None:
+            record["screenshot"] = shot.describe() if shot is not None else "none: " + no_shot
+            if shot_file:
+                record["screenshot_file"] = shot_file
         try:
-            why, do, frames, done, asked, remember = parse_answer(content, max_frames)
+            why, do, frames, done, asked, remember, look = parse_answer(content, max_frames)
         except ValueError as e:
             bad += 1
             history.append("turn %d: your answer was unusable (%s); answer only the JSON object" % (turn, e))
@@ -875,12 +963,13 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
                 raise Stop(1, "the model gave up: %s" % why)
             return 0, "the model says the goal is reached: %s" % why
         before = state
+        seen = []
         if frames:
-            state, played, note = play_turn(game, frames, state, allow_save, until)
+            state, played, note = play_turn(game, frames, state, allow_save, until, seen)
         else:
             played, note = 0, ""
         refused += note.startswith("refused")
-        keep(turn, events(before, state) + (["the save guard refused confirm (%s)" % save_risk(before)]
+        keep(turn, events(before, state, seen) + (["the save guard refused confirm (%s)" % save_risk(before)]
                                             if note.startswith("refused") else []))
         w = walked(frames[:played], before, state)
         if w and (walk is None or w[0] >= walk[0]):
@@ -888,6 +977,8 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         what = change(before, state)
         if asked > max_frames:
             note = (note + "; " if note else "") + "cut to %d frames" % max_frames
+        if look and not note.startswith("refused"):
+            note = (note + "; " if note else "") + "stopped at look: the steps after it were not played"
         history.append("turn %d: %s -> %s%s" % (turn, do or "(nothing)", what, " (%s)" % note if note else ""))
         record.update(result=what, played=played, note=note)
         log.write(record, "%3d  %-34s  %s | %s -> %s%s  [%.4f USD]" % (
@@ -917,6 +1008,11 @@ def parse_args(argv):
     ap.add_argument("--log", default=None)
     ap.add_argument("--prompt", action="store_true")
     ap.add_argument("--fake", metavar="FILE")
+    ap.add_argument("--no-vision", action="store_true")
+    ap.add_argument("--screenshot-cmd", default=None)
+    ap.add_argument("--window", default="DELTARUNE")
+    ap.add_argument("--window-pid", type=int, default=None)
+    ap.add_argument("--frames-dir", default=None)
     args = ap.parse_args(argv)
     if args.model.lower() not in MODELS:
         ap.error("unknown model %s: flash or pro" % args.model)
@@ -956,25 +1052,62 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
         return 2
     path = args.log or ("" if args.prompt else
                         "deepseek-player-%s.jsonl" % datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    capture, vision = None, "off (--no-vision)"
+    if not args.no_vision:
+        if args.model not in VISION_MODELS:
+            vision = "off (%s does not take images)" % args.model
+        else:
+            try:
+                capture = screen_capture.make_capture(args.screenshot_cmd, args.window, args.window_pid)
+            except screen_capture.CaptureError as e:
+                vision = "off (%s)" % e
+    if capture is not None and args.frames_dir:
+        try:
+            os.makedirs(args.frames_dir, exist_ok=True)
+        except OSError as e:
+            print("error: --frames-dir: %s" % e, file=sys.stderr)
+            return 2
     game = agent_client.AgentClient(args.host, args.port, args.timeout)
     log = Log(path, out)
     code, why, tally = 0, "", {"usd": 0.0}
     try:
         game.connect()
         if args.prompt:
+            shot, no_shot = None, ""
+            if capture is not None:
+                try:
+                    shot = capture()
+                except screen_capture.CaptureError as e:
+                    no_shot = str(e)
             for m in messages(goal, args.max_frames, game.state(), [], 1, args.max_steps, args.allow_save,
-                              args.until, guide=args.guide):
-                print("--- %s\n%s" % (m["role"], m["content"]), file=out)
+                              args.until, guide=args.guide, vision=capture is not None, shot=shot,
+                              no_shot=no_shot):
+                print("--- %s\n%s" % (m["role"], text_of(m["content"])), file=out)
+                if not isinstance(m["content"], str):
+                    print("[screenshot: %s]" % shot.describe(), file=out)
+            if shot is not None and args.frames_dir:
+                with open(os.path.join(args.frames_dir, "prompt.%s" % shot.mime.split("/")[1]), "wb") as f:
+                    f.write(shot.data)
             return 0
-        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; log %s" % (
+        if capture is not None:
+            # one screenshot now, so that a capture that cannot work is seen before the first call
+            try:
+                first = capture()
+                vision = "on (%s, %s)" % (capture.what, first.describe())
+                if getattr(capture, "note", ""):
+                    vision += "; " + capture.note
+            except screen_capture.CaptureError as e:
+                vision = "on, but the first screenshot failed: %s" % e
+        print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; vision %s; log %s" % (
             "fake" if args.fake else args.model, args.reasoning, args.max_steps, args.max_usd, args.max_minutes,
             "allowed" if args.allow_save else "refused", "; until " + until_text(args.until) if args.until else "",
-            path), file=out)
+            vision, path), file=out)
         code, why = play(game, model, goal, max_steps=args.max_steps, max_usd=args.max_usd,
                          max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,
                          prices=PRICES.get(args.model, PRICES["deepseek-v4-pro"]),
                          auto_confirm=not args.no_auto_confirm, allow_save=args.allow_save,
-                         until=args.until, log=log, tally=tally, guide=args.guide)
+                         until=args.until, log=log, tally=tally, guide=args.guide, capture=capture,
+                         frames_dir=args.frames_dir)
     except Stop as e:
         code, why = e.code, e.why
     except agent_client.AgentError as e:
