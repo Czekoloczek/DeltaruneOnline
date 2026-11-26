@@ -23,7 +23,8 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
   same result, so no game objects need to be synchronized over the network.
 - **No input lag, no slowdown.** Each game measures its ping and sends its input just early enough that nobody ever
   waits, so the game keeps its full 30 fps. Your own SOUL is still drawn without delay, and bullets hit it where you
-  see it: your game decides your hits and tells the others, so dodging feels like single player.
+  see it: your game decides your hits and tells the others, so dodging feels like single player. The other players'
+  hearts are drawn faint on your screen (`other_souls`, 10 % by default), so you never mistake one for your own.
 
 ### Roadmap
 
@@ -37,11 +38,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 4. **Desync detection**: every N frames compare a hash of the game state (positions, RNG state, flags).
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
-6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL); next: your
-   character in the overworld and the FIGHT timing bar.
+6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL), and the
+   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; not yet
+   checked in the game); next: your character in the overworld and the FIGHT timing bar.
 7. **Online-only quality of life** (planned):
-   - **your own SOUL stands out in battles**: each player's heart is drawn clearly on their own screen and the
-     other players' hearts are dimmed, so several hearts are no longer confused;
    - **shared camera that splits when players drift apart**: one camera while everyone is close, split
      screen once a player walks too far away.
 8. **Session start**: send the host's save, mod settings (`keyconfig_mod.ini`) and language to every player
