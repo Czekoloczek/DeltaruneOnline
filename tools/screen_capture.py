@@ -3,15 +3,23 @@
 
     python3 tools/screen_capture.py shot.png                  save one screenshot and print its size
     python3 tools/screen_capture.py shot.png --window-pid 1234
+    python3 tools/screen_capture.py shot.png --screen-grab    (see below: when PrintWindow gives black)
     python3 tools/screen_capture.py shot.png --cmd "import -window root png:-"
 
 On Windows the game's window is found and captured directly (ctypes, GDI): a GameMaker window (class
 YYGameMakerYY) whose title contains --window (default DELTARUNE), or the one of process --window-pid. Its client
-area is captured with PrintWindow (which also works while other windows cover it), cut to the 4:3 picture in the
-middle when the window is wider or taller (fullscreen), and scaled with nearest neighbour to fit 640x480, the
-game's own resolution, so pixel art stays sharp. On other systems a command does the capture (--cmd): it must
-print one PNG, JPEG, GIF or WebP image on its standard output; it is sent as it is, so let it crop and scale.
-Under Proton on X11 or XWayland, for example:
+area is captured with PrintWindow (which asks the game's window for its own pixels, so windows over it are never in
+the picture), cut to the 4:3 picture in the middle when the window is wider or taller (fullscreen), and scaled
+with nearest neighbour to fit 640x480, the game's own resolution, so pixel art stays sharp.
+
+If PrintWindow gives a black picture (some GPU-drawn windows do), there is no screenshot, unless --screen-grab is
+given: then the game's part of the screen is copied instead. That copy would hold any window over the game (a chat,
+a browser) and the picture is sent to DeepSeek, so it is taken only when no other visible window overlaps the
+game; otherwise that turn goes without a picture and says which kind of window (its class) is in the way.
+
+On other systems a command does the capture (--cmd): it must print one PNG, JPEG, GIF or WebP image on its
+standard output; it is sent as it is, so let it crop and scale. It has 10 s; then it and everything it started
+are stopped. Under Proton on X11 or XWayland, for example:
 
     import -window "$(xdotool search --name '^DELTARUNE$' | head -1)" -resize 640x480 png:-
 
@@ -19,6 +27,7 @@ Nothing here touches the game: it only reads pixels of the screen, so the lockst
 """
 import argparse
 import os
+import signal
 import struct
 import subprocess
 import sys
@@ -122,29 +131,62 @@ class CommandCapture:
         self.what = "command"
 
     def __call__(self):
+        # its own process group, so that a timeout stops the shell and everything it started: a child left
+        # running would hold the output pipes open and the wait for them would not end
+        kw = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+              else {"start_new_session": True})
         try:
-            p = subprocess.run(self.cmd, shell=True, capture_output=True, timeout=self.timeout)
-        except subprocess.TimeoutExpired:
-            raise CaptureError("the screenshot command took more than %d s" % self.timeout)
+            p = subprocess.Popen(self.cmd, shell=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, **kw)
         except OSError as e:
             raise CaptureError("the screenshot command failed: %s" % e)
-        if p.returncode != 0 or not p.stdout:
-            err = p.stderr.decode("utf-8", "replace").strip().splitlines()
+        try:
+            out, err = p.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            stop_tree(p)
+            raise CaptureError("the screenshot command took more than %d s (stopped)" % self.timeout)
+        if p.returncode != 0 or not out:
+            lines = err.decode("utf-8", "replace").strip().splitlines()
             raise CaptureError("the screenshot command failed (exit %d)%s" % (
-                p.returncode, ": " + err[-1][:200] if err else ""))
-        mime, w, h = image_info(p.stdout)
-        return Shot(p.stdout, mime, w, h)
+                p.returncode, ": " + lines[-1][:200] if lines else ""))
+        mime, w, h = image_info(out)
+        return Shot(out, mime, w, h)
+
+
+def stop_tree(p):
+    """Stops a process started in its own group and everything it started, then waits a little for it."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        p.kill()
+    except OSError:
+        pass
+    try:
+        p.communicate(timeout=2)
+    except (subprocess.TimeoutExpired, ValueError):
+        for f in (p.stdout, p.stderr):
+            try:
+                f.close()
+            except OSError:
+                pass
 
 
 class WindowsCapture:
     """The game's window on Windows, through GDI (ctypes). The window is looked up again at every capture, so a
     chapter change (a new game process with a new window) is followed."""
 
-    def __init__(self, title="DELTARUNE", pid=None):
+    def __init__(self, title="DELTARUNE", pid=None, screen=False):
         import ctypes
         from ctypes import wintypes
         self.ctypes, self.wintypes = ctypes, wintypes
         self.title, self.pid = title, pid
+        self.screen = screen    # --screen-grab: copy from the screen when PrintWindow gives black
         self.what = "window"
         self.note = ""          # set when several windows match
         self.user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -158,6 +200,8 @@ class WindowsCapture:
                              (u.GetWindowTextW, [vp, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
                              (u.GetClassNameW, [vp, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
                              (u.GetWindowThreadProcessId, [vp, ctypes.POINTER(wintypes.DWORD)], wintypes.DWORD),
+                             (u.GetWindow, [vp, ctypes.c_uint], vp),
+                             (u.GetWindowRect, [vp, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
                              (g.CreateCompatibleDC, [vp], vp), (g.CreateCompatibleBitmap, [vp, ctypes.c_int,
                                                                                          ctypes.c_int], vp),
                              (g.SelectObject, [vp, vp], vp), (g.DeleteObject, [vp], wintypes.BOOL),
@@ -167,6 +211,12 @@ class WindowsCapture:
                              (g.GetDIBits, [vp, vp, ctypes.c_uint, ctypes.c_uint, vp, vp, ctypes.c_uint],
                               ctypes.c_int)):
             f.argtypes, f.restype = args, res
+        try:
+            self.dwmapi = ctypes.WinDLL("dwmapi")
+            self.dwmapi.DwmGetWindowAttribute.argtypes = [vp, wintypes.DWORD, vp, wintypes.DWORD]
+            self.dwmapi.DwmGetWindowAttribute.restype = ctypes.c_long
+        except (AttributeError, OSError):
+            self.dwmapi = None
         # physical pixels, not the scaled ones of a high-DPI display
         try:
             u.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
@@ -215,6 +265,39 @@ class WindowsCapture:
         else:
             self.note = ""
         return found[0][0]
+
+    def covered_by(self, hwnd, w, h):
+        """The class name of a visible window of another process that lies over part of the game's client area
+        (w x h), or None. Goes up the z-order from the game's window: everything above it, topmost ones too."""
+        ctypes, wintypes, u = self.ctypes, self.wintypes, self.user32
+        pt = wintypes.POINT(0, 0)
+        u.ClientToScreen(hwnd, ctypes.byref(pt))
+        game = (pt.x, pt.y, pt.x + w, pt.y + h)
+        own = wintypes.DWORD()
+        u.GetWindowThreadProcessId(hwnd, ctypes.byref(own))
+        other = u.GetWindow(hwnd, 3)            # GW_HWNDPREV: the window just above
+        for _ in range(100000):
+            if not other:
+                return None
+            pid, r = wintypes.DWORD(), wintypes.RECT()
+            u.GetWindowThreadProcessId(other, ctypes.byref(pid))
+            if (pid.value != own.value and u.IsWindowVisible(other) and not u.IsIconic(other)
+                    and not self.cloaked(other) and u.GetWindowRect(other, ctypes.byref(r))
+                    and r.left < game[2] and r.right > game[0] and r.top < game[3] and r.bottom > game[1]):
+                buf = ctypes.create_unicode_buffer(256)
+                u.GetClassNameW(other, buf, 256)
+                return buf.value or "?"
+            other = u.GetWindow(other, 3)
+        return "?"                              # a z-order this long is not walked to its end: count it covered
+
+    def cloaked(self, hwnd):
+        """Whether the window is hidden by the system although marked visible (another virtual desktop, a
+        suspended app)."""
+        if self.dwmapi is None:
+            return False
+        value = self.wintypes.DWORD()
+        ok = self.dwmapi.DwmGetWindowAttribute(hwnd, 14, self.ctypes.byref(value), 4) == 0     # DWMWA_CLOAKED
+        return ok and value.value != 0
 
     def grab(self, hwnd, w, h, from_screen):
         ctypes, wintypes, u, g = self.ctypes, self.wintypes, self.user32, self.gdi32
@@ -282,9 +365,18 @@ class WindowsCapture:
         if w <= 0 or h <= 0:
             raise CaptureError("the game window has no size")
         raw = self.grab(hwnd, w, h, False)
-        # PrintWindow can give black for a window drawn by the GPU; then copy it from the screen (it must be
-        # visible there)
+        # PrintWindow can give black for a window drawn by the GPU. Copying the game's part of the screen instead
+        # would take whatever window lies over the game, and the picture leaves the PC: so only with
+        # --screen-grab, and only while no other window overlaps the game.
         if raw is None or not any(raw[i:i + 3] != b"\x00\x00\x00" for i in range(0, len(raw), 4 * 997)):
+            if not self.screen:
+                raise CaptureError("PrintWindow gave %s picture of the game window; --screen-grab copies the "
+                                   "game's part of the screen instead (only while no other window overlaps it)"
+                                   % ("no" if raw is None else "a black"))
+            cover = self.covered_by(hwnd, w, h)
+            if cover is not None:
+                raise CaptureError("PrintWindow gave a black picture and another window (class %s) overlaps the "
+                                   "game, so the screen is not copied" % cover)
             raw = self.grab(hwnd, w, h, True)
             if raw is None:
                 raise CaptureError("the game window could not be captured")
@@ -293,14 +385,14 @@ class WindowsCapture:
         return Shot(png(size[0], size[1], bgra_to_rgb(raw, w * 4, area, size)), "image/png", size[0], size[1])
 
 
-def make_capture(cmd=None, title="DELTARUNE", pid=None):
-    """The capture to use: the command if one is given, else the window on Windows. Raises CaptureError when
-    neither is possible here."""
+def make_capture(cmd=None, title="DELTARUNE", pid=None, screen=False):
+    """The capture to use: the command if one is given, else the window on Windows (screen: --screen-grab).
+    Raises CaptureError when neither is possible here."""
     if cmd:
         return CommandCapture(cmd)
     if os.name == "nt":
         try:
-            return WindowsCapture(title, pid)
+            return WindowsCapture(title, pid, screen)
         except Exception as e:
             raise CaptureError("cannot capture windows here: %r" % e)
     raise CaptureError("screenshots need --screenshot-cmd on this system (built in only on Windows)")
@@ -312,9 +404,11 @@ def main(argv):
     ap.add_argument("--cmd", default=None, help="a command that prints an image (instead of the window)")
     ap.add_argument("--window", default="DELTARUNE", help="part of the game window's title")
     ap.add_argument("--window-pid", type=int, default=None, help="the game's process id")
+    ap.add_argument("--screen-grab", action="store_true",
+                    help="when PrintWindow gives black, copy the game's part of the screen (only if nothing covers it)")
     args = ap.parse_args(argv)
     try:
-        shot = make_capture(args.cmd, args.window, args.window_pid)()
+        shot = make_capture(args.cmd, args.window, args.window_pid, args.screen_grab)()
     except CaptureError as e:
         print("error: %s" % e, file=sys.stderr)
         return 1

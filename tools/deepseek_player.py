@@ -21,8 +21,10 @@ What the model is told:
     own 640x480, about 206 image tokens, about 0.00006 USD at the peak price. The camera follows the player, so a
     picture is only good for the turn it was taken in; the model can put "look" among its steps to be asked again
     with a new picture partway through a long move (the steps after "look" are not played). On Windows the window
-    is captured directly (tools/screen_capture.py); elsewhere --screenshot-cmd gives a command that prints the
-    image. When a capture fails, the turn goes without a picture and the model is told why;
+    is captured directly (tools/screen_capture.py: PrintWindow, which never holds other windows; --screen-grab
+    copies the screen when PrintWindow gives black, only while nothing overlaps the game); elsewhere
+    --screenshot-cmd gives a command that prints the image. When a capture fails, the turn goes without a picture
+    and the model is told why;
   - with --until, whether the program's goal check is met yet. The program then judges the goal: an answer
     "done" before the check is met is told back to the model and the run goes on (the third one ends it, exit 1).
 
@@ -66,6 +68,8 @@ Other options:
                       see tools/screen_capture.py for an X11/XWayland example)
   --window <title>    part of the game window's title on Windows (default DELTARUNE); --window-pid <pid> picks
                       one of two copies on one PC
+  --screen-grab       on Windows, when PrintWindow gives a black picture, copy the game's part of the screen
+                      instead; only while no other window overlaps the game, since the picture goes to DeepSeek
   --frames-dir <dir>  also save every screenshot sent, as turn-NNN.png (to see what the model saw)
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
@@ -555,11 +559,16 @@ Answer = collections.namedtuple("Answer", "why do frames done asked remember loo
 
 
 def split_look(do):
-    """Steps text -> (the steps before the first "look" step, True), or (the text, False) without one."""
-    parts = re.split(r"(;|\n)", do)
-    for i in range(0, len(parts), 2):
-        if parts[i].split("#", 1)[0].strip().lower() == "look":
-            return "".join(parts[:i]).strip().rstrip(";").strip(), True
+    """Steps text -> (the steps before the first "look" step, True), or (the text, False) without one. A line's
+    "#" starts a comment, as in the Agent API (tools/agent_client.py), so a "look" after it is not a step."""
+    before = []
+    for line in do.splitlines():
+        steps = line.split("#", 1)[0].split(";")
+        for i, step in enumerate(steps):
+            if step.strip().lower() == "look":
+                before.append(";".join(steps[:i]))
+                return "\n".join(before).strip().rstrip(";").strip(), True
+        before.append(line)
     return do, False
 
 
@@ -1012,6 +1021,7 @@ def parse_args(argv):
     ap.add_argument("--screenshot-cmd", default=None)
     ap.add_argument("--window", default="DELTARUNE")
     ap.add_argument("--window-pid", type=int, default=None)
+    ap.add_argument("--screen-grab", action="store_true")
     ap.add_argument("--frames-dir", default=None)
     args = ap.parse_args(argv)
     if args.model.lower() not in MODELS:
@@ -1058,7 +1068,8 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
             vision = "off (%s does not take images)" % args.model
         else:
             try:
-                capture = screen_capture.make_capture(args.screenshot_cmd, args.window, args.window_pid)
+                capture = screen_capture.make_capture(args.screenshot_cmd, args.window, args.window_pid,
+                                                       args.screen_grab)
             except screen_capture.CaptureError as e:
                 vision = "off (%s)" % e
     if capture is not None and args.frames_dir:

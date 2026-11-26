@@ -6,10 +6,13 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import zlib
 
@@ -20,6 +23,12 @@ import deepseek_player as p  # noqa: E402
 import screen_capture  # noqa: E402
 
 KEY = "sk-test0123456789abcdef"
+PRINT_FILE = "import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())"
+
+
+def shell(*args):
+    """A command line for the shell that subprocess uses here, each argument kept whole (paths with spaces)."""
+    return subprocess.list2cmdline(args) if os.name == "nt" else " ".join(shlex.quote(a) for a in args)
 
 
 class FakeGame:
@@ -308,13 +317,21 @@ class Vision(unittest.TestCase):
             path = os.path.join(tmp, "shot.png")
             with open(path, "wb") as f:
                 f.write(self.shot().data)
-            shot = screen_capture.CommandCapture("%s -c \"import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb')"
-                                                 ".read())\" %s" % (sys.executable, path))()
+            shot = screen_capture.CommandCapture(shell(sys.executable, "-c", PRINT_FILE, path))()
             self.assertEqual((shot.mime, shot.width, shot.height, shot.data), ("image/png", 2, 1, self.shot().data))
         with self.assertRaises(screen_capture.CaptureError):
-            screen_capture.CommandCapture("%s -c \"print('not an image')\"" % sys.executable)()
-        with self.assertRaises(screen_capture.CaptureError):
-            screen_capture.CommandCapture("%s -c \"import sys; sys.exit(3)\"" % sys.executable)()
+            screen_capture.CommandCapture(shell(sys.executable, "-c", "print('not an image')"))()
+        with self.assertRaisesRegex(screen_capture.CaptureError, r"\(exit 3\)"):
+            screen_capture.CommandCapture(shell(sys.executable, "-c", "import sys; sys.exit(3)"))()
+
+    def test_command_capture_timeout_stops_its_children(self):
+        # the command starts a child that keeps the output pipe open; the timeout must still end the capture
+        hang = ("import subprocess, sys, time; "
+                "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)")
+        start = time.monotonic()
+        with self.assertRaisesRegex(screen_capture.CaptureError, "more than 1 s"):
+            screen_capture.CommandCapture(shell(sys.executable, "-c", hang), timeout=1)()
+        self.assertLess(time.monotonic() - start, 15)
 
 
 class Answers(unittest.TestCase):
@@ -337,6 +354,9 @@ class Answers(unittest.TestCase):
         self.assertEqual(p.split_look("10 up\n LOOK # see the room\nwait 5"), ("10 up", True))
         self.assertEqual(p.split_look("look"), ("", True))
         self.assertEqual(p.split_look("20 right"), ("20 right", False))
+        # "#" starts a comment as in the Agent API: a "look" inside one is no step
+        self.assertEqual(p.split_look("20 right # note; look\n40 up"), ("20 right # note; look\n40 up", False))
+        self.assertEqual(p.split_look("20 right # then look\nlook; 40 up"), ("20 right # then look", True))
         self.assertEqual(p.parse_answer(answer("look"), 150).frames, [])
         self.assertEqual(p.parse_answer(answer("look; 99999 right"), 150).frames, [])    # never played
 
@@ -409,8 +429,10 @@ def run_main(game, args, env=None, http=None):
     with tempfile.TemporaryDirectory() as tmp:
         log = os.path.join(tmp, "log.jsonl")
         with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            # no screenshots unless a test asks for them: on Windows with the game open the window would be captured
+            vision = [] if "--screenshot-cmd" in args else ["--no-vision"]
             code = p.main(["--port", str(game.port), "--pause", "0", "--log", log,
-                           "--key-file", os.path.join(tmp, "none")] + args, env or {}, out, http or Http([]))
+                           "--key-file", os.path.join(tmp, "none")] + vision + args, env or {}, out, http or Http([]))
         with open(log, encoding="utf-8") as f:
             records = [json.loads(line) for line in f]
     return code, out.getvalue() + err.getvalue(), records
@@ -604,8 +626,7 @@ class Loop(unittest.TestCase):
         path = os.path.join(tmp, "shot.png")
         with open(path, "wb") as f:
             f.write(screen_capture.png(2, 1, b"\x01\x02\x03\x04\x05\x06"))
-        return "%s -c \"import sys; sys.stdout.buffer.write(open(sys.argv[1], 'rb').read())\" %s" % (
-            sys.executable, path)
+        return shell(sys.executable, "-c", PRINT_FILE, path)
 
     def test_a_screenshot_every_turn_and_look(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -630,7 +651,7 @@ class Loop(unittest.TestCase):
 
     def test_failed_screenshot_and_no_vision(self):
         http = Http([answer("", "ok", True)])
-        code, out, records = run_main(self.game, ["go", "--screenshot-cmd", "%s -c \"pass\"" % sys.executable],
+        code, out, records = run_main(self.game, ["go", "--screenshot-cmd", shell(sys.executable, "-c", "pass")],
                                       {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 0, out)
         self.assertIn("vision on, but the first screenshot failed", out)
@@ -838,7 +859,8 @@ class Loop(unittest.TestCase):
 
     def test_prompt_only(self):
         out = io.StringIO()
-        code = p.main(["walk to the save point", "--port", str(self.game.port), "--prompt"], {}, out, Http([]))
+        code = p.main(["walk to the save point", "--port", str(self.game.port), "--prompt", "--no-vision"], {}, out,
+                      Http([]))
         self.assertEqual(code, 0)
         self.assertIn("Goal: walk to the save point", out.getvalue())
         self.assertIn("nearby: obj_savepoint (save point) (+90,-10)", out.getvalue())

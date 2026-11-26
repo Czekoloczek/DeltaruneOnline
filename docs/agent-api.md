@@ -64,13 +64,17 @@ than 3600 frames is refused before it is built).
   nothing). The camera follows the player, so a picture is only good for its turn: the model can put `look` among
   its steps ("60 right; look; 40 up") to stop there and be asked again with a new picture. On Windows the player
   captures the game's window itself (`tools/screen_capture.py`, GDI through ctypes: the client area, cut to the
-  4:3 picture when fullscreen). Elsewhere `--screenshot-cmd` gives a command that prints the image, for example
-  under Proton on X11/XWayland `import -window "$(xdotool search --name '^DELTARUNE$' | head -1)" -resize 640x480
-  png:-`. A failed capture costs only that turn's picture (the model is told why). `--no-vision` turns it off,
-  `--frames-dir <dir>` saves every picture sent, and `python3 tools/screen_capture.py shot.png` checks the capture
-  without DeepSeek. The image goes as a `data:` URL in the user message
-  ([api-docs.deepseek.com/guides/vision](https://api-docs.deepseek.com/guides/vision/)); `deepseek-v4-pro` takes
-  no images.
+  4:3 picture when fullscreen). It uses PrintWindow, which asks the game's window for its own pixels, so a window
+  over the game is never in the picture. If PrintWindow gives black, that turn has no picture, unless
+  `--screen-grab` is given: then the game's part of the screen is copied, but only while no visible window of
+  another program overlaps the game (such a copy would send that window to DeepSeek). Elsewhere `--screenshot-cmd`
+  gives a command that prints the image, for example under Proton on X11/XWayland
+  `import -window "$(xdotool search --name '^DELTARUNE$' | head -1)" -resize 640x480 png:-`; it has 10 s, then it
+  and everything it started are stopped. A failed capture costs only that turn's picture (the model is told why).
+  `--no-vision` turns it off, `--frames-dir <dir>` saves every picture sent, and
+  `python3 tools/screen_capture.py shot.png` checks the capture without DeepSeek. The image goes as a `data:` URL
+  in the user message ([api-docs.deepseek.com/guides/vision](https://api-docs.deepseek.com/guides/vision/));
+  `deepseek-v4-pro` takes no images.
 - **What it remembers.** "Done so far" is kept for the whole run (the newest 60 entries): rooms entered, menus
   opened and closed, choices and what was picked, battles, the start of each dialogue, a save the guard refused,
   and notes the model asks to keep by adding `"remember": "..."` to its answer. The last 30 turns come after it.
