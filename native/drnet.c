@@ -22,7 +22,7 @@
  * GameMaker calling convention: cdecl, numbers are double, strings are char*.
  *
  *   drnet_option(name, value)                                     -> 1 (before drnet_start: "lag", "jitter",
- *                                                                    "maxdelay", "slack"; see below)
+ *                                                                    "maxdelay", "slack", "session"; see below)
  *   drnet_set_host(host_ip)                                       -> 1 (client: address of the host)
  *   drnet_start(is_host, port, players, my_player, delay)         -> 1 ok, 0 error (delay -1 = automatic)
  *   (GameMaker refuses DLL functions with more than 4 arguments unless all are numbers.)
@@ -30,6 +30,9 @@
  *                                                                    (the host checks protocol, player count and
  *                                                                    data.win SHA-256 in HELLO and welcomes clients
  *                                                                    once all are in)
+ *   drnet_session()                                               -> the host's session flags once connected
+ *                                                                    (the host's own on the host, from WELCOME on
+ *                                                                    a client), -1 before
  *   drnet_set_aux(value)                                          -> 1 (event sent with the next input, e.g. a hit)
  *   drnet_exchange(frame, my_bits)                                -> bits of all players for `frame`
  *                                                                    (p1 | p2 << 16 | p3 << 32), -1 on timeout,
@@ -61,7 +64,9 @@
  *
  * Options: lag = extra one-way latency in ms added to every sent packet (testing), jitter = random extra
  * 0..jitter ms (testing), maxdelay = upper limit of the automatic delay (default 6), slack = ms of one-way
- * latency that fit into a frame without waiting (default 16).
+ * latency that fit into a frame without waiting (default 16), session = the host's session flags (bit 0: immortal
+ * SOUL): the host sends them in WELCOME and every machine applies the host's, so settings that change the game stay
+ * the same everywhere (a client's own value is only logged).
  */
 #define WIN32_LEAN_AND_MEAN
 #include <winsock2.h>
@@ -80,7 +85,7 @@
 #define WINDOW 16
 #define HRING 64
 #define MAGIC 0x44524F4E /* "DRON" */
-#define PROTO 4   /* 4: data.win SHA-256 in HELLO and REJECT */
+#define PROTO 5   /* 4: data.win SHA-256 in HELLO and REJECT; 5: session flags in WELCOME */
 #define LAG_BIT 0x0800
 #define FRAME_MS (1000.0 / 30.0)
 #define QSIZE 1024
@@ -92,6 +97,7 @@ enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3 };
 #pragma pack(push, 1)
 typedef struct { uint32_t magic; uint8_t type; uint8_t player; uint8_t players; uint8_t proto; } hdr_t;
 typedef struct { hdr_t h; uint8_t data_hash[32]; } hello_pkt;
+typedef struct { hdr_t h; uint32_t flags; } welcome_pkt;    /* the host's session flags */
 typedef struct { hdr_t h; uint8_t reason; uint8_t hash_prefix[6]; } reject_pkt;
 typedef struct {
     hdr_t h;
@@ -118,6 +124,9 @@ static int is_host, players, me, connected, connect_err;
 static uint8_t my_data_hash[32];            /* SHA-256 of data.win, or all zeros when no data.win is present */
 static int has_data_hash;
 static char last_reject[192];               /* host: last refused peer reason (shown if connect times out) */
+static uint32_t opt_session;                /* "session" option: the session flags this machine asks for */
+static uint32_t session_flags;              /* the host's session flags, valid once session_known */
+static int session_known;
 static int reject_logged;
 static struct sockaddr_in peer[MAXP + 1];   /* host: client addresses; client: peer[1] = host */
 static int have_peer[MAXP + 1];
@@ -585,7 +594,7 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
     }
     if (h->type == T_HELLO && is_host) {
         const hello_pkt *hp = (const hello_pkt *)buf;
-        hdr_t w; int q, all = 1;
+        welcome_pkt w; int q, all = 1;
         if (h->player < 2 || h->player > MAXP || h->players < 2 || h->players > MAXP) return;
         if (h->players != players) {
             char msg[192];
@@ -613,7 +622,8 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         if (connected) {
             /* Only retransmit WELCOME to the already-accepted peer for this slot; never overwrite peer[] after connect. */
             if (have_peer[h->player] && same_addr(&peer[h->player], from)) {
-                fill_hdr(&w, T_WELCOME, 1);
+                fill_hdr(&w.h, T_WELCOME, 1);
+                w.flags = session_flags;
                 send_to(from, &w, sizeof(w));
             }
             return;
@@ -624,8 +634,9 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
            HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. */
         for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
         if (all) {
-            fill_hdr(&w, T_WELCOME, 1);
-            connected = 1;
+            fill_hdr(&w.h, T_WELCOME, 1);
+            w.flags = session_flags;
+            connected = 1; session_known = 1;
             for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
         }
     } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
@@ -644,7 +655,17 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             logm("rejected by host: %s", status);
         }
     } else if (h->type == T_WELCOME && !is_host && have_peer[1] && same_addr(from, &peer[1])) {
-        if (!connect_err) connected = 1;
+        if (!connect_err && !connected) {
+            if (len < (int)sizeof(welcome_pkt)) {
+                connect_err = 1;
+                snprintf(status, sizeof(status), "different DeltaruneOnline version than the host (short WELCOME)");
+                logm("%s", status);
+            } else {
+                session_flags = ((const welcome_pkt *)buf)->flags;
+                session_known = 1;
+                connected = 1;
+            }
+        }
     } else if ((h->type == T_INPUT || h->type == T_BYE) && len >= (int)sizeof(input_pkt)) {
         const input_pkt *k = (const input_pkt *)buf; int i;
         if (k->h.player < 1 || k->h.player > players || k->h.player == me) return;
@@ -786,6 +807,7 @@ EXPORT double drnet_option(const char *name, double value)
     else if (!strcmp(name, "jitter")) jitter_ms = value;
     else if (!strcmp(name, "maxdelay")) max_delay = value < 0 ? 0 : (value > 30 ? 30 : (int)value);
     else if (!strcmp(name, "slack")) slack_ms = value;
+    else if (!strcmp(name, "session")) opt_session = value > 0 ? (uint32_t)value : 0;
     else return 0;
     logm("option %s = %g", name, value);
     return 1;
@@ -844,6 +866,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
         if (inet_pton(AF_INET, host_ip, &peer[1].sin_addr) != 1) { snprintf(status, sizeof(status), "bad host address %s", host_ip); logm("%s", status); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return 0; }
         have_peer[1] = 1;
     }
+    session_flags = is_host ? opt_session : 0; session_known = 0;
     connected = 0; connect_err = 0; last_reject[0] = 0; reject_logged = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
     srand((unsigned)now_us());
     running = 1;
@@ -867,7 +890,10 @@ EXPORT double drnet_connect(double timeout_ms)
         } else if (connected) {
             done = 1;
             update_status();
-            logm("%s", is_host ? "all players connected" : "connected to host");
+            logm("%s, session flags %u", is_host ? "all players connected" : "connected to host", (unsigned)session_flags);
+            if (!is_host && session_flags != opt_session)
+                logm("session flags %u from the host apply here (dronline.ini on this machine asks for %u)",
+                     (unsigned)session_flags, (unsigned)opt_session);
         } else if (!is_host && GetTickCount() - last_hello > 200) {
             hello_pkt hp;
             fill_hdr(&hp.h, T_HELLO, me);
@@ -890,6 +916,16 @@ EXPORT double drnet_connect(double timeout_ms)
     logm("%s", status);
     unlock();
     return 0;
+}
+
+EXPORT double drnet_session(void)
+{
+    double r;
+    if (!cs_ready) return -1;
+    lock();
+    r = session_known ? (double)session_flags : -1;
+    unlock();
+    return r;
 }
 
 EXPORT double drnet_set_aux(double value)

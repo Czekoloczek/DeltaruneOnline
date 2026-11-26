@@ -51,13 +51,15 @@ the native DLL `native/drnet.c` (Windows build, also under Proton) handles UDP, 
 A network thread receives packets the moment they arrive, so the ping is measured exactly and the host relays
 input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
-last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
+last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `WELCOME` / `REJECT`, protocol 5),
 `drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
 refusing to start if `data.win` cannot be read — and the host rejects clients with a build, protocol or player-count
 mismatch (showing both SHA-256 hash prefixes on a `data.win` mismatch) while keeping the lobby open for valid peers
-so an incompatible or stray packet cannot abort a session. All players must update `drnet.dll` together: mixing
-protocol 3 and protocol 4 peers can still hit the connection timeout on the protocol-3 side. State fingerprints are
-exchanged every 30 frames to detect desyncs.
+so an incompatible or stray packet cannot abort a session. `WELCOME` carries the host's session flags (bit 0: immortal
+SOUL, below), and every machine applies the host's, so a setting that changes the game cannot differ between
+players. All players must update `drnet.dll` together: mixing protocol 4 and protocol 5 peers is refused as a
+version mismatch, and mixing protocol 3 with a newer one can still hit the connection timeout on the protocol-3 side.
+State fingerprints are exchanged every 30 frames to detect desyncs.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -114,6 +116,29 @@ The price: the other players' hearts on your screen lag behind what they see by 
 bullet seems to pass through another player's heart without a hit, or to hit it from a distance. Every hit
 follows what the dodging player saw.
 
+## Immortal SOUL (test aid)
+
+`immortal=1` in `[online]` keeps the party alive, so an AI player (`tools/deepseek_player.py`, which cannot dodge
+bullets) or a tester can get through battles. It works in every mode but `off`; the status line then shows
+`IMMORTAL SOUL`.
+
+- **Where.** In Chapter 5 the bullets reach `scr_damage` or `scr_damage_all` through obj_collidebullet's User
+  Event 5 (also from the own SOUL hit path above). `scr_damage_proportional`, `scr_damage_sneo_final_attack`,
+  `scr_damage_all_overworld` and `scr_damage_all_platmode` lower HP too, and each of these scripts ends with the
+  game-over check: no party member above 0 HP calls `scr_gameover`. A few objects call `scr_gameover` directly.
+- **How.** The patcher puts `if (dro_immortal()) return;` at the start of each damage script, so HP never drops,
+  and `if (dro_immortal_gameover()) return;` at the start of `scr_gameover`, which gives every party member at 0 HP
+  their full HP back and skips the game over. It is all or nothing like the own SOUL hooks: if `scr_damage` or
+  `scr_gameover` is missing or a script looks different, nothing changes, the patcher prints why after "immortal
+  SOUL hooks", and the status line says `immortal SOUL not in this build`.
+- **Story losses still happen.** With `global.flag[35]` set, running out of HP is a scripted loss (the battle goes
+  on) or an instant retry, so the guards let damage through then; some story battles need it.
+- **Online.** HP is shared state, so immortality must be the same on every machine in every frame. The host's
+  value goes to the clients in `WELCOME`, every machine sets it in the frame it connects (frame 1, before
+  anything can hurt), and a client's own `immortal=` is only logged in `drnet.log`. The hooks only read shared
+  state, so the lockstep and the desync check are unchanged.
+- **Not tried in the game yet.**
+
 `native/test_drnet.c` checks the DLL alone: host and client exchange pseudo-random input and events under
 Wine, optionally with test latency, and print running checksums of everything they received; they must match.
 Results: no latency → delay 0, 33 ms frames; 30 ms each way → ping 61 ms, delay 1, 33 ms frames; 60 ms each
@@ -152,7 +177,8 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 
 - `python3 -m unittest discover -s tests -v` (standard library only):
   - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
-    settings) and the obj_heart hooks, including "all or nothing" when the game's code looks different. The GML
+    settings), the obj_heart hooks and the immortal SOUL guards, including "all or nothing" when the game's code
+    looks different. The GML
     snippets are written for the tests and only imitate the game's code.
   - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
@@ -161,7 +187,7 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
     `config/dronline.ini.example` and in the settings comment of `gml/scr_dronline.gml`.
 - `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]`: runs `test_drnet.exe` as a
   host and its clients and fails unless every side ends with the same checksum of all received input and no
-  desync. With `late_s`, the last client starts that many seconds after the others. On Linux it uses Wine
+  desync, and uses the host's session flags (the host asks for 5, the clients for 0). With `late_s`, the last client starts that many seconds after the others. On Linux it uses Wine
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.

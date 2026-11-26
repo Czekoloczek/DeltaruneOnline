@@ -56,6 +56,7 @@ Fn("drnet_pending", D, D);
 Fn("drnet_delay", D);
 Fn("drnet_ping", D);
 Fn("drnet_wait", D);
+Fn("drnet_session", D);
 // Agent API (docs/agent-api.md): the protocol lives in the DLL, the game only supplies its state and takes input.
 Fn("drnet_agent_start", D, D);
 Fn("drnet_agent_frame", D);
