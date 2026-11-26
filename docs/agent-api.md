@@ -47,9 +47,22 @@ python3 tools/deepseek_player.py "walk to the save point and open its menu" --un
 
 Every turn it reads the state, sends DeepSeek a few lines about it (room, where the player is, the dialogue, a
 choice, the save point menu when the state has it, the nearest objects with their offset from the player, the
-walking speed measured so far), the goal and the last six turns, and plays the steps the model answers with (the
-text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s; an answer of more than 3600 frames is
-refused before it is built).
+walking speed measured so far), the goal, what is done so far and the last 30 turns, and plays the steps the model
+answers with (the text of `agent_client.py`, at most `--max-frames` frames, default 150 = 5 s; an answer of more
+than 3600 frames is refused before it is built).
+
+- **What it knows about the game.** The system prompt carries a guide, `tools/deepseek_guide.md`: what each button
+  does, that "the menu" in a goal means the Dark World menu and not a save point's, how that menu and a save point
+  work, dialogue and choices, rooms and exits, battles. `--guide <file>` sends another one, `--guide none` none.
+  The guide is part of the system prompt, which stays the same every turn, so after the first call it is billed
+  at the cache-hit price. The state's numbers come in words too: `interact=5: the Dark World menu is open`, the
+  save point menu as "the list of file slots, cursor on file slot 2", `obj_savepoint (save point)`, and `menuno`
+  only while the Dark World menu is open (it keeps an old value otherwise).
+- **What it remembers.** "Done so far" is kept for the whole run (the newest 60 entries): rooms entered, menus
+  opened and closed, choices and what was picked, battles, the start of each dialogue, a save the guard refused,
+  and notes the model asks to keep by adding `"remember": "..."` to its answer. The last 30 turns come after it.
+  Before this, the model saw only six turns, and the program's own dialogue turns at a save point filled them, so a
+  model asked to open "the menu" walked back to the save point and opened its menu again and again.
 
 - **One screen at a time.** The steps are played in pieces, a new piece at every press of confirm, cancel or
   menu and every second of a long walk or wait, and the rest is dropped as soon as the screen changes (a dialogue,
@@ -67,15 +80,19 @@ refused before it is built).
   build that does not have it, nothing stops a save.
 - **Ending the run.** The model says when the goal is reached (exit 0) or gives up (1); `--until <key>` or
   `--until <key>=<value>` ends it as soon as the state meets that (exit 0, no call needed); a limit ends it with 3.
+  With `--until` the program judges the goal: every turn tells the model whether the check is met yet, and an
+  answer "done" before it is met is told back to the model and the run goes on (the third such answer ends it with
+  exit 1). Give a goal that is a state an `--until` (for "open the menu": `--until interact=5`).
 - **Key.** The environment variable `DEEPSEEK_API_KEY`, or else the file `~/.config/deltarune-online/deepseek.env`
   (`--key-file` picks another) with the line `DEEPSEEK_API_KEY=<key>`; `chmod 600` it, and never put it in the
   repository. The key goes only into the requests to api.deepseek.com and is never printed or logged.
 - **Cost.** The default is `deepseek-flash` without thinking (`--model pro`, `--reasoning low|high|max` change
   that). The system prompt is the same in every turn, so DeepSeek's context cache bills it at the cache-hit price
-  after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.05, counted
+  after the first call. Limits: `--max-steps` calls to the model (default 40), `--max-usd` (default 0.50, counted
   at the peak prices, and the run stops before a call that could pass it), `--max-minutes` (20), and `--pause`
-  (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high;
-  the runs in the game cost about 0.0002 USD a call at peak prices.
+  (0.5 s) between calls. The estimate before a call counts a token for every byte of the prompt, so it is high
+  (up to about 0.005 USD a call with the guide and a full history); the runs in the game cost about 0.0002 USD a
+  call at peak prices before the guide and the longer history, and all four together less than 0.01 USD.
 - **Log.** One line per turn on the screen (what it saw, why, what it pressed, what changed, what was dropped or
   refused, the money spent so far), and every turn as JSON in `deepseek-player-<date>-<time>.jsonl` (`--log`):
   the state as sent, the model's answer, the frames played, the tokens and their price.
@@ -98,7 +115,9 @@ refused before it is built).
 
 Walking still needs two or three corrections around a target. Waiting for typing boxes in one turn, ending the run
 after the second refusal, cutting long walks every second and dropping an answer when the screen changed during the
-call came after runs 2 to 4 and are not yet tried in the game.
+call came after runs 2 to 4 and are not yet tried in the game. So are the guide, the "done so far" list, the 30
+turns, the words for the game's numbers and the goal check, which came after a later run in which the model, asked
+to open "the menu", kept going back to the save point.
 
 ## Protocol
 

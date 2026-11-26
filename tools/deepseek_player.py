@@ -4,9 +4,21 @@
     python3 tools/deepseek_player.py "walk to the save point and save"
 
 The game must run with agent=<port> in dronline.ini (docs/agent-api.md). Every turn the player reads the state,
-sends DeepSeek a short summary of it with the goal and the last few turns, and plays the buttons the model chose
-(at most --max-frames frames a turn), until the model says the goal is reached, --until is met, or a limit ends the
-run. Version 1 of the Agent API covers the overworld and dialogue; in a battle the model sees only "battle".
+sends DeepSeek a summary of it (the game's numbers in words) with the goal, a list of what is done so far and the
+last 30 turns, and plays the buttons the model chose (at most --max-frames frames a turn), until the model says the
+goal is reached, --until is met, or a limit ends the run. Version 1 of the Agent API covers the overworld and
+dialogue; in a battle the model sees only "battle".
+
+What the model is told:
+  - the system prompt, the same every turn (so DeepSeek's context cache bills it cheaply from the second call):
+    the buttons and steps, how walking works, the rules of the run, and a guide to the game
+    (tools/deepseek_guide.md: what each button does, what "the menu" means, the Dark World menu, save points,
+    dialogue, rooms and exits, battles; --guide picks another file, --guide none leaves it out);
+  - "done so far", kept for the whole run (the newest 60 entries): rooms entered, menus opened and closed, choices,
+    battles, the start of each dialogue, refused saves, and notes the model asks to keep ("remember" in its
+    answer), so it does not redo what it already did after the turn has scrolled out of the last 30;
+  - with --until, whether the program's goal check is met yet. The program then judges the goal: an answer
+    "done" before the check is met is told back to the model and the run goes on (the third one ends it, exit 1).
 
 A turn's input is played one press at a time (a press of confirm, cancel or menu starts the next piece; a long walk
 or wait is cut every second), and the rest is dropped as soon as the screen changes: a dialogue, choice, menu or
@@ -28,8 +40,9 @@ Authorization header of the requests to api.deepseek.com: it is never printed or
 Limits (each ends the run with exit code 3):
   --max-steps <n>     calls to the model, default 40. Turns the player handles itself (waiting for a typing box,
                       confirming one that waits) do not count, but at most 5 times as many of them
-  --max-usd <usd>     spending on DeepSeek, default 0.05. Counted from the tokens the API reports, at the peak
+  --max-usd <usd>     spending on DeepSeek, default 0.50. Counted from the tokens the API reports, at the peak
                       prices, so the real cost is the same or lower. The run stops before a call that could pass it
+                      (a call is reckoned at its worst: the whole prompt uncached, up to about 0.005 USD)
   --max-minutes <m>   wall time, default 20
   --max-frames <n>    input frames of a model's turn, 30 to 3600, default 150 (5 s); a longer answer is cut
                       there, and one of more than 3600 frames is refused (the program's own turns are short:
@@ -41,6 +54,7 @@ Other options:
                       with the value as JSON (--until interact=5, --until save_menu=null; a value that is not JSON
                       is a string: --until room=room_town_school). The model is told about it
   --allow-save        let the model save to a file (the guard above is off)
+  --guide <file>      the game guide for the system prompt (default tools/deepseek_guide.md); none: no guide
   --port <port>       the agent= port of dronline.ini (default 8765); --host, default 127.0.0.1
   --model <model>     flash (deepseek-flash, default) or pro (deepseek-v4-pro)
   --reasoning <r>     none (default: fast and cheap), low, high, max. Thinking costs many more output tokens, and
@@ -66,7 +80,9 @@ waits for the lockstep, so both games must be running.
 Tested without the game and without a key (tests/test_deepseek_player.py; native/test_agent.py solo, against
 drnet.dll). In the game (2026-11-23, solo, deepseek-flash): the first run ran through the save menu and saved,
 which the pieces, the save guard, --until and the walking hints came from; with them two runs reached their goal
-and a third, asked to save, was stopped by the guard, with nothing saved, for 0.0008 to 0.0019 USD each.
+and a third, asked to save, was stopped by the guard, with nothing saved, for 0.0008 to 0.0019 USD each. The game
+guide, the "done so far" list, the 30-turn history, the words for the game's numbers and the goal check came after
+a run that kept going back to the save point when asked to open "the menu"; they are not yet tried in the game.
 """
 import argparse
 import datetime
@@ -89,7 +105,12 @@ PRICES = {"deepseek-flash": (0.006, 0.3, 1.2), "deepseek-v4-pro": (0.044, 1.32, 
 # Output cap per reasoning level; thinking tokens count as output. The answer itself is about 60 tokens.
 MAX_TOKENS = {"none": 300, "low": 3000, "high": 12000, "max": 32000}
 DEFAULT_KEY_FILE = os.path.join("~", ".config", "deltarune-online", "deepseek.env")
-HISTORY = 6             # turns the model is reminded of
+HISTORY = 30            # turns the model is reminded of
+MAX_DONE = 60           # entries of the "done so far" list kept for the whole run (the oldest go first)
+MAX_REMEMBER = 120      # characters of a note the model asks to keep
+MAX_EARLY_DONE = 3      # answers "done" while --until is not met before the run gives up
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_GUIDE = os.path.join(HERE, "deepseek_guide.md")
 MAX_NEARBY = 12         # objects of the state's nearby list in the prompt
 MAX_TEXT = 300          # characters of one dialogue box in the prompt
 MAX_BAD = 3             # unusable answers in a row before the run gives up
@@ -101,8 +122,8 @@ AUTO_PER_STEP = 5       # turns without the model allowed per --max-steps
 PIECE = 30              # frames: a long walk or wait is played in pieces this long, the screen checked after each
 CONFIRM, PRESSES, DIRECTIONS = 16, 16 | 32 | 64, 1 | 2 | 4 | 8      # action bits (agent_client.AGENT_BUTTONS)
 
-SYSTEM = """You play DELTARUNE through a program. Each turn you get the game state and the last turns, and you
-answer with the buttons to press next.
+SYSTEM = """You play DELTARUNE through a program. Each turn you get the game state, a list of what is already done
+in this run, and the last turns, and you answer with the buttons to press next.
 
 Buttons: down right up left confirm cancel menu (or d r u l z x c). Steps, separated by ';':
   <frames> <buttons>            hold buttons for that many frames (30 frames = 1 s), e.g. "20 right", "10 up+left"
@@ -121,13 +142,21 @@ confirm once.
 Dialogue: "typing" means the text is still appearing; confirm does nothing then (cancel shows the rest at once).
 The program waits for typing boxes and confirms boxes that wait for it, so you are asked when something needs a
 decision. can_move=false: a dialogue, cutscene or menu holds you; cancel closes menus; a choice is picked with a
-direction and then confirm. A "save point menu" line means the save point's menu is open. {save_rule}
-If your last input changed nothing, try something else.{until_rule}
+direction and then confirm. {save_rule}
+If your last input changed nothing, try something else.
+
+Memory: "Done so far" is kept for the whole run: what the program saw happen (rooms entered, menus opened and
+closed, choices, dialogue) and the notes you asked it to keep. Read it before you act, and do not do again what
+it says is done. To keep a note there, add "remember": "<at most 15 words>" to your answer (where something is,
+what you tried, what is left of the goal).{until_rule}
+
+{guide}
 
 Goal: {goal}
 
 Answer with one JSON object and nothing else:
 {{"why": "<at most 15 words>", "do": "<steps>", "done": false}}
+or with a note to keep: {{"why": "...", "do": "...", "done": false, "remember": "<at most 15 words>"}}
 "done": true only when the goal is reached (then "do" may be empty). If the goal cannot be reached, answer
 "done": true and say why in "why", starting with "give up:"."""
 SAVE_ALLOWED = "Saving to a file is allowed in this run, but only if the goal asks for it."
@@ -159,6 +188,36 @@ def me_of(state):
 
 
 FACING = {0: "down", 1: "right", 2: "up", 3: "left"}
+# The game's own numbers in words (docs/agent-api.md, "The state"; chapter 5 with the mod).
+INTERACT = {0: "free to walk", 1: "a dialogue, a cutscene or a save point's menu holds you",
+            5: "the Dark World menu is open", 6: "a dialogue started from the Dark World menu"}
+OBJECTS = {"obj_savepoint": "save point"}
+
+
+def _is_num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def save_menu_text(sm):
+    """A save point's menu (the save_menu key) in words. The numbers of the other stages keep their last values,
+    so only the ones of the stage shown are read."""
+    stage, x, y = sm.get("stage"), sm.get("x"), sm.get("y")
+    if _is_num(sm.get("overwrite")) and sm["overwrite"] >= 1:
+        return "the question whether to overwrite the file, cursor on %s" % (
+            {0: "Save", 1: "Return"}.get(_num(sm.get("overwrite_x")), "?"))
+    if stage == 0:
+        if x == 2:
+            return "the main box: the message that the game was saved waits for confirm"
+        names = {(0, 0): "Save", (1, 0): "Return", (0, 1): "Storage", (1, 1): "Recruits"}
+        return "the main box (Save, Return, Storage, Recruits), cursor on %s" % (
+            names.get((_num(x), _num(y)), "?"))
+    if stage == 1:
+        slot = _num(sm.get("slot"))
+        return "the list of file slots, cursor on %s" % (
+            "Return" if slot == 3 else "file slot %s" % slot)
+    if stage == 2:
+        return "the game was just saved to a file"
+    return "stage %s" % stage
 
 
 def summarize(state):
@@ -166,11 +225,24 @@ def summarize(state):
     s = state or {}
     out = []
     head = []
-    for k in ("chapter", "room", "can_move", "battle", "interact", "menuno", "submenu", "desync"):
-        if s.get(k) is not None and not (k == "desync" and s.get(k) == -1):
-            head.append("%s=%s" % (k, json.dumps(s[k]) if isinstance(s[k], bool) else s[k]))
+    for k in ("chapter", "room", "can_move", "desync"):
+        if s.get(k) is None or (k == "desync" and s.get(k) == -1):
+            continue
+        head.append("%s=%s" % (k, json.dumps(s[k]) if isinstance(s[k], bool) else _num(s[k])))
     if head:
         out.append(" ".join(head))
+    if s.get("interact") is not None:
+        n = _num(s["interact"])
+        line = "interact=%s: %s" % (n, INTERACT.get(n, "the game's own number"))
+        # menuno and submenu keep old values while the Dark World menu is closed: shown only while it is open
+        if n == 5 and s.get("menuno") is not None:
+            m = _num(s["menuno"])
+            line += "; menuno=%s: %s" % (m, "its top row of icons" if m == 0 else "one of its pages")
+            if s.get("submenu") is not None:
+                line += ", submenu=%s" % _num(s["submenu"])
+        out.append(line)
+    if s.get("battle") is True:
+        out.append("battle=true: a battle is on; the program cannot show it to you or play it")
     me = me_of(s)
     mx = my = None
     for p in s.get("players_pos") or []:
@@ -196,10 +268,8 @@ def summarize(state):
     sm = s.get("save_menu")
     if isinstance(sm, dict):
         # The key of the Agent API's save point menu (PR 37 of the game side); the numbers are the game's own.
-        out.append("save point menu (open): %s. stage 0: main box, cursor x,y = Save (0,0), Return (1,0), "
-                   "Storage (0,1), Recruits (1,1), x=2 a saved message waits for confirm; stage 1: file slot 0-2, "
-                   "3 Return; overwrite=1: overwrite question, overwrite_x 0 Save 1 Return"
-                   % json.dumps(sm, separators=(",", ":"))[:200])
+        out.append("save point menu (open): %s %s" % (save_menu_text(sm),
+                                                       json.dumps(sm, separators=(",", ":"))[:200]))
     near = []
     for o in (s.get("nearby") or [])[:MAX_NEARBY]:
         if not isinstance(o, dict):
@@ -209,7 +279,9 @@ def summarize(state):
             where = "(%+d,%+d)" % (round(x - mx), round(y - my))
         else:
             where = "(%s,%s)" % (_num(x), _num(y))
-        near.append("%s %s%s" % (o.get("object"), where, " solid" if o.get("solid") else ""))
+        known = OBJECTS.get(o.get("object"))
+        near.append("%s%s %s%s" % (o.get("object"), " (%s)" % known if known else "", where,
+                                   " solid" if o.get("solid") else ""))
     if near:
         out.append("nearby: " + "; ".join(near))
     return "\n".join(out) if out else json.dumps(s)[:1000]
@@ -240,6 +312,51 @@ def change(before, after):
     if isinstance(a, dict) and isinstance(b, dict) and a != b:
         bits.append("save point menu %s" % json.dumps(b, separators=(",", ":"))[:120])
     return ", ".join(bits) or "nothing changed"
+
+
+def events(before, after):
+    """What happened between two states that is worth keeping for the whole run ("done so far"): rooms, menus,
+    choices, battles, the start of a dialogue. Positions are left out: they change every turn."""
+    if not before or not after:
+        return []
+    out = []
+    if before.get("room") != after.get("room") and after.get("room") is not None:
+        out.append("entered room %s (from %s)" % (after.get("room"), before.get("room")))
+    a, b = _num(before.get("interact")), _num(after.get("interact"))
+    if a != 5 and b == 5:
+        out.append("opened the Dark World menu")
+    elif a == 5 and b != 5 and b != 6:
+        out.append("closed the Dark World menu")
+    if b == 5 and _num(before.get("menuno")) != _num(after.get("menuno")) and _num(after.get("menuno")) is not None:
+        m = _num(after.get("menuno"))
+        out.append("Dark World menu: %s" % ("back on its top row" if m == 0 else "opened its page menuno=%s" % m))
+    sa, sb = before.get("save_menu"), after.get("save_menu")
+    if not isinstance(sa, dict) and isinstance(sb, dict):
+        out.append("opened the save point's menu")
+    elif isinstance(sa, dict) and not isinstance(sb, dict):
+        out.append("closed the save point's menu")
+    if isinstance(sb, dict) and (not isinstance(sa, dict) or sa.get("stage") != sb.get("stage")):
+        if sb.get("stage") == 1:
+            out.append("save point's menu: chose Save, the file slots are shown")
+        elif sb.get("stage") == 2:
+            out.append("save point's menu: saved to file slot %s" % _num(sb.get("slot")))
+    ca, cb = before.get("choice"), after.get("choice")
+    if isinstance(cb, dict) and (not isinstance(ca, dict) or ca.get("options") != cb.get("options")):
+        out.append("a choice appeared: %s" % json.dumps([" ".join(str(o).split())[:40] for o in
+                                                          (cb.get("options") or [])], ensure_ascii=False))
+    elif isinstance(ca, dict) and not isinstance(cb, dict):
+        sel = ca.get("selected")
+        opts = ca.get("options") or []
+        picked = opts[sel] if isinstance(sel, int) and 0 <= sel < len(opts) else sel
+        out.append("the choice closed (last selected: %s)" % json.dumps(picked, ensure_ascii=False))
+    if before.get("battle") is not True and after.get("battle") is True:
+        out.append("a battle started")
+    elif before.get("battle") is True and after.get("battle") is False:
+        out.append("the battle ended")
+    first = lambda st: " ".join(str((boxes(st) or [{}])[0].get("text") or "").split())  # noqa: E731
+    if boxes(after) and (not boxes(before) or first(before)[:20] != first(after)[:20]):
+        out.append("dialogue: %s" % json.dumps(first(after)[:80], ensure_ascii=False))
+    return out
 
 
 def boxes(state):
@@ -310,19 +427,43 @@ def met(state, until):
     return have == value or (isinstance(value, str) and str(have) == value)
 
 
-def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False, until=None, speed=None):
-    """The system prompt stays the same for the whole run, so DeepSeek's context cache bills it at the cache-hit
-    price from the second call on; only the short user message changes."""
+_guides = {}
+
+
+def read_guide(path=None):
+    """The game guide that goes into the system prompt (tools/deepseek_guide.md, or --guide); "" for none."""
+    path = DEFAULT_GUIDE if path is None else path
+    if not path:
+        return ""
+    if path not in _guides:
+        with open(path, encoding="utf-8") as f:
+            _guides[path] = f.read().strip()
+    return _guides[path]
+
+
+def messages(goal, max_frames, state, history, turn, max_steps, allow_save=False, until=None, speed=None,
+             done=None, guide=None):
+    """The system prompt (with the game guide) stays the same for the whole run, so DeepSeek's context cache bills
+    it at the cache-hit price from the second call on; only the user message changes: the list of what is done so
+    far, the last HISTORY turns and the state."""
     recent = "\n".join(history[-HISTORY:]) or "(first turn)"
-    user = "Turn %d of %d.\nLast turns:\n%s\n" % (turn, max_steps, recent)
+    user = "Turn %d of %d.\n" % (turn, max_steps)
+    user += "Done so far in this run (kept for the whole run):\n%s\n" % ("\n".join(done or []) or "(nothing yet)")
+    if until:
+        user += "Goal check by the program (the state has %s): %s.\n" % (
+            until_text(until), "met" if met(state, until) else "not met yet")
+    user += "Last turns:\n%s\n" % recent
     if speed:
         user += "Walking speed measured in this run: about %.1f px a frame.\n" % speed
     user += "State now:\n%s" % summarize(state)
     until_rule = ""
     if until:
-        until_rule = "\nThe program ends the run by itself as soon as the state has %s." % (
-            until_text(until))
+        until_rule = ("\nThe program checks the goal itself: it ends the run as soon as the state has %s, and each "
+                      "turn says whether that is met yet. Until then the goal is not reached, so do not answer "
+                      "\"done\": true (except to give up)." % until_text(until))
+    text = read_guide(guide)
     system = SYSTEM.format(goal=goal, max_frames=max_frames, until_rule=until_rule,
+                           guide=("About the game:\n\n" + text) if text else "",
                            save_rule=SAVE_ALLOWED if allow_save else SAVE_REFUSED)
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
@@ -357,8 +498,8 @@ def frames_in(text):
 
 
 def parse_answer(content, max_frames):
-    """The model's text -> (why, steps text as given, per-frame bits cut to max_frames, done, frames asked for).
-    Raises ValueError with what is wrong."""
+    """The model's text -> (why, steps text as given, per-frame bits cut to max_frames, done, frames asked for,
+    the note it asks to keep or ""). Raises ValueError with what is wrong."""
     text = (content or "").strip()
     try:
         obj = json.loads(text)
@@ -385,7 +526,9 @@ def parse_answer(content, max_frames):
     except OverflowError:
         raise ValueError("a step makes too many frames")
     agent_client.frames_to_steps(frames)            # only the seven buttons of the agent
-    return why, do.strip(), frames[:max_frames], done, len(frames)
+    note = obj.get("remember")
+    note = " ".join(note.split())[:MAX_REMEMBER] if isinstance(note, str) else ""
+    return why, do.strip(), frames[:max_frames], done, len(frames), note
 
 
 # ---------------------------------------------------------------------------------------------- models
@@ -601,18 +744,25 @@ def play_turn(game, frames, state, allow_save, until):
     return state, played, ""
 
 
-def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max_frames=150, pause=0.5,
+def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_frames=150, pause=0.5,
          prices=PRICES["deepseek-flash"], auto_confirm=True, allow_save=False, until=None, log=None, tally=None,
-         clock=time.monotonic, sleep=time.sleep):
+         guide=None, clock=time.monotonic, sleep=time.sleep):
     """The loop. Returns (0, why it ended) when the model says the goal is reached or `until` is met, raises Stop
-    otherwise. tally["usd"] holds the USD spent so far, also after a Stop."""
+    otherwise. tally["usd"] holds the USD spent so far, also after a Stop. With `until`, the model's own "done" does
+    not end the run: it is told that the program's check is not met yet."""
     log = log or Log(None)
     tally = {} if tally is None else tally
     tally["usd"] = spent = 0.0
     start = clock()
     last_call = None
     history = []
-    bad = calls = autos = auto_stuck = refused = 0
+    bad = calls = autos = auto_stuck = refused = early = 0
+    done_list = []              # "done so far": kept for the whole run, the oldest dropped past MAX_DONE
+
+    def keep(turn, items):
+        for item in items:
+            done_list.append("turn %d: %s" % (turn, item))
+        del done_list[:-MAX_DONE]
     walk = None                 # (frames a direction was held, px) of the longest walk so far
     state = game.state()
     log.write({"event": "start", "goal": goal, "state": summarize(state)},
@@ -636,6 +786,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             else:
                 state = game.do(do)
             what = change(before, state)
+            keep(turn, events(before, state))
             auto_stuck = auto_stuck + 1 if progress(before) == progress(state) else 0
             said = " / ".join(" ".join(str(d.get("text") or "").split()) for d in boxes(before))
             if do.startswith("tap"):
@@ -650,7 +801,8 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         calls += 1
         auto_stuck = 0
         speed = walk[1] / walk[0] if walk else None
-        msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed)
+        msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed, done_list,
+                        guide)
         # The next call costs at most: the whole prompt at the cache-miss price, a token for every byte (a token
         # of the byte-level tokenizer holds at least one) plus the chat template, and the whole output cap.
         prompt = sum(len(m["content"].encode("utf-8")) + TEMPLATE_TOKENS for m in msgs)
@@ -672,7 +824,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
                   "state": msgs[1]["content"].split("State now:\n", 1)[1],
                   "answer": content, "usage": usage, "usd": round(cost, 6), "usd_total": round(spent, 6)}
         try:
-            why, do, frames, done, asked = parse_answer(content, max_frames)
+            why, do, frames, done, asked, remember = parse_answer(content, max_frames)
         except ValueError as e:
             bad += 1
             history.append("turn %d: your answer was unusable (%s); answer only the JSON object" % (turn, e))
@@ -683,6 +835,9 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             continue
         bad = 0
         record.update(why=why, do=do, done=done, frames=len(frames))
+        if remember:
+            record["remember"] = remember
+            keep(turn, ["(your note) " + remember])
         now = game.state()
         if clock() - start > max_minutes * 60:
             log.write(record, "%3d  %-34s  %s | %s (not played: time is up)  [%.4f USD]" % (
@@ -695,6 +850,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
             note = "not played: the screen changed while you were thinking"
             history.append("turn %d: %s -> %s (%s)" % (turn, do or "(nothing)", change(state, now), note))
             record.update(result=change(state, now), played=0, note=note)
+            keep(turn, events(state, now))
             log.write(record, "%3d  %-34s  %s | %s (%s)  [%.4f USD]" % (
                 turn, short(state)[:34], why, do or "-", note, spent))
             state = now
@@ -702,6 +858,17 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         state = now
         if met(state, until):
             continue
+        if done and until and not why.lower().startswith("give up"):
+            # The program judges the goal: a "done" before --until is met is told back to the model.
+            early += 1
+            if early >= MAX_EARLY_DONE:
+                log.write(record, "%3d  %-34s  %s (done, but --until is not met)  [%.4f USD]" % (
+                    turn, short(state)[:34], why or "done", spent))
+                raise Stop(1, "the model said %d times that the goal is reached, but --until %s is not met" % (
+                    early, until_text(until)))
+            done = False
+            history.append("turn %d: you answered done, but the program's goal check (the state has %s) is not met "
+                           "yet, so the goal is not reached; keep going" % (turn, until_text(until)))
         if done:
             log.write(record, "%3d  %-34s  %s  [%.4f USD]" % (turn, short(state)[:34], why or "done", spent))
             if why.lower().startswith("give up"):
@@ -713,6 +880,8 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.05, max_minutes=20.0, max
         else:
             played, note = 0, ""
         refused += note.startswith("refused")
+        keep(turn, events(before, state) + (["the save guard refused confirm (%s)" % save_risk(before)]
+                                            if note.startswith("refused") else []))
         w = walked(frames[:played], before, state)
         if w and (walk is None or w[0] >= walk[0]):
             walk = w
@@ -736,7 +905,7 @@ def parse_args(argv):
     ap.add_argument("--model", default="flash")
     ap.add_argument("--reasoning", default="none", choices=sorted(MAX_TOKENS))
     ap.add_argument("--max-steps", type=int, default=40)
-    ap.add_argument("--max-usd", type=float, default=0.05)
+    ap.add_argument("--max-usd", type=float, default=0.5)
     ap.add_argument("--max-minutes", type=float, default=20.0)
     ap.add_argument("--max-frames", type=int, default=150)
     ap.add_argument("--pause", type=float, default=0.5)
@@ -744,6 +913,7 @@ def parse_args(argv):
     ap.add_argument("--allow-save", action="store_true")
     ap.add_argument("--until", default=None)
     ap.add_argument("--key-file", default=DEFAULT_KEY_FILE)
+    ap.add_argument("--guide", default=DEFAULT_GUIDE)
     ap.add_argument("--log", default=None)
     ap.add_argument("--prompt", action="store_true")
     ap.add_argument("--fake", metavar="FILE")
@@ -755,6 +925,12 @@ def parse_args(argv):
         ap.error("--max-steps, --max-usd and --max-minutes must be above 0, --max-frames 30 to 3600")
     if not args.goal.strip():
         ap.error("the goal is empty")
+    if args.guide.lower() == "none":
+        args.guide = ""
+    try:
+        read_guide(args.guide)
+    except OSError as e:
+        ap.error("cannot read the guide: %s" % e)
     try:
         args.until = parse_until(args.until) if args.until else None
     except ValueError as e:
@@ -787,7 +963,7 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
         game.connect()
         if args.prompt:
             for m in messages(goal, args.max_frames, game.state(), [], 1, args.max_steps, args.allow_save,
-                              args.until):
+                              args.until, guide=args.guide):
                 print("--- %s\n%s" % (m["role"], m["content"]), file=out)
             return 0
         print("model %s, reasoning %s; limits: %d steps, %.4f USD, %g min; saving %s%s; log %s" % (
@@ -798,7 +974,7 @@ def main(argv, env=os.environ, out=sys.stdout, http=deepseek_review.http_json):
                          max_minutes=args.max_minutes, max_frames=args.max_frames, pause=args.pause,
                          prices=PRICES.get(args.model, PRICES["deepseek-v4-pro"]),
                          auto_confirm=not args.no_auto_confirm, allow_save=args.allow_save,
-                         until=args.until, log=log, tally=tally)
+                         until=args.until, log=log, tally=tally, guide=args.guide)
     except Stop as e:
         code, why = e.code, e.why
     except agent_client.AgentError as e:

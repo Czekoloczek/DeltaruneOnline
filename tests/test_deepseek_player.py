@@ -142,8 +142,11 @@ def a_frames(text):
     return agent_client.text_to_frames(text)
 
 
-def answer(do="", why="", done=False):
-    return json.dumps({"why": why, "do": do, "done": done})
+def answer(do="", why="", done=False, remember=None):
+    obj = {"why": why, "do": do, "done": done}
+    if remember is not None:
+        obj["remember"] = remember
+    return json.dumps(obj)
 
 
 class Prompt(unittest.TestCase):
@@ -156,7 +159,9 @@ class Prompt(unittest.TestCase):
         self.assertIn("can_move=false", text)
         self.assertIn("you kris at x=70 y=0 facing right", text)
         self.assertIn('dialogue (waits for confirm): "* Hello & there."', text)
-        self.assertIn("nearby: obj_savepoint (+20,-10) solid", text)
+        self.assertIn("nearby: obj_savepoint (save point) (+20,-10) solid", text)
+        self.assertIn("interact=1: a dialogue, a cutscene or a save point's menu holds you", text)
+        self.assertNotIn("menuno", text)       # the Dark World menu is closed: its old numbers are left out
 
     def test_summary_of_the_stand_in_game_and_of_nulls(self):
         s = {"frame": 3, "mode": "solo", "player": 1, "players_pos": [{"player": 1, "x": 30, "y": 0, "confirm": 2}]}
@@ -167,8 +172,46 @@ class Prompt(unittest.TestCase):
 
     def test_save_menu(self):
         s = {"save_menu": {"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0, "overwrite_x": 0}}
-        self.assertIn('save point menu (open): {"stage":0,"x":0,"y":0,', p.summarize(s))
+        self.assertIn('save point menu (open): the main box (Save, Return, Storage, Recruits), cursor on Save '
+                      '{"stage":0,"x":0,"y":0,', p.summarize(s))
         self.assertNotIn("save point menu", p.summarize({"save_menu": None, "room": "r"}))
+        words = lambda **k: p.save_menu_text(dict({"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0,  # noqa
+                                                   "overwrite_x": 0}, **k))
+        self.assertEqual(words(x=1, y=1), "the main box (Save, Return, Storage, Recruits), cursor on Recruits")
+        self.assertEqual(words(x=2), "the main box: the message that the game was saved waits for confirm")
+        self.assertEqual(words(stage=1, slot=2), "the list of file slots, cursor on file slot 2")
+        self.assertEqual(words(stage=1, slot=3.0), "the list of file slots, cursor on Return")
+        self.assertEqual(words(stage=1, overwrite=1, overwrite_x=1),
+                         "the question whether to overwrite the file, cursor on Return")
+
+    def test_game_numbers_in_words(self):
+        text = p.summarize({"interact": 5, "menuno": 0, "submenu": 2})
+        self.assertEqual(text, "interact=5: the Dark World menu is open; menuno=0: its top row of icons, submenu=2")
+        self.assertIn("menuno=3: one of its pages", p.summarize({"interact": 5.0, "menuno": 3}))
+        self.assertEqual(p.summarize({"interact": 0, "menuno": -1}), "interact=0: free to walk")
+        self.assertEqual(p.summarize({"interact": 9}), "interact=9: the game's own number")
+        self.assertIn("battle=true: a battle is on", p.summarize({"battle": True}))
+        self.assertNotIn("battle", p.summarize({"battle": False, "room": "r"}))
+
+    def test_events_for_the_done_list(self):
+        free = {"room": "a", "interact": 0, "menuno": 0, "save_menu": None, "choice": None, "dialogue": []}
+        menu = dict(free, interact=5)
+        self.assertEqual(p.events(free, menu), ["opened the Dark World menu"])
+        self.assertEqual(p.events(menu, dict(menu, menuno=2)), ["Dark World menu: opened its page menuno=2"])
+        self.assertEqual(p.events(menu, dict(free, menuno=-1)), ["closed the Dark World menu"])
+        self.assertEqual(p.events(free, dict(free, room="b")), ["entered room b (from a)"])
+        sm = {"stage": 0, "x": 0, "y": 0, "slot": 0, "overwrite": 0, "overwrite_x": 0}
+        talk = dict(free, interact=1, dialogue=[{"text": "* A save point.", "waiting": True}])
+        self.assertEqual(p.events(free, talk), ['dialogue: "* A save point."'])
+        self.assertEqual(p.events(talk, dict(free, interact=1, save_menu=sm)), ["opened the save point's menu"])
+        self.assertEqual(p.events(dict(free, save_menu=sm), dict(free, save_menu=dict(sm, stage=1))),
+                         ["save point's menu: chose Save, the file slots are shown"])
+        self.assertEqual(p.events(dict(free, save_menu=sm), free), ["closed the save point's menu"])
+        choice = dict(free, choice={"options": ["Yes", "No"], "selected": 1})
+        self.assertEqual(p.events(free, choice), ['a choice appeared: ["Yes", "No"]'])
+        self.assertEqual(p.events(choice, free), ['the choice closed (last selected: "No")'])
+        self.assertEqual(p.events(free, dict(free, battle=True)), ["a battle started"])
+        self.assertEqual(p.events(free, free), [])
 
     def test_long_dialogue_and_many_objects_are_cut(self):
         s = {"player": 1, "players_pos": [{"player": 1, "x": 0, "y": 0}],
@@ -184,6 +227,16 @@ class Prompt(unittest.TestCase):
         b = p.messages("save", 150, {"room": "b"}, ["turn 1: 20 right -> moved (+60,+0)"], 2, 40)
         self.assertEqual(a[0], b[0])
         self.assertIn("Goal: save", a[0]["content"])
+        self.assertIn("About the game:", a[0]["content"])
+        self.assertIn("## The Dark World menu", a[0]["content"])
+        self.assertIn("Done so far in this run (kept for the whole run):\n(nothing yet)", a[1]["content"])
+        c = p.messages("save", 150, {"room": "c"}, ["turn %d: wait 1 -> nothing changed" % i for i in range(1, 41)],
+                       41, 60, done=["turn 3: opened the save point's menu"])
+        self.assertEqual(a[0], c[0])
+        self.assertIn("turn 3: opened the save point's menu", c[1]["content"])
+        self.assertIn("turn 11: wait 1", c[1]["content"])        # the last 30 turns
+        self.assertNotIn("turn 10: wait 1", c[1]["content"])
+        self.assertNotIn("About the game", p.messages("save", 150, {}, [], 1, 40, guide="")[0]["content"])
         self.assertIn("150 frames", a[0]["content"])
         self.assertIn("turn 1: 20 right", b[1]["content"])
 
@@ -197,12 +250,13 @@ class Prompt(unittest.TestCase):
 
 class Answers(unittest.TestCase):
     def test_plain_json(self):
-        why, do, frames, done, asked = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        why, do, frames, done, asked, note = p.parse_answer(answer("20 right; tap z", "walk"), 150)
+        self.assertEqual(note, "")
         self.assertEqual((why, do, done, asked), ("walk", "20 right; tap z", False, 22))
         self.assertEqual(len(frames), 22)
 
     def test_json_inside_other_words(self):
-        why, do, frames, done, _ = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)
+        why, do, frames, done, _, _ = p.parse_answer('Sure:\n```json\n{"why":"ok","do":"5 up","done":true}\n```', 150)
         self.assertEqual((do, done, len(frames)), ("5 up", True, 5))
 
     def test_frames_are_cut(self):
@@ -433,8 +487,53 @@ class Loop(unittest.TestCase):
         self.assertIn("--until save_menu is met", out)
         self.assertEqual(len(http.requests), 2)
         self.assertEqual(self.game.menu["stage"], 0)
-        self.assertIn("ends the run by itself as soon as the state has save_menu",
+        self.assertIn("it ends the run as soon as the state has save_menu",
                       http.requests[0][3]["messages"][0]["content"])
+        self.assertIn("Goal check by the program (the state has save_menu): not met yet.",
+                      http.requests[0][3]["messages"][1]["content"])
+
+    def test_done_before_until_is_met_is_told_back(self):
+        http = Http([answer("", "the menu is open", True), answer("30 right", "walk"), answer("", "done", True),
+                     answer("", "done", True)])
+        code, out, records = run_main(self.game, ["open the save menu", "--until", "save_menu"],
+                                      {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 1)
+        self.assertIn("said 3 times that the goal is reached, but --until save_menu is not met", out)
+        self.assertIn("you answered done, but the program's goal check (the state has save_menu) is not met yet",
+                      http.requests[1][3]["messages"][1]["content"])
+        self.assertEqual(self.game.x, 90)       # the run went on after the first "done"
+
+    def test_done_list_and_notes_stay_for_the_whole_run(self):
+        # The save point's menu opens in turn 2; 35 turns later it is still in "done so far", though the last
+        # turns hold only 30.
+        answers = [answer("30 right", "walk", remember="the star is at x=90"), answer("tap confirm", "use it"),
+                   answer("tap cancel", "close")] + [answer("wait 1")] * 35 + [answer("", "ok", True)]
+        http = Http(answers)
+        code, out, records = run_main(self.game, ["go", "--max-steps", "60"], {"DEEPSEEK_API_KEY": KEY}, http)
+        self.assertEqual(code, 0, out)
+        last = http.requests[-1][3]["messages"][1]["content"]
+        self.assertIn("turn 1: (your note) the star is at x=90", last)
+        self.assertIn("opened the save point's menu", last)
+        self.assertIn("closed the save point's menu", last)
+        self.assertIn('dialogue: "* A save point. & * Determination."', last)
+        self.assertNotIn("turn 2: tap confirm", last.split("Last turns:")[1])
+        self.assertEqual(records[1]["remember"], "the star is at x=90")
+
+    def test_guide_option_and_default_limit(self):
+        self.assertEqual(p.parse_args(["go"]).max_usd, 0.5)
+        self.assertEqual(p.parse_args(["go", "--guide", "none"]).guide, "")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "guide.md")
+            with open(path, "w") as f:
+                f.write("Kris is the one you play.")
+            http = Http([answer("", "ok", True)])
+            code, _, _ = run_main(self.game, ["go", "--guide", path], {"DEEPSEEK_API_KEY": KEY}, http)
+            self.assertEqual(code, 0)
+            system = http.requests[0][3]["messages"][0]["content"]
+            self.assertIn("About the game:\n\nKris is the one you play.", system)
+            self.assertNotIn("## Save points", system)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                p.parse_args(["go", "--guide", os.path.join(tmp, "missing.md")])
 
     def test_until_forms(self):
         self.assertEqual(p.parse_until("save_menu"), ("save_menu", p.PRESENT))
@@ -501,10 +600,10 @@ class Loop(unittest.TestCase):
 
     def test_spending_limit_stops_before_the_call(self):
         http = Http([answer("wait 1")] * 10)
-        code, out, records = run_main(self.game, ["go", "--max-usd", "0.002"], {"DEEPSEEK_API_KEY": KEY}, http)
+        code, out, records = run_main(self.game, ["go", "--max-usd", "0.003"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 3)
         self.assertIn("spending limit", out)
-        self.assertLessEqual(records[-1]["usd_total"], 0.002)
+        self.assertLessEqual(records[-1]["usd_total"], 0.003)
         self.assertGreater(len(http.requests), 0)
 
     def test_unusable_answers_and_giving_up(self):
@@ -604,7 +703,7 @@ class Loop(unittest.TestCase):
         self.game.apply(16)
         self.game.apply(0)
         http = Http([answer("", "menu open", True)])
-        code, _, records = run_main(self.game, ["go", "--until", "interact=7"], {"DEEPSEEK_API_KEY": KEY}, http)
+        code, _, records = run_main(self.game, ["go"], {"DEEPSEEK_API_KEY": KEY}, http)
         self.assertEqual(code, 0)
         self.assertEqual([r["do"] for r in records if r["event"] == "turn"],
                          ["wait 20", "tap confirm; wait 4", ""])
@@ -615,7 +714,7 @@ class Loop(unittest.TestCase):
         code = p.main(["walk to the save point", "--port", str(self.game.port), "--prompt"], {}, out, Http([]))
         self.assertEqual(code, 0)
         self.assertIn("Goal: walk to the save point", out.getvalue())
-        self.assertIn("nearby: obj_savepoint (+90,-10)", out.getvalue())
+        self.assertIn("nearby: obj_savepoint (save point) (+90,-10)", out.getvalue())
 
     def test_no_game(self):
         s = socket.socket()
