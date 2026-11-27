@@ -62,7 +62,8 @@ function dronline_init()
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
     global.dro_immortal_ini = 0;
-    global.dro_immortal = false;
+    global.dro_immortal_want = false;   // asked for: immortal= here, or online the host's flag
+    global.dro_immortal = false;        // on: asked for, and the hooks are in this build
     global.dro_agent_tries = 0;
     global.dro_other_souls = 0.1;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
@@ -175,7 +176,8 @@ function dronline_init()
         global.dro_msg = drnet_status();
     }
     else
-        global.dro_immortal = (global.dro_immortal_ini != 0) && dro_immortal_hooked();
+        global.dro_immortal_want = (global.dro_immortal_ini != 0);
+        global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_agent_init();
     else
@@ -425,7 +427,8 @@ function dronline_step()
             global.dro_connecting = false;
             // the host's session flags, the same on every machine from this frame on
             var _sf = drnet_session();
-            global.dro_immortal = (_sf >= 0) && ((_sf & 1) != 0) && dro_immortal_hooked();
+            global.dro_immortal_want = (_sf >= 0) && ((_sf & 1) != 0);
+            global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
             drnet_log("connected at frame " + string(global.dro_frame) + ", immortal SOUL " + (global.dro_immortal ? "on" : "off"));
         }
         global.dro_bits[global.dro_player] = mine;
@@ -555,7 +558,7 @@ function dronline_draw()
         txt += " | DESYNC at frame " + string(global.dro_desync);
     if (global.dro_immortal)
         txt += " | IMMORTAL SOUL";
-    else if (global.dro_immortal_ini != 0 && !dro_immortal_hooked())
+    else if (global.dro_immortal_want && !dro_immortal_hooked())
         txt += " | immortal SOUL not in this build";
     draw_set_alpha(0.8);
     draw_set_color((global.dro_desync >= 0) ? c_red : c_white);
