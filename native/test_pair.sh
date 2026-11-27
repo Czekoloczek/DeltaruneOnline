@@ -5,7 +5,7 @@
 # on Windows (Git Bash) it runs them natively. Used by .github/workflows/tests.yml.
 #   sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]      defaults: 0 450 2 0
 # late_s: the last client starts that many seconds after the others, as when a friend joins late. The others must
-# wait for it (test_drnet connects with a 30 s timeout) instead of giving up after the 10 s exchange timeout.
+# wait for it (test_drnet connects with a 30 s timeout, polling like the game) instead of giving up after the 10 s exchange timeout.
 # Needs native/build/drnet.dll and native/build/test_drnet.exe (sh native/build.sh).
 set -eu
 lag=${1:-0}

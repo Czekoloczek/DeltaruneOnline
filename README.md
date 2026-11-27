@@ -25,6 +25,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
   waits, so the game keeps its full 30 fps. Your own SOUL is still drawn without delay, and bullets hit it where you
   see it: your game decides your hits and tells the others, so dodging feels like single player. The other players'
   hearts are drawn faint on your screen (`other_souls`, 10 % by default), so you never mistake one for your own.
+- **Waiting screen.** Until everybody is connected, the game is paused and shows "Waiting for the Other Player" in
+  the game's own font, with your role, the address, the time left (it gives up after 2 minutes) and, on the host,
+  why a player was turned away. Hold Esc to quit. Who hosts is set in each player's `dronline.ini` (`mode=host` or
+  `mode=client` with `host=<address>`). Not yet tried in the game.
 
 ### Roadmap
 

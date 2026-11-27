@@ -104,7 +104,7 @@ VAR_TOKEN_RX = re.compile(
     re.S,
 )
 
-HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here
+HOOK_STEP = "gml_Object_obj_time_Step_1"      # Begin Step: input arrays are computed here; skipped while waiting
 HOOK_END = "gml_Object_obj_time_Other_3"      # Game End
 HOOK_GUI = "gml_Object_obj_time_Draw_64"       # Draw GUI: status line
 DLL = os.path.join(REPO, "native", "build", "drnet.dll")
@@ -472,7 +472,9 @@ def patch(a, work):
         src = open(path, encoding="utf-8").read()
         new, n = rewrite(src)
         if name == HOOK_STEP:
-            new = "dronline_step();\n" + new
+            # true = frozen while waiting for the others: the game's own Begin Step (input polling, global.time) is
+            # skipped too (dronline_wait in scr_dronline.gml)
+            new = "if (dronline_step())\n    exit;\n" + new
         if name == HOOK_GUI:
             new = new + "\ndronline_draw();\n"
         srcs[name] = src

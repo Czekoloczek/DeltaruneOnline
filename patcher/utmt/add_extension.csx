@@ -41,6 +41,9 @@ void Fn(string name, UndertaleExtensionVarType ret, params UndertaleExtensionVar
 Fn("drnet_set_host", D, S);
 Fn("drnet_start", D, D, D, D, D, D);
 Fn("drnet_connect", D, D);
+Fn("drnet_connect_poll", D, D);
+Fn("drnet_lobby", D);
+Fn("drnet_lobby_note", S);
 Fn("drnet_exchange", D, D, D);
 Fn("drnet_hash", D, D, D);
 Fn("drnet_desync", D);

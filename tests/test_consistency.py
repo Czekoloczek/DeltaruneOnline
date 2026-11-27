@@ -8,6 +8,8 @@
 - Every option name the GML passes to drnet_option must be one that drnet.c knows (it ignores the others).
 - Every dronline.ini key the GML reads must be in config/dronline.ini.example and in the settings comment at the
   top of gml/scr_dronline.gml (CLAUDE.md).
+- dronline_step (and dronline_wait under it) returns true or false on every path: the Begin Step hook is
+  `if (dronline_step()) exit;` (true = frozen while waiting for the others).
 - A dro_* function that stands in for an engine function with a return value must return a value on every path,
   online too. The game may use the value: Chapter 5's canopy shadows seed the generator with what randomize()
   returns, and an online path that returned nothing crashed both machines in the same frame.
@@ -149,6 +151,18 @@ class ReturnValues(unittest.TestCase):
                 last = [line.strip() for line in body.strip().splitlines()
                         if line.strip() and not line.strip().startswith("//")][-1]
                 self.assertRegex(last, r"^return\s+\S", "the function can end without a return: the game gets undefined")
+
+    def test_frozen_flag_is_returned_on_every_path(self):
+        # the patcher's Begin Step hook is `if (dronline_step()) exit;`: a bare return there gives `if` undefined
+        self.assertIn('"if (dronline_step())', PATCHER)
+        for name in ("dronline_step", "dronline_wait"):
+            with self.subTest(function=name):
+                body = gml_body(name)
+                self.assertIsNotNone(body, "function missing from gml/scr_dronline.gml")
+                self.assertNotRegex(body, r"\breturn\s*;", "a bare return gives the hook undefined")
+                last = [line.strip() for line in body.strip().splitlines()
+                        if line.strip() and not line.strip().startswith("//")][-1]
+                self.assertRegex(last, r"^return\s+(true|false);")
 
 
 class ExtensionMatchesDll(unittest.TestCase):
