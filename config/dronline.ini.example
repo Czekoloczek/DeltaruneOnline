@@ -27,6 +27,9 @@ port=7845
 delay=auto
 ; upper limit for delay=auto
 maxdelay=6
+; (host/client) opacity of the other players' SOULs in battle on your screen, so you never mistake another heart for
+; your own: 0 = hidden, 1 = as in the game. Drawing only: their hearts still dodge and get hit on every machine.
+other_souls=0.1
 ; testing only: extra latency in ms added to every packet this machine sends, and random extra 0..jitter ms
 lag=0
 jitter=0

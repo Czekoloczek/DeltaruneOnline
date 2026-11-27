@@ -35,6 +35,9 @@
 //                                              sends input for the local player (docs/agent-api.md). Never open to
 //                                              the network; any program on this PC can connect, so leave it off
 //                                              unless you use it
+//   other_souls = 0.1                          (host/client) opacity of the other players' SOULs in battle on this screen,
+//                                              so they are not mistaken for your own: 0 = hidden, 1 = as in the game.
+//                                              Drawing only, the hearts still dodge and get hit on every machine
 //   immortal = 0 | 1                           (testing; any mode but off) 1: damage does not lower HP and there is
 //                                              no game over, for AI test runs. Online the host's value applies on
 //                                              every machine (sent in WELCOME); a client's own is only logged. Not
@@ -61,6 +64,7 @@ function dronline_init()
     global.dro_immortal_ini = 0;
     global.dro_immortal = false;
     global.dro_agent_tries = 0;
+    global.dro_other_souls = 0.1;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
     // (letters and digits, at most 16), a copy reads dronline_<name>.ini instead, if that file exists.
     // drnet.dll follows the same rule for its log (drnet_<name>.log). See tools/local_test.bat.
@@ -92,6 +96,7 @@ function dronline_init()
         global.dro_script_end = string_lower(ini_read_string("online", "script_end", "idle"));
         global.dro_srec_file = ini_read_string("online", "script_record", "");
         global.dro_agent_port = ini_read_real("online", "agent", 0);
+        global.dro_other_souls = clamp(ini_read_real("online", "other_souls", 0.1), 0, 1);
         global.dro_immortal_ini = (ini_read_real("online", "immortal", 0) != 0) ? 1 : 0;
         ini_close();
     }
@@ -863,6 +868,24 @@ function dro_get_timer()
     return global.dro_frame * (1000000 / 30);
 }
 
+// Replaces current_time (patcher). Online: milliseconds since session start from the lockstep frame clock
+// (20 Chapter 5 game-logic entries read current_time, docs/DESIGN.md). Offline: the real current_time.
+function dro_current_time()
+{
+    if (!dronline_ready())
+        return current_time;
+    return global.dro_frame * (1000 / 30);
+}
+
+// Replaces delta_time (patcher). Online: one fixed 30 fps frame in microseconds, matching dro_get_timer()
+// and the virtual audio clock (used by the rhythm game). Offline: the real delta_time.
+function dro_delta_time()
+{
+    if (!dronline_ready())
+        return delta_time;
+    return 1000000 / 30;
+}
+
 // Replaces the mod's ini_read_real("PLAYER_AMOUNT", ...) (patcher). Online, every machine uses the session's
 // player count from dronline.ini instead of its own keyconfig_mod.ini, so new game, loading a save and the
 // config menu agree everywhere. The game has the ini open while it calls this, so no other file is touched.
@@ -1358,6 +1381,85 @@ function dronline_heart_unswap()
         }
     }
     global.dro_swap = 0;
+}
+
+// ---- other players' SOULs: drawn faint (other_souls), so nobody mistakes another heart for their own ----
+// Drawing only. The patcher multiplies the alpha argument of the draw calls that draw a SOUL (obj_heart's Draw,
+// the graze sparkles, the purple, orange-chase, date and slime hearts) by one of the functions below. The game
+// state never changes: every heart still moves, dodges and is hit on every machine, and nothing here reads the
+// shared random numbers. Offline, in solo and for the local player's own heart the factor is 1.
+
+// Opacity factor for the SOUL of player p (1..3) on this screen; p < 1 means "no owner" (single player): 1.
+function dronline_soul_alpha(p)
+{
+    if (!variable_global_exists("dro_net") || !global.dro_net || global.dro_other_souls >= 1)
+        return 1;
+    if (p < 1 || p > 3 || p == global.dro_player)
+        return 1;
+    return global.dro_other_souls;
+}
+
+// In an object that draws one player's SOUL and says whose in `controls`: first = the value of player 1
+// (obj_grazebox counts 1..3, obj_orangeheart, obj_date_heart and obj_heart_slime 0..2 with -1 for no owner).
+function dronline_soul_alpha_controls(first)
+{
+    if (!variable_instance_exists(id, "controls") || !is_numeric(controls))
+        return 1;
+    return dronline_soul_alpha(controls - first + 1);
+}
+
+// draw_self() with the alpha multiplied by f (the patcher's replacement in the SOUL draws).
+function dronline_draw_self(f)
+{
+    if (sprite_index >= 0)
+        draw_sprite_ext(sprite_index, image_index, x, y, image_xscale, image_yscale, image_angle, image_blend, image_alpha * f);
+}
+
+// In obj_heart (its Draw, or code inside with (obj_heart)): heart k is drawn at x/y, x2/y2 or x3/y3. In the purple
+// SOUL's mode 7 only the heart at x/y is drawn and it belongs to whoever plays the turn, so it stays as it is.
+function dronline_heart_alpha(k)
+{
+    if (k == 1 && variable_instance_exists(id, "inMode7") && inMode7)
+        return 1;
+    return dronline_soul_alpha(k);
+}
+
+// For a draw in obj_heart's Draw whose position names no heart (an orange tail at tx, ty, ...): the heart
+// nearest to (px, py). A tie goes to the local player, so an overlapping own heart is never dimmed.
+function dronline_heart_alpha_at(px, py)
+{
+    if (!variable_global_exists("dro_net") || !global.dro_net || global.dro_other_souls >= 1)
+        return 1;
+    var n = (variable_global_exists("playeramount") && is_numeric(global.playeramount)) ? clamp(global.playeramount, 1, 3) : 1;
+    var me = global.dro_player;
+    var best = 0;
+    var bd = -1;
+    for (var k = 1; k <= n; k++)
+    {
+        var hx = x;
+        var hy = y;
+        if (k == 2)
+        {
+            if (!variable_instance_exists(id, "x2"))
+                break;
+            hx = x2;
+            hy = y2;
+        }
+        else if (k == 3)
+        {
+            if (!variable_instance_exists(id, "x3"))
+                break;
+            hx = x3;
+            hy = y3;
+        }
+        var d = (hx - px) * (hx - px) + (hy - py) * (hy - py);
+        if (bd < 0 || d < bd || (d == bd && k == me))
+        {
+            best = k;
+            bd = d;
+        }
+    }
+    return dronline_heart_alpha(best);
 }
 
 // ---- immortal SOUL: a test aid (immortal=1), so an AI player can walk through battles it cannot play ----

@@ -1,10 +1,11 @@
-"""Tests for the patcher's rewrite rules and the obj_heart hooks.
+"""Tests for the patcher's rewrite rules, the obj_heart hooks and the faint SOULs of the other players.
 
 The GML snippets below are written for these tests and only imitate the shape of the game's code;
 nothing from the game or the mod is stored here. Run: python3 -m unittest discover -s tests -v
 """
 import copy
 import os
+import re
 import sys
 import unittest
 
@@ -82,6 +83,30 @@ class RewriteRules(unittest.TestCase):
                    "offset = sin(phase + (dro_get_timer() / 400000)) * 2;", 1)
         self.check("t = get_timer( );", "t = dro_get_timer();", 1)
         self.check("t = my_get_timer() + get_timerx();", "t = my_get_timer() + get_timerx();", 0)
+        # current_time (ms) and delta_time (us) built-in variables
+        self.check("y = ystart + sin(current_time * 0.004) * 8; song_t += delta_time / 1000000;",
+                   "y = ystart + sin(dro_current_time() * 0.004) * 8; song_t += dro_delta_time() / 1000000;", 2)
+        self.check("ok = (current_time >= t0 && delta_time <= 50000) ? current_time : delta_time;",
+                   "ok = (dro_current_time() >= t0 && dro_delta_time() <= 50000) ? dro_current_time() : dro_delta_time();", 4)
+        # strings, comments, field access (including across whitespace/comments), assignments and lookalikes stay untouched
+        untouched = (
+            'show_debug_message("current_time delta_time");\n'
+            "// current_time + delta_time\n"
+            "/* delta_time */ a = obj.current_time + other.delta_time + my_current_time + delta_time2;\n"
+            "b = obj . current_time + obj. /* note */ delta_time + obj.\n// note\ncurrent_time;\n"
+            "current_time = 0; delta_time += 1; current_time(); delta_time++;\n"
+        )
+        self.check(untouched, untouched, 0)
+        # a dot inside a preceding comment must not suppress standalone rewrites
+        self.check("v = a + /* . */ current_time + /* . */ delta_time;",
+                   "v = a + /* . */ dro_current_time() + /* . */ dro_delta_time();", 2)
+        # GML verbatim strings (@"..." and @'...') treat backslashes literally
+        self.check(r's = @"current_time\" + string(current_time);',
+                   r's = @"current_time\" + string(dro_current_time());', 1)
+        self.check(r"s = @'delta_time\' + string(delta_time);",
+                   r"s = @'delta_time\' + string(dro_delta_time());", 1)
+        self.check(r's = @"/* " + string(current_time);',
+                   r's = @"/* " + string(dro_current_time());', 1)
 
     def test_audio(self):
         self.check("snd = audio_play_sound_on(em, mus, 1, 0); audio_play_sound(snd_x, 1, 0);",
@@ -102,7 +127,7 @@ class RewriteRules(unittest.TestCase):
 
     def test_idempotent(self):
         src = ("if (keyboard_check_pressed(vk_up) || mouse_check_button(mb_left)) { randomize(); audio_play_sound(a, 1, 0); }\n"
-               'x = mouse_x + mouse_y; n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
+               'x = mouse_x + mouse_y; t = current_time + delta_time; n = ini_read_real("PLAYER_AMOUNT", "1", -1);')
         once, _ = dp.rewrite(src)
         twice, n = dp.rewrite(once)
         self.assertEqual(once, twice)
@@ -252,6 +277,125 @@ class ImmortalHooks(unittest.TestCase):
     def test_off_module_defines_the_function(self):
         self.assertIn("function dro_immortal_hooked()", dp.IMMORTAL_OFF)
         self.assertIn("return false;", dp.IMMORTAL_OFF)
+# Made-up draw code in the shape of the SOUL draws (no game code): what the other_souls rewrite must do.
+SOUL_DRAW = """if (color == 2)
+{
+    draw_sprite_ext(spr_tail, 0, tx + x_offset, ty, image_xscale, image_yscale, 0, c_orange, 0.025);
+    draw_sprite_ext(sprite_index, image_index2, x2 + _w2 + x_offset, y2 + _h2, xs, ys, image_angle, image_blend2, image_alpha);
+    draw_sprite_ext(spr_arrow, 0, x + (i * 16) + 16, y + 10, 1, 1, 0, draw_get_colour(), 1);
+    draw_sprite_ext(spr_x, 0, xx + get(1), yy, 1, 1, 0, c_white, 1);
+    draw_text(x2, y2, "a, (b)");
+}
+else
+{
+    image_index3 += image_speed3;
+    draw_sprite_ext(sprite_index, image_index3, x3, y3, 1, image_yscale, image_angle, image_blend3, 1);
+    draw_sprite_part_ext(spr_part, 0, 0, 0, 10, 10, x2 - 5, y2, 1, 1, c_white, a[0]);
+    draw_self();
+}
+"""
+
+
+class SoulAlpha(unittest.TestCase):
+    def run_on(self, **texts):
+        t = dict(texts)
+        note = dp.soul_alpha(t)
+        return t, note
+
+    def test_heart_draws_follow_the_heart_they_draw(self):
+        t, note = self.run_on(**{dp.HEART_DRAW: SOUL_DRAW})
+        d = t[dp.HEART_DRAW]
+        self.assertIn("image_blend2, (image_alpha) * dronline_heart_alpha(2));", d)
+        self.assertIn("image_blend3, (1) * dronline_heart_alpha(3));", d)
+        self.assertIn("draw_get_colour(), (1) * dronline_heart_alpha(1));", d)
+        self.assertIn("c_white, (a[0]) * dronline_heart_alpha(2));", d)
+        # a position that names no heart: the nearest one, from the same expressions
+        self.assertIn("c_orange, (0.025) * dronline_heart_alpha_at(tx + x_offset, ty));", d)
+        # a position with a call is never evaluated twice
+        self.assertIn("yy, 1, 1, 0, c_white, 1);", d)
+        self.assertIn("dronline_draw_self(dronline_heart_alpha(1));", d)
+        self.assertNotIn("draw_self()", d)
+        self.assertIn('draw_text(x2, y2, "a, (b)");', d)
+        self.assertTrue(note.startswith("obj_heart 6 draws (1 by the nearest heart, 1 left as they are)"))
+
+    def test_only_alpha_changes(self):
+        # drawing only: removing the factors gives back the original code, statement for statement
+        t, _ = self.run_on(**{dp.HEART_DRAW: SOUL_DRAW})
+        back = re.sub(r"\(([^()]*(?:\[[^\]]*\])?)\) \* dronline_heart_alpha(?:_at)?\((?:[^()]|\([^()]*\))*\)", r"\1",
+                      t[dp.HEART_DRAW])
+        back = back.replace("dronline_draw_self(dronline_heart_alpha(1))", "draw_self()")
+        self.assertEqual(back, SOUL_DRAW)
+
+    def test_owner_objects(self):
+        graze = "if (controls == 2)\n    draw_sprite_ext(sprite_index, 0, x2 + x_offset, y2, 1, 1, angle, c_white, grazetimer / 6);\ngrazetimer -= 1;\n"
+        slime = ("surface_set_target(s);\ndraw_sprite_ext(spr_white, 0, 10, 10, 1, 1, 0, c_white, 1);\nsurface_reset_target();\n"
+                 "draw_surface_ext(s, x, y, 1, 1, 0, c_gray, 1);\n")
+        orange = "draw_sprite_ext(sprite_index, image_index, x, y, 1, 1, 0, image_blend, image_alpha);\ndraw_self();\n"
+        t, note = self.run_on(
+            gml_Object_obj_grazebox_Draw_0=graze,
+            gml_Object_obj_heart_slime_Draw_0=slime,
+            gml_Object_obj_orangeheart_Draw_0=orange,
+        )
+        self.assertIn("c_white, (grazetimer / 6) * dronline_soul_alpha_controls(1));\ngrazetimer -= 1;", t["gml_Object_obj_grazebox_Draw_0"])
+        # the slime is drawn into a surface first: only the surface on the screen is dimmed
+        self.assertIn("c_white, 1);\nsurface_reset_target", t["gml_Object_obj_heart_slime_Draw_0"])
+        self.assertIn("c_gray, (1) * dronline_soul_alpha_controls(0));", t["gml_Object_obj_heart_slime_Draw_0"])
+        self.assertIn("image_blend, (image_alpha) * dronline_soul_alpha_controls(0));\n"
+                      "dronline_draw_self(dronline_soul_alpha_controls(0));", t["gml_Object_obj_orangeheart_Draw_0"])
+        self.assertIn("obj_grazebox 1", note)
+        self.assertIn("obj_orangeheart 2", note)
+
+    def test_purple_only_inside_with_obj_heart(self):
+        purple = ("draw_sprite_ext(spr_ui, 0, x, y, 1, 1, 0, c_white, 1);\n"
+                  "with (obj_heart)\n{\n    if (other.controls == 1)\n"
+                  "        draw_sprite_ext(sprite_index, -1, x2 + other.x_shake, y2, 1, 1, 0, c_red, image_alpha);\n}\n"
+                  "draw_sprite_ext(spr_ui, 1, x, y, 1, 1, 0, c_white, 1);\n")
+        t, note = self.run_on(**{dp.PURPLE_DRAW: purple})
+        p = t[dp.PURPLE_DRAW]
+        self.assertIn("c_red, (image_alpha) * dronline_heart_alpha(2));", p)
+        self.assertEqual(p.count("c_white, 1);"), 2, "the purple SOUL's own drawing is not a heart")
+        self.assertIn("purple SOUL 1", note)
+
+    def test_comments_in_and_around_draw_calls(self):
+        src = (
+            "// draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1);\n"
+            "// draw_self();\n"
+            "/* draw_sprite_ext(s, 0, x3, y3, 1, 1, 0, c_white, 1); */\n"
+            "draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1 // alpha\n"
+            ");\n"
+            "draw_sprite_ext(s, 0, x3, y3, 1, 1, /* a, ) */ 0, c_white, // color, alpha\n"
+            "    image_alpha // end\n"
+            "    );\n"
+            "draw_sprite_ext(spr_tail, 0, tx // x2 in comment\n"
+            "    , ty, 1, 1, 0, c_orange, 0.5);\n"
+        )
+        t, note = self.run_on(**{dp.HEART_DRAW: src})
+        d = t[dp.HEART_DRAW]
+        # commented-out calls stay untouched
+        self.assertIn("// draw_sprite_ext(s, 0, x2, y2, 1, 1, 0, c_white, 1);\n", d)
+        self.assertIn("// draw_self();\n", d)
+        self.assertIn("/* draw_sprite_ext(s, 0, x3, y3, 1, 1, 0, c_white, 1); */\n", d)
+        # trailing newline after // in alpha is kept so the closing paren and factor are not commented out
+        self.assertIn("c_white, (1 // alpha\n) * dronline_heart_alpha(2));\n", d)
+        self.assertIn("c_white, (// color, alpha\n    image_alpha // end\n) * dronline_heart_alpha(3));\n", d)
+        # comment mentioning x2 does not misclassify a tail draw, and newline after // in xa is preserved
+        self.assertIn("(0.5) * dronline_heart_alpha_at(tx // x2 in comment\n, ty));\n", d)
+        self.assertEqual(note, "obj_heart 3 draws (1 by the nearest heart, 0 left as they are)")
+
+    def test_missing_entries(self):
+        t, note = self.run_on()
+        self.assertEqual(t, {})
+        self.assertIn("obj_heart has no Draw", note)
+
+    def test_after_the_heart_hooks(self):
+        # the Draw wrap of the own SOUL and the alpha rewrite work together, in the order patch() runs them
+        t = heart_texts(**{dp.HEART_DRAW: SOUL_DRAW})
+        dp.heart_hooks(t)
+        dp.soul_alpha(t)
+        d = t[dp.HEART_DRAW]
+        self.assertTrue(d.startswith("dronline_heart_draw(true);\n"))
+        self.assertTrue(d.rstrip().endswith("dronline_heart_draw(false);"))
+        self.assertIn("dronline_heart_alpha(3)", d)
 
 
 if __name__ == "__main__":
