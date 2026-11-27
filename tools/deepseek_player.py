@@ -30,8 +30,10 @@ What the model is told:
   - the room's exits: the doors the state lists anywhere in the room (exits, also invisible ones), with their box,
     the edge they are at and the offset from the player, and where this run came into and left the room (the way
     back is where it came in; a way out without a door object shows up there once it has been used);
-  - a warning when the player walked back and forth along one line in its last 8 turns (in the first co-op run
-    both players walked left and right for 140 turns past a dark path going down);
+  - a warning when the player walked back and forth along one line in its last 8 turns: the range it stayed in,
+    that it reached neither end of the corridor, to go past one end until a wall stops it and try up and down
+    there, and the part of the room it has been in (in two co-op runs both players walked left and right for 140
+    and 200 turns short of the corridor's far end, where the way on was);
   - with --notes, what the other players are doing and the notes they wrote (see "Two players on one PC").
 The system prompt tells the model to walk at most 45 frames at a time when it has no target in nearby or exits, so
 it does not run past an opening, and how to leave through a door.
@@ -196,8 +198,10 @@ Exits: "exits" lists the doors of the room, anywhere in it and also when they ar
 each is at, its box, and (dx,dy) from you. To leave through one, first line up with its box (its y range for a door
 at the left or right edge, its x range at the top or bottom), then walk into it. Not every way out has a door:
 some rooms are left by walking off the edge where the floor goes on. The program remembers where you came into and
-left each room in this run and shows that with the exits; the way back is where you came in. If the program says
-you are walking back and forth, stop doing that and try another direction or an exit.
+left each room in this run and shows that with the exits; the way back is where you came in. Paths wind: when the
+way toward an exit is blocked, follow the corridor to its far end the other way, until a wall stops you, and try up
+and down there. If the program says you are walking back and forth, leave the range it names: go past one of its
+ends to the end of the corridor.
 
 Dialogue: "typing" means the text is still appearing; confirm does nothing then (cancel shows the rest at once).
 The program waits for typing boxes and confirms boxes that wait for it, so you are asked when something needs a
@@ -490,21 +494,28 @@ def learn_exits(seen, states):
 def back_and_forth(track):
     """A warning when the player's last SWING_TURNS positions (one per call to the model, all in this room) went
     back and forth along one line: SWING_TURNS_MIN or more changes of direction along x (or y), counting moves of
-    SWING_STEP px or more, while the other way stayed within SWING_BAND px. None otherwise."""
+    SWING_STEP px or more, while the other way stayed within SWING_BAND px. It names the range of those turns,
+    which the player never left, so neither end of the corridor was reached, and the part of the room the whole
+    track covered. None otherwise. (In a co-op run both players walked 45 frames right and left around x 1100 to
+    1440 for 200 turns; the way on was at the far left end of that corridor.)"""
     pts = track[-SWING_TURNS:]
     if len(pts) < SWING_TURNS:
         return None
-    for axis, name, other, instead in ((0, "x", "y", "up or down"), (1, "y", "x", "left or right")):
+    for axis, name, other, (back, on), across in ((0, "x", "y", ("left", "right"), "up and down"),
+                                                  (1, "y", "x", ("up", "down"), "left and right")):
         moves = [b[axis] - a[axis] for a, b in zip(pts, pts[1:]) if abs(b[axis] - a[axis]) >= SWING_STEP]
         swings = sum(1 for m, n in zip(moves, moves[1:]) if (m > 0) != (n > 0))
         side = [q[1 - axis] for q in pts]
         if swings >= SWING_TURNS_MIN and max(side) - min(side) < SWING_BAND:
             line = [q[axis] for q in pts]
-            return ("in your last %d turns you walked back and forth between %s=%d and %s=%d (%s about %d) and did "
-                    "not find the way on. Going further along that line will not help: try %s, an exit from the "
-                    "exits lines, or a path on the screenshot that you have not tried." % (
-                        len(pts), name, round(min(line)), name, round(max(line)), other,
-                        round(sum(side) / len(side)), instead))
+            lo, hi = round(min(line)), round(max(line))
+            xs, ys = [q[0] for q in track], [q[1] for q in track]
+            return ("in your last %d turns you walked back and forth between %s=%d and %s=%d (%s about %d) and never "
+                    "went past either end, so you have not reached either end of this corridor. Paths wind: hold %s "
+                    "past %s=%d, or %s past %s=%d, in short steps, until a wall stops you (you hold the direction and "
+                    "do not move), then try %s there. In this room you have been at x=%d..%d, y=%d..%d so far." % (
+                        len(pts), name, lo, name, hi, other, round(sum(side) / len(side)), back, name, lo, on, name,
+                        hi, across, round(min(xs)), round(max(xs)), round(min(ys)), round(max(ys))))
     return None
 
 
@@ -1153,6 +1164,7 @@ def play(game, model, goal, *, max_steps=40, max_usd=0.5, max_minutes=20.0, max_
         me = me_of(state)
         if me and _is_num(me.get("x")) and _is_num(me.get("y")):
             track.append((me["x"], me["y"]))
+            del track[:-500]
         swing = back_and_forth(track)
         others = notes.lines(player) if notes is not None else None
         msgs = messages(goal, max_frames, state, history, calls, max_steps, allow_save, until, speed, done_list,

@@ -127,8 +127,13 @@ than 3600 frames is refused before it is built).
   time without a target in `nearby` or `exits`.
 - **Walking back and forth.** When the player's place at the last 8 calls went back and forth along one line (3 or
   more changes of direction along x or y, moves of 16 px or more, while the other way stayed within 48 px), the
-  prompt warns the model that the way on is not along that line. In the first co-op run both players walked
-  left and right in 60 to 120-frame steps for 140 turns past a dark path going down at the left end.
+  prompt warns the model: it names the range those turns stayed in, says that neither end of the corridor was
+  reached, tells it to go past one end until a wall stops it and try up and down there, and gives the part of the
+  room it has been in so far. The guide adds that paths wind: when the way toward an exit is blocked, follow the
+  corridor to its far end the other way. In the first co-op run both players walked left and right in 60 to
+  120-frame steps for 140 turns past a dark path going down at the left end; in the second, with the exits listed
+  and 45-frame steps, they still walked 45 frames right and left within about 340 px for 200 turns, short of the
+  corridor's far left end, where the way on was.
 - **Two players.** Run one player on each PC against its own game, with its own goal. Online every turn waits for
   the lockstep, so both games must be running. With two copies of the game on one PC (`tools/local_test.bat`,
   each with its own `agent=` port), give both players the same `--notes <file>`: every time its model answers,

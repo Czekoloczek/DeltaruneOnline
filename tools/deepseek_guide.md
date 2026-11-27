@@ -64,8 +64,13 @@ menu is meant only when the goal names the save point.
   take it just because it is near.
 - Walls and solid objects stop you. If you held a direction and did not move, something is in the way: step
   sideways a little, then try again.
+- Paths wind: an exit is often not reached in a straight line. When the way toward an exit is blocked, follow the
+  corridor you are in to its far end in the other direction, until a wall stops you, and try up and down there: the
+  path often turns back toward the exit one level lower or higher. Write down which ends you have tried (with
+  "remember").
 - Walk in short steps (at most 45 frames) while you look for the way, and check the state after each: a long hold
-  runs past an opening. If the program warns that you walk back and forth, the way on is not along that line.
+  runs past an opening. If the program warns that you walk back and forth, leave the range it names: go past one
+  of its ends to the end of the corridor, and try up and down there.
 - nearby lists only objects with a picture, within 240 px of you, nearest first.
 
 ## Playing with another player

@@ -326,16 +326,19 @@ class Prompt(unittest.TestCase):
 
     def test_walking_back_and_forth_is_told(self):
         swing = [(0, 100), (120, 100), (10, 104), (130, 100), (0, 96), (125, 100), (5, 100), (120, 102)]
-        warn = p.back_and_forth(swing)
-        self.assertIn("in your last 8 turns you walked back and forth between x=0 and x=130 (y about 100)", warn)
-        self.assertIn("try up or down", warn)
+        warn = p.back_and_forth([(600, 300), (40, 100)] + swing)
+        self.assertIn("in your last 8 turns you walked back and forth between x=0 and x=130 (y about 100) and never "
+                      "went past either end, so you have not reached either end of this corridor", warn)
+        self.assertIn("hold left past x=0, or right past x=130, in short steps, until a wall stops you", warn)
+        self.assertIn("then try up and down there. In this room you have been at x=0..600, y=96..300 so far.", warn)
         self.assertIsNone(p.back_and_forth(swing[:7]))                          # too few turns yet
         self.assertIsNone(p.back_and_forth([(x, y * 30) for y, (x, _) in enumerate(swing)]))   # it goes down too
         self.assertIsNone(p.back_and_forth([(i * 40, 100) for i in range(8)]))   # one way only
         self.assertIsNone(p.back_and_forth([(i % 2 * 5, 100) for i in range(8)]))   # small steps on one spot
         up_down = p.back_and_forth([(y, x) for x, y in swing])
         self.assertIn("between y=0 and y=130 (x about 100)", up_down)
-        self.assertIn("try left or right", up_down)
+        self.assertIn("hold up past y=0, or down past y=130", up_down)
+        self.assertIn("then try left and right there", up_down)
 
     def test_camera_rule_for_player_2(self):
         one = p.messages("go", 150, {"player": 1}, [], 1, 40, vision=True, no_shot="x", player=1)[0]["content"]
@@ -917,7 +920,8 @@ class Loop(unittest.TestCase):
         users = [r[3]["messages"][1]["content"] for r in http.requests]
         self.assertFalse(any("Warning from the program" in u for u in users[:7]))
         self.assertIn("Warning from the program: in your last 8 turns you walked back and forth between x=0 and "
-                      "x=30 (y about 0)", users[8])
+                      "x=30 (y about 0) and never went past either end", users[8])
+        self.assertIn("In this room you have been at x=0..30, y=0..0 so far.", users[8])
         self.assertIn("back and forth", records[-2]["swing"])
 
     def test_measured_speed_goes_into_the_prompt(self):
