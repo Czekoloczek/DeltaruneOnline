@@ -4,6 +4,13 @@
  *   test_drnet client 2 2 <frames> [lag_ms] [delay] [ip]    (client, player 2)
  *   ... [ip] [quit_at]: at that frame say goodbye with drnet_bye and exit without drnet_stop, as the game does
  *   when its window is closed; the other side must then report "left" at once instead of the 10 s timeout.
+ *   quit_at "lobby" or "lobby-crash" (a client): say HELLO for 2 s without being welcomed (the host still waits
+ *   for another player), then leave before everybody is there, with a goodbye (drnet_bye, as a closed window) or
+ *   without a word (as a killed game). The host must stop counting this player (issue #58, test_handshake.sh).
+ *   After the goodbye it lingers 0.5 s, as a closing game does, so with lag_ms the HELLOs still in the lag queue
+ *   reach the host after the goodbye; the host must ignore them.
+ * While connecting, a host of 3 prints "lobby: N of 3 players here" each time drnet_lobby (the waiting screen's
+ * count) changes.
  * delay -1 (default) = automatic. lag_ms adds test latency to every packet this side sends.
  *
  * Each side feeds pseudo-random bits and events, folds every frame's result (all players' bits and
@@ -47,11 +54,12 @@ int main(int argc, char **argv)
         if (strcmp(argv[ai], "-game") == 0 && ai + 1 < argc) { ai++; continue; }
         pos[npos++] = argv[ai];
     }
-    if (npos < 4) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip] [quit_at] [-game path]\n", argv[0]); return 2; }
+    if (npos < 4) { printf("usage: %s host|client players me frames [lag_ms] [delay] [ip] [quit_at|lobby|lobby-crash] [-game path]\n", argv[0]); return 2; }
     const char *role = pos[0]; int players = atoi(pos[1]), me = atoi(pos[2]), frames = atoi(pos[3]);
     double lag = npos > 4 ? atof(pos[4]) : 0, dly = npos > 5 ? atof(pos[5]) : -1;
     const char *ip = npos > 6 ? pos[6] : "127.0.0.1";
     int quit_at = npos > 7 ? atoi(pos[7]) : -1;
+    const char *lobby_quit = npos > 7 && strncmp(pos[7], "lobby", 5) == 0 ? pos[7] : NULL;
     int f, p;
     unsigned long long sum = 1469598103934665603ull;
     /* Windows rounds Sleep() up to its 15.6 ms timer, so a 33 ms frame took 46.8 ms (3 ticks) on native Windows
@@ -78,15 +86,33 @@ int main(int argc, char **argv)
     f_v stop = (f_v)GetProcAddress(h, "drnet_stop");
     f_str bye = (f_str)GetProcAddress(h, "drnet_bye");
     f_v session = (f_v)GetProcAddress(h, "drnet_session");
+    f_v lobby = (f_v)GetProcAddress(h, "drnet_lobby");
     if (!session) { printf("drnet.dll has no drnet_session\n"); return 1; }
     set_host(ip);
     if (lag > 0) option("lag", lag);
     option("session", strcmp(role, "host") == 0 ? 5 : 0);
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
+    double r, here = -1;
+    if (lobby_quit) {
+        /* polled like the game; with a 2 s timeout it gives up before the others are in */
+        int crash = strcmp(lobby_quit, "lobby-crash") == 0;
+        while ((r = connect_poll(2000)) == 0) Sleep(33);
+        if (r > 0) { printf("%s was welcomed: the host did not wait for the others\n", role); stop(); return 1; }
+        printf("%s %s the lobby before everybody is there\n", role, crash ? "crashes in" : "leaves");
+        fflush(stdout);
+        if (!crash) { bye("test lobby quit"); Sleep(500); }
+        ExitProcess(0);
+    }
     printf("%s: connecting...\n", status());
     /* like the game: one drnet_connect_poll per 33 ms frame (it draws its waiting screen in between) */
-    double r;
-    while ((r = connect_poll(30000)) == 0) Sleep(33);
+    while ((r = connect_poll(30000)) == 0) {
+        if (players > 2 && strcmp(role, "host") == 0 && lobby() != here) {
+            here = lobby();
+            printf("lobby: %g of %d players here\n", here, players);
+            fflush(stdout);
+        }
+        Sleep(33);
+    }
     if (r < 0) { printf("connect failed: %s\n", status()); stop(); return 1; }
     printf("%s session %g\n", role, session());
     double t0 = now_ms(), tblock = t0;
