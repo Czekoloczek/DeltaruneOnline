@@ -112,9 +112,9 @@ host stops counting it. A client that is killed or crashes sends nothing, so the
 has not heard `HELLO` from for 2 s (clients repeat it every 200 ms until they are welcomed). Either way the waiting
 screen's count (`drnet_lobby`) drops with it, and a client that was only slow counts again with its next `HELLO`. A
 `HELLO` sent before the `LEAVE` but arriving after it (reordered, or held in the test lag queue) would count a player
-who is gone, so for 2 s after a `LEAVE` the host ignores `HELLO` from that address; a game that starts again gets a
-new port. The `LEAVE` from the Game End that DELTARUNE fires when it restarts itself at chapter start does no harm:
-the host ignores a `LEAVE` for a player it does not count, and otherwise counts that player again 2 s later. With 2
+who is gone, so for 2 s after a `LEAVE` the host ignores `HELLO` from that address, also when the `LEAVE` overtook all
+of them; a game that starts again gets a new port. A client sends `LEAVE` only once it has said `HELLO`, so the Game
+End that DELTARUNE fires when it restarts itself at chapter start, before the first `HELLO`, sends nothing. With 2
 players this cannot happen, since the host connects the moment its only client says `HELLO`. Protocol-5 builds from
 before `LEAVE` ignore it, and the 2 s rule works with any client, so this needs no protocol change. What remains is a
 client that crashes in the 2 s before the last player arrives, and a `HELLO` from before a `LEAVE` that arrives more

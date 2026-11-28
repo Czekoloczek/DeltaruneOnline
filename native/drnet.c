@@ -146,6 +146,7 @@ static int have_peer[MAXP + 1];
 static uint64_t hello_us[MAXP + 1];         /* host, before connected: when each client last said HELLO */
 static struct sockaddr_in left_addr[MAXP + 1];  /* host, before connected: where a client's LEAVE came from */
 static uint64_t left_us[MAXP + 1];          /* ... and when (0 = none) */
+static int said_hello;                      /* client: has sent HELLO since drnet_start (only then is LEAVE sent) */
 static int32_t frame_of[MAXP + 1][RING];    /* which frame the slot currently holds */
 static uint16_t bits_of[MAXP + 1][RING];
 static uint32_t aux_of[MAXP + 1][RING];
@@ -678,12 +679,15 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         }
     } else if (h->type == T_LEAVE && is_host) {
         /* a client leaves before everybody is there: the others must not be welcomed into a session that waits
-           for it. Only from the address that said HELLO for that player; HELLOs from that address are ignored for
-           2 s after it, and a new game for that player counts as soon as it says HELLO. */
-        if (!connected && h->player >= 2 && h->player <= players && have_peer[h->player] && same_addr(&peer[h->player], from)) {
-            have_peer[h->player] = 0;
+           for it. HELLOs from that address are ignored for 2 s after it, also when none was counted yet (the LEAVE
+           overtook all of them); a client sends LEAVE only once it said HELLO. Only the address that said HELLO for
+           that player clears it, and a new game for that player counts as soon as it says HELLO. */
+        if (!connected && h->player >= 2 && h->player <= players) {
             left_addr[h->player] = *from; left_us[h->player] = now;
-            logm("player %d left before everybody was there (goodbye): no longer counted", h->player);
+            if (have_peer[h->player] && same_addr(&peer[h->player], from)) {
+                have_peer[h->player] = 0;
+                logm("player %d left before everybody was there (goodbye): no longer counted", h->player);
+            }
         }
     } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
         const reject_pkt *r = (const reject_pkt *)buf;
@@ -824,18 +828,20 @@ static void update_delay(uint64_t now)
 
 /* Goodbye: my last WINDOW frames as a BYE packet, so a partner still gets the input it needs to reach my last
  * frame. Sent three times, because UDP may lose one, and straight out (not through the test latency queue).
- * A client that is not connected yet says LEAVE instead, so the host stops counting it (issue #58); a host that is
- * not connected has nobody to tell (its clients go on calling it). Returns how many packets went out. Lock held. */
+ * A client that is not connected yet says LEAVE instead, so the host stops counting it (issue #58), once it has said
+ * HELLO: before that the host knows nothing to take back (DELTARUNE's Game End at chapter start comes then). A host
+ * that is not connected has nobody to tell (its clients go on calling it). Returns how many packets went out. Lock
+ * held. */
 static int send_bye(void)
 {
     input_pkt k; int32_t last = next_target - 1, first = last - WINDOW + 1; int i, r, n = 0;
     if (sock == INVALID_SOCKET) return 0;
     if (!connected) {
         hdr_t lv;
-        if (is_host || !have_peer[1] || connect_err) return 0;   /* refused: the host does not count it */
+        if (is_host || !have_peer[1] || connect_err || !said_hello) return 0;   /* refused, or never called */
         fill_hdr(&lv, T_LEAVE, me);
         for (r = 0; r < 3; r++) raw_send(&peer[1], &lv, sizeof(lv));
-        logm("not connected yet: told the host to stop counting this player until its next HELLO");
+        logm("not connected yet: told the host this player leaves (LEAVE)");
         return 3;
     }
     if (first < 0) first = 0;
@@ -924,7 +930,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
         have_peer[1] = 1;
     }
     session_flags = is_host ? opt_session : 0; session_known = 0;
-    connected = 0; connect_err = 0; last_reject[0] = 0; reject_logged = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
+    connected = 0; connect_err = 0; said_hello = 0; last_reject[0] = 0; reject_logged = 0; sends_logged = 0; next_target = 0; held_bits = 0; held_aux = next_aux = 0; last_frame = sample_frame = -1; sample_put = 1; desync_at = -1; qcount = 0;
     srand((unsigned)now_us());
     running = 1;
     thr = CreateThread(NULL, 0, net_thread, NULL, 0, NULL);
@@ -985,7 +991,7 @@ EXPORT double drnet_connect_poll(double timeout_ms)
         hello_pkt hp;
         fill_hdr(&hp.h, T_HELLO, me);
         memcpy(hp.data_hash, my_data_hash, sizeof(hp.data_hash));
-        send_to(&peer[1], &hp, sizeof(hp)); poll_hello = now;
+        send_to(&peer[1], &hp, sizeof(hp)); poll_hello = now; said_hello = 1;
     }
     unlock();
     if (!done && now - poll_note > 5000) { poll_note = now; logm("connect: still waiting"); }
@@ -1037,7 +1043,7 @@ EXPORT double drnet_connect(double timeout_ms)
             hello_pkt hp;
             fill_hdr(&hp.h, T_HELLO, me);
             memcpy(hp.data_hash, my_data_hash, sizeof(hp.data_hash));
-            send_to(&peer[1], &hp, sizeof(hp)); last_hello = GetTickCount();
+            send_to(&peer[1], &hp, sizeof(hp)); last_hello = GetTickCount(); said_hello = 1;
         }
         unlock();
         if (done > 0) return 1;
@@ -1200,7 +1206,7 @@ EXPORT const char *drnet_status(void) { return status; }
 EXPORT double drnet_bye(const char *reason)
 {
     int n;
-    if (sock == INVALID_SOCKET || (!connected && (is_host || connect_err))) return 0;
+    if (sock == INVALID_SOCKET || (!connected && (is_host || connect_err || !said_hello))) return 0;
     logm("goodbye: %s", reason ? reason : "");
     lock(); n = send_bye(); unlock();
     if (!n) return 0;
