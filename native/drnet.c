@@ -18,6 +18,9 @@
  * waiting for it at once instead of after the 10 s timeout, but only once they run out of its input, so a
  * partner that is a frame behind still reaches the same last frame (both sides of a chapter change leave in the
  * same frame). It must be sent while the game still runs: sent from DllMain at process exit it never arrived.
+ * Before everybody is connected, a client that closes says LEAVE instead, and the host stops counting it; the host
+ * also stops counting a client it has not heard HELLO from for 2 s (killed or crashed). With 3 players the host would
+ * otherwise welcome the last one into a session that waits for the input of a player who is gone (issue #58).
  *
  * GameMaker calling convention: cdecl, numbers are double, strings are char*.
  *
@@ -52,7 +55,8 @@
  *   drnet_hash(frame, hash)                                       -> 1 (sends a state fingerprint)
  *   drnet_desync()                                                -> first frame whose fingerprints differ, -1 none
  *   drnet_status()                                                -> short text for the screen
- *   drnet_bye(reason)                                             -> 1 sent, 0 not connected (goodbye, socket stays open)
+ *   drnet_bye(reason)                                             -> 1 sent, 0 nothing to send (goodbye, socket stays
+ *                                                                    open; a client not yet connected says LEAVE)
  *   drnet_stop()                                                  -> 1 (says goodbye to the others first)
  *   drnet_log(text)                                               -> 1 (writes to drnet.log)
  *
@@ -95,9 +99,12 @@
 #define LAG_BIT 0x0800
 #define FRAME_MS (1000.0 / 30.0)
 #define QSIZE 1024
+#define LOBBY_SILENT_US 2000000   /* host: a client not yet welcomed that sent no HELLO for 2 s no longer counts */
 
-/* BYE: an input packet that also says goodbye; REJECT: host refuses a HELLO (version, player count or data.win) */
-enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5, T_REJECT = 6 };
+/* BYE: an input packet that also says goodbye; REJECT: host refuses a HELLO (version, player count or data.win);
+ * LEAVE: a client goes before it was welcomed (header only). Earlier protocol 5 builds ignore LEAVE, and the host's
+ * HELLO expiry works with any client (they all repeat HELLO until welcomed), so mixing them needs no version bump. */
+enum { T_HELLO = 1, T_WELCOME = 2, T_INPUT = 3, T_HASH = 4, T_BYE = 5, T_REJECT = 6, T_LEAVE = 7 };
 enum { REJ_PROTO = 1, REJ_HASH = 2, REJ_PLAYERS = 3 };
 
 #pragma pack(push, 1)
@@ -136,6 +143,7 @@ static int session_known;
 static int reject_logged;
 static struct sockaddr_in peer[MAXP + 1];   /* host: client addresses; client: peer[1] = host */
 static int have_peer[MAXP + 1];
+static uint64_t hello_us[MAXP + 1];         /* host, before connected: when each client last said HELLO */
 static int32_t frame_of[MAXP + 1][RING];    /* which frame the slot currently holds */
 static uint16_t bits_of[MAXP + 1][RING];
 static uint32_t aux_of[MAXP + 1][RING];
@@ -567,6 +575,20 @@ static void note_reject(const char *short_msg, const char *log_msg)
     }
 }
 
+/* Host, before everybody is connected (lock held): stop counting a client that has not said HELLO for 2 s. It was
+ * killed or crashed, so it sent no LEAVE; a client still waiting repeats HELLO every 200 ms. One that was only slow
+ * counts again with its next HELLO. */
+static void lobby_forget_silent(uint64_t now)
+{
+    int q;
+    if (!is_host || connected) return;
+    for (q = 2; q <= players; q++)
+        if (have_peer[q] && now - hello_us[q] > LOBBY_SILENT_US) {
+            have_peer[q] = 0;
+            logm("player %d sent no HELLO for %d s: no longer counted until it calls again", q, LOBBY_SILENT_US / 1000000);
+        }
+}
+
 /* Runs on the network thread, with the lock held. */
 static void handle(const char *buf, int len, const struct sockaddr_in *from, uint64_t now)
 {
@@ -634,16 +656,25 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             return;
         }
-        peer[h->player] = *from; have_peer[h->player] = 1;
+        peer[h->player] = *from; have_peer[h->player] = 1; hello_us[h->player] = now;
         /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
            exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
-           HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. */
+           HELLO every 200 ms until they are welcomed, so each one gets its WELCOME then. "In" means still here:
+           a client that left (LEAVE) or went silent no longer counts (lobby_forget_silent, issue #58). */
+        lobby_forget_silent(now);
         for (q = 2; q <= players; q++) if (!have_peer[q]) all = 0;
         if (all) {
             fill_hdr(&w.h, T_WELCOME, 1);
             w.flags = session_flags;
             connected = 1; session_known = 1;
             for (q = 2; q <= players; q++) send_to(&peer[q], &w, sizeof(w));
+        }
+    } else if (h->type == T_LEAVE && is_host) {
+        /* a client leaves before everybody is there: the others must not be welcomed into a session that waits
+           for it. Only from the address that said HELLO for that player; it counts again with its next HELLO. */
+        if (!connected && h->player >= 2 && h->player <= players && have_peer[h->player] && same_addr(&peer[h->player], from)) {
+            have_peer[h->player] = 0;
+            logm("player %d left before everybody was there (goodbye): no longer counted", h->player);
         }
     } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
         const reject_pkt *r = (const reject_pkt *)buf;
@@ -731,6 +762,7 @@ static DWORD WINAPI net_thread(LPVOID unused)
             if (sel_err++ < 3) logm("select error WSA %d", WSAGetLastError());
             unlock(); Sleep(5); lock();
         }
+        lobby_forget_silent(now_us());
         flush_queue(now_us());
         unlock();
     }
@@ -783,11 +815,20 @@ static void update_delay(uint64_t now)
 
 /* Goodbye: my last WINDOW frames as a BYE packet, so a partner still gets the input it needs to reach my last
  * frame. Sent three times, because UDP may lose one, and straight out (not through the test latency queue).
- * Lock held. */
-static void send_bye(void)
+ * A client that is not connected yet says LEAVE instead, so the host stops counting it (issue #58); a host that is
+ * not connected has nobody to tell (its clients go on calling it). Returns how many packets went out. Lock held. */
+static int send_bye(void)
 {
     input_pkt k; int32_t last = next_target - 1, first = last - WINDOW + 1; int i, r, n = 0;
-    if (sock == INVALID_SOCKET || !connected) return;
+    if (sock == INVALID_SOCKET) return 0;
+    if (!connected) {
+        hdr_t lv;
+        if (is_host || !have_peer[1] || connect_err) return 0;   /* refused: the host does not count it */
+        fill_hdr(&lv, T_LEAVE, me);
+        for (r = 0; r < 3; r++) raw_send(&peer[1], &lv, sizeof(lv));
+        logm("not connected yet: told the host to stop counting this player until its next HELLO");
+        return 3;
+    }
     if (first < 0) first = 0;
     memset(&k, 0, sizeof(k));
     fill_hdr(&k.h, T_BYE, me);
@@ -804,6 +845,7 @@ static void send_bye(void)
         }
     }
     if (n) logm("sent goodbye (last frame %d)", last);
+    return n;
 }
 
 EXPORT double drnet_option(const char *name, double value)
@@ -862,7 +904,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
     for (p = 0; p <= MAXP; p++) {
-        have_peer[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
+        have_peer[p] = 0; hello_us[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
         for (i = 0; i < RING; i++) frame_of[p][i] = -1;
         for (i = 0; i < HRING; i++) hash_frame[p][i] = -1;
     }
@@ -943,7 +985,8 @@ EXPORT double drnet_connect_poll(double timeout_ms)
 }
 
 /* While connecting: the players in the session so far, this one included. The host counts the clients whose HELLO
- * passed the checks; a client learns about the others only from the host's WELCOME, which comes once all are in. */
+ * passed the checks and that have not left (LEAVE) or gone silent for 2 s since (issue #58); a client learns about
+ * the others only from the host's WELCOME, which comes once all are in. */
 EXPORT double drnet_lobby(void)
 {
     int q, n = 1;
@@ -1147,9 +1190,11 @@ EXPORT const char *drnet_status(void) { return status; }
 
 EXPORT double drnet_bye(const char *reason)
 {
-    if (sock == INVALID_SOCKET || !connected) return 0;
+    int n;
+    if (sock == INVALID_SOCKET || (!connected && (is_host || connect_err))) return 0;
     logm("goodbye: %s", reason ? reason : "");
-    lock(); send_bye(); unlock();
+    lock(); n = send_bye(); unlock();
+    if (!n) return 0;
     Sleep(20);   /* the game usually exits right after this: leave the network stack a moment to send */
     return 1;
 }
