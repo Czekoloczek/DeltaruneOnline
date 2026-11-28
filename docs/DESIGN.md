@@ -211,9 +211,13 @@ core, so about a quarter of a core for two copies doing nothing; under Wine and 
 call. Sleeping until a packet comes (above) brought it to 1.2 %, 1.3 % and 1.8 % (40 ms test latency: 1.8 %, 2.4 %,
 3.3 %), with the same checksums and the same ping (0.6–1.2 ms on one machine, run-to-run noise either way). It is
 a lead for the stutter at about 23 fps with Ctrl held on a fully loaded PC under Proton (two-PC test, 2026-11-23),
-not yet proven to be its cause. In the game on one Windows PC the client used a full core and the host about half
-(PC test of PR #59, 2026-11-28), but there the client never waited in `drnet_exchange` (`wait 0.0` in `drnet.log`)
-while the host waited 5–24 ms a frame, so that is probably the game's own frame pacing, not the lockstep wait.
+not yet proven to be its cause.
+
+In the game (one Windows PC, two copies at the file menu, 2026-11-28, per thread over 8 s): one copy offline uses
+98 % of a core, nearly all on the main thread, so the game's own frame pacing keeps a core busy whatever drnet does.
+Online the client used 98 % (main) and 101 % (now): it never waits in `drnet_exchange` (`wait 0.0` in `drnet.log`),
+because the host's input is always there first. The host waits 5–24 ms a frame for the client, and that wait now
+sleeps: host 69 % → 42 % (main thread 61 % → 34 %). drnet's own threads used 1 % or less before and 0 % now.
 
 Session start: all machines must start from the same files (save, `dr.ini`, key config) and the same seed.
 For now copy the host's save folder to the clients by hand; sending it automatically is planned. Two files in that
