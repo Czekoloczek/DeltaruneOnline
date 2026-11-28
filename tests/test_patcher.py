@@ -221,6 +221,62 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("function dro_heart_collide_p1(_dro_b)", dp.HEART_OFF)
 
 
+# Made-up scripts in the shape the decompiler prints (a // comment after the arguments), not the game's code.
+def script(name, args="", body="    global.hp[1] -= 1;\n"):
+    return "function %s(%s) //gml_Script_%s\n{\n%s}\n" % (name, args, name, body)
+
+
+def immortal_texts(**over):
+    t = {"gml_GlobalScript_" + n: script(n) for n in dp.IMMORTAL_DAMAGE}
+    t["gml_GlobalScript_scr_gameover"] = script("scr_gameover", "arg0 = true", "    room_goto(0);\n")
+    t["gml_Object_obj_other_Step_0"] = "scr_damage();\n"
+    t.update(over)
+    return {k: v for k, v in t.items() if v is not None}
+
+
+class ImmortalHooks(unittest.TestCase):
+    def test_applied(self):
+        t = immortal_texts()
+        gen, note = dp.immortal_hooks(t)
+        self.assertEqual(note, "guards in %d damage scripts and scr_gameover" % len(dp.IMMORTAL_DAMAGE))
+        for n in dp.IMMORTAL_DAMAGE:
+            self.assertEqual(t["gml_GlobalScript_" + n], script(n, body="    if (dro_immortal())\n        return;\n"
+                                                                     "    global.hp[1] -= 1;\n"), n)
+        self.assertIn("{\n    if (dro_immortal_gameover())\n        return;\n    room_goto(0);",
+                      t["gml_GlobalScript_scr_gameover"])
+        self.assertEqual(t["gml_Object_obj_other_Step_0"], "scr_damage();\n", "callers stay as they are")
+        self.assertIn("function dro_immortal_hooked()\n{\n    return true;", gen)
+
+    def test_relatives_may_be_missing(self):
+        t = immortal_texts(gml_GlobalScript_scr_damage_sneo_final_attack=None, gml_GlobalScript_scr_damage_all=None)
+        gen, note = dp.immortal_hooks(t)
+        self.assertEqual(note, "guards in %d damage scripts and scr_gameover" % (len(dp.IMMORTAL_DAMAGE) - 2))
+        self.assertIn("return true;", gen)
+
+    def test_plain_signature_and_nested_default(self):
+        t = immortal_texts(gml_GlobalScript_scr_damage="function scr_damage(a = max(1, 2))\n{\n    x = a;\n}\n")
+        dp.immortal_hooks(t)
+        self.assertEqual(t["gml_GlobalScript_scr_damage"],
+                         "function scr_damage(a = max(1, 2))\n{\n    if (dro_immortal())\n        return;\n    x = a;\n}\n")
+
+    def assert_off(self, t):
+        before = copy.deepcopy(t)
+        gen, _ = dp.immortal_hooks(t)
+        self.assertEqual(gen, dp.IMMORTAL_OFF)
+        self.assertEqual(t, before, "hooks must change nothing when they are off")
+
+    def test_all_or_nothing(self):
+        self.assert_off(immortal_texts(gml_GlobalScript_scr_damage=None))
+        self.assert_off(immortal_texts(gml_GlobalScript_scr_gameover=None))
+        # a script that is there but looks different (no function of that name, or two)
+        self.assert_off(immortal_texts(gml_GlobalScript_scr_damage_all="global.hp[1] = 0;\n"))
+        self.assert_off(immortal_texts(gml_GlobalScript_scr_damage=script("scr_damage") + script("scr_damage")))
+        # scr_damage_all is not scr_damage
+        self.assert_off(immortal_texts(gml_GlobalScript_scr_damage=script("scr_damage_all")))
+
+    def test_off_module_defines_the_function(self):
+        self.assertIn("function dro_immortal_hooked()", dp.IMMORTAL_OFF)
+        self.assertIn("return false;", dp.IMMORTAL_OFF)
 # Made-up draw code in the shape of the SOUL draws (no game code): what the other_souls rewrite must do.
 SOUL_DRAW = """if (color == 2)
 {
