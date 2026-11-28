@@ -221,6 +221,24 @@ class HeartHooks(unittest.TestCase):
         self.assertIn("function dro_heart_collide_p1(_dro_b)", dp.HEART_OFF)
 
 
+class CameraHooks(unittest.TestCase):
+    def test_creates_missing_events(self):
+        t = {}
+        dp.camera_hooks(t)
+        self.assertEqual(t[dp.HOOK_PREDRAW], "dronline_cam_begin();\n")
+        self.assertEqual(t[dp.HOOK_POSTDRAW], "dronline_cam_end();\n")
+
+    def test_goes_before_existing_code(self):
+        # an exit in the existing event must not skip moving or restoring the shared camera
+        t = {
+            dp.HOOK_PREDRAW: "if (skip)\n    exit;\nshadow_draw();\n",
+            dp.HOOK_POSTDRAW: "if (a)\n    exit;\ndraw_x();\n",
+        }
+        dp.camera_hooks(t)
+        self.assertTrue(t[dp.HOOK_PREDRAW].startswith("dronline_cam_begin();\n"))
+        self.assertTrue(t[dp.HOOK_PREDRAW].endswith("shadow_draw();\n"))
+        self.assertTrue(t[dp.HOOK_POSTDRAW].startswith("dronline_cam_end();\n"))
+        self.assertTrue(t[dp.HOOK_POSTDRAW].endswith("draw_x();\n"))
 # Made-up scripts in the shape the decompiler prints (a // comment after the arguments), not the game's code.
 def script(name, args="", body="    global.hp[1] -= 1;\n"):
     return "function %s(%s) //gml_Script_%s\n{\n%s}\n" % (name, args, name, body)

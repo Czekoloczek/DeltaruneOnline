@@ -453,17 +453,31 @@ invisible `gamescope --backend headless` instances and prints both `drnet.log` f
 waiting screen; since then a game that waits for the others logs "frozen at frame 1" and "connected at frame 1
 after N frames frozen, immortal SOUL off".)
 
-## Planned: split camera
+## Own camera and arrows
 
-The faint SOULs of the other players are done (see "Own SOUL" above). The split camera is a drawing-only change
-too, so it must never change game state or consume the shared RNG:
+The faint SOULs of the other players are done (see "Own SOUL" above). The own camera and the arrows are
+drawing-only changes too, so they must never change game state or consume the shared RNG:
 
-- **Split camera**: game logic keeps using the one shared camera (`camerax()`/`cameray()` are read by many
-  scripts), so it must stay identical everywhere. The split view is extra rendering on top: when the players
-  are further apart than a threshold, each machine additionally draws a second view around its local player.
-  Extra views make GameMaker run every Draw event once more per view, and some DELTARUNE Draw events call
-  `random()`, so a split decision must be made identically on all machines (it depends only on player
-  positions, which are synced) or the extra view must be drawn to a surface without running Draw events.
+- **Own camera** (a draft, `camera=own`, default `shared`; it replaces the split screen planned before): online
+  every player has a screen of their own, so instead of splitting one screen, each machine shows the view around
+  its own character once that character leaves the shared view, and glides back when it returns. Game logic
+  keeps the one shared camera: `camerax()`/`cameray()` are read in about 345 Step, Alarm and Create events and
+  38 scripts of Chapter 5, so the camera they read must be identical everywhere. The own view therefore exists
+  only while the game draws: obj_time's Pre-Draw moves the view (the game itself moves the view in Pre-Draw for
+  its sun shadows), and obj_time's Post-Draw puts the shared position back before the next Step. There is still
+  one view, so every Draw event runs once per frame as before. A second view (a real split screen) would run
+  every Draw event twice per frame: about 400 of Chapter 5's 979 Draw events change variables (animation
+  counters run twice as fast) and some call `random()`, so all machines would have to split in the same frame.
+  **The risk**: Draw events between Pre-Draw and Post-Draw read the own camera. About 30 of Chapter 5's Draw
+  events store something computed from the camera, and 4 of them move an instance. Where such a value feeds the
+  game logic, the machines go out of sync: each of them must be checked and, where needed, rewritten by the
+  patcher to read the shared camera (`global.dro_cam_sx`/`dro_cam_sy` while the view is moved). A desync shows in
+  the status line and `tools/diff_state.py` names the object. **Not tested in the game yet.** obj_time has no
+  Pre-Draw in Chapter 5; the importer creates it (checked in a build).
+- **Arrows** (`arrows=1`, the default): in the overworld an arrow at the edge of the screen points to every other
+  player whose character is out of the view that is drawn. Player 1 is Kris (`obj_mainchara`); in the Local
+  Multiplayer mod players 2 and 3 steer the party member (`obj_caterpillarchara`) whose `controls` is 1 or 2. The
+  arrows are drawn in obj_time's Draw GUI and only read instances. Not tested in the game yet.
 
 ## Virtual audio clock
 

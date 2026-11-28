@@ -46,8 +46,9 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
    other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; checked in
    an online two-player battle); next: your character in the overworld and the FIGHT timing bar.
 7. **Online-only quality of life** (planned):
-   - **shared camera that splits when players drift apart**: one camera while everyone is close, split
-     screen once a player walks too far away.
+   - **your own camera and arrows** (draft, not tested in the game yet): in the overworld your screen follows your
+     own character when it walks away from the others (`camera=own`), and an arrow at the screen edge points to
+     every player you can't see (`arrows=1`).
 8. **Session start**: send the host's save, mod settings (`keyconfig_mod.ini`) and language to every player
    automatically; for now they are copied by hand.
 9. **Chapters 1 to 4**: port the patch; the hazard counts per chapter are in [docs/DESIGN.md](docs/DESIGN.md).
