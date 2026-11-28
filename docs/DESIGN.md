@@ -49,7 +49,9 @@ Each frame *F*, a machine sends its bits for frame *F + D* and waits until it ha
 for frame *F*. Waiting has to block inside the frame, which GameMaker's asynchronous networking cannot do, so
 the native DLL `native/drnet.c` (Windows build, also under Proton) handles UDP, resends and the blocking wait.
 A network thread receives packets the moment they arrive, so the ping is measured exactly and the host relays
-input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
+input without waiting for its own next frame. Nothing polls: the network thread sleeps until a packet arrives
+(`WSAEventSelect`) or a delayed test packet is due, and a game waiting in `drnet_exchange` sleeps until input
+arrives or its 16 ms resend is due. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
 last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `WELCOME` / `REJECT`, protocol 5),
 `drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
@@ -185,6 +187,16 @@ Wine, optionally with test latency, and print running checksums of everything th
 Results: no latency → delay 0, 33 ms frames; 30 ms each way → ping 61 ms, delay 1, 33 ms frames; 60 ms each
 way → ping 121 ms, delay 2, 33 ms frames; 30 ms each way with a fixed delay 0 → 36 ms frames (the slowdown the
 automatic delay avoids). Checksums identical in every run.
+
+CPU (2026-11-28, `test_drnet` host and client under Wine 9.0, 30 fps, no game): until then the network thread woke
+every 1 ms and a waiting `drnet_exchange` every 2 ms. That cost the host 5 %, the client 6 % and wineserver 16 % of a
+core, so about a quarter of a core for two copies doing nothing; under Wine and Proton every wake is a wineserver
+call. Sleeping until a packet comes (above) brought it to 1.2 %, 1.3 % and 1.8 % (40 ms test latency: 1.8 %, 2.4 %,
+3.3 %), with the same checksums and the same ping (0.6–1.2 ms on one machine, run-to-run noise either way). It is
+a lead for the stutter at about 23 fps with Ctrl held on a fully loaded PC under Proton (two-PC test, 2026-11-23),
+not yet proven to be its cause. In the game on one Windows PC the client used a full core and the host about half
+(PC test of PR #59, 2026-11-28), but there the client never waited in `drnet_exchange` (`wait 0.0` in `drnet.log`)
+while the host waited 5–24 ms a frame, so that is probably the game's own frame pacing, not the lockstep wait.
 
 Session start: all machines must start from the same files (save, `dr.ini`, key config) and the same seed.
 For now copy the host's save folder to the clients by hand; sending it automatically is planned. Two files in that
