@@ -782,7 +782,14 @@ static DWORD WINAPI net_thread(LPVOID unused)
     evs[0] = ev_sock; evs[1] = ev_wake;
     while (running) {
         lock(); w = net_sleep_ms(now_us()); unlock();
-        w = WaitForMultipleObjects(2, evs, FALSE, w);
+        if (sock_events) {
+            w = WaitForMultipleObjects(2, evs, FALSE, w);
+        } else {                                /* no events (see drnet_start): poll the socket every 1 ms, as before */
+            fd_set rs; struct timeval tv;
+            FD_ZERO(&rs); FD_SET(sock, &rs);
+            tv.tv_sec = 0; tv.tv_usec = 1000;
+            w = select(0, &rs, NULL, NULL, &tv) < 0 ? WAIT_FAILED : 0;
+        }
         lock();
         if (w != WAIT_FAILED) {
             if (sock_events) {                  /* resets ev_sock; if that fails, reset it here, or the wait would spin */
@@ -916,13 +923,11 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     WSADATA w; struct sockaddr_in a; u_long nb = 1; int p, i;
     logm("start %s host=%s port=%g players=%g me=%g delay=%g (protocol %d)", host_flag ? "host" : "client", host_ip, port, nplayers, my_player, dly, PROTO);
     if (sock != INVALID_SOCKET) return 1;
-    if (!cs_ready) {
-        InitializeCriticalSection(&cs);
-        ev_input = CreateEventA(NULL, FALSE, FALSE, NULL);
-        ev_sock = CreateEventA(NULL, TRUE, FALSE, NULL);    /* manual reset, like WSACreateEvent */
-        ev_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
-        cs_ready = 1;
-    }
+    if (!cs_ready) { InitializeCriticalSection(&cs); cs_ready = 1; }
+    /* Made here, not once with cs, so that one CreateEventA that failed is tried again at the next start. */
+    if (!ev_input) ev_input = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!ev_sock) ev_sock = CreateEventA(NULL, TRUE, FALSE, NULL);     /* manual reset, like WSACreateEvent */
+    if (!ev_wake) ev_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return fail("WSAStartup");
     is_host = host_flag != 0;
     players = (int)nplayers; me = (int)my_player;
@@ -949,10 +954,10 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
             logm("SetHandleInformation failed (%lu): a chapter change may keep port %g busy", GetLastError(), port);
     }
     ioctlsocket(sock, FIONBIO, &nb);
-    /* The network thread sleeps on ev_sock until a packet arrives. If Winsock refuses (never seen), it polls the
-       socket every 1 ms instead, as all versions before did. */
-    sock_events = ev_sock && ev_wake && WSAEventSelect(sock, ev_sock, FD_READ) == 0;
-    if (!sock_events) logm("WSAEventSelect failed (WSA %d): the network thread polls every 1 ms", WSAGetLastError());
+    /* The network thread sleeps on ev_sock until a packet arrives. Without the events, or if Winsock refuses (never
+       seen), it polls the socket every 1 ms instead, as all versions before did. */
+    if (!ev_sock || !ev_wake) { sock_events = 0; logm("CreateEvent failed (%lu): the network thread polls every 1 ms", GetLastError()); }
+    else if (!(sock_events = WSAEventSelect(sock, ev_sock, FD_READ) == 0)) logm("WSAEventSelect failed (WSA %d): the network thread polls every 1 ms", WSAGetLastError());
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
