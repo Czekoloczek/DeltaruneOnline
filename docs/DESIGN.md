@@ -103,6 +103,23 @@ reordered) does not. With 3 players, a client gets the other client's input only
 said goodbye, a client counts any missing input as "left". A crash or a killed process sends nothing, so the 10 s
 timeout remains for those.
 
+**Leaving before everybody is there** (issue #58). With 3 players the host welcomes nobody until both clients have
+said `HELLO`, so a client can leave while the host still waits for the other one. If the host went on counting it, it
+would welcome the last player into a session that waits for the input of a player who is gone, and the host and that
+player would stop after the 10 s timeout with "connection lost". So when a client that is not connected yet closes
+(the same `drnet_bye` and `drnet_stop` calls as above), it sends `LEAVE` instead of a goodbye, three times, and the
+host stops counting it. A client that is killed or crashes sends nothing, so the host also stops counting a client it
+has not heard `HELLO` from for 2 s (clients repeat it every 200 ms until they are welcomed). Either way the waiting
+screen's count (`drnet_lobby`) drops with it, and a client that was only slow counts again with its next `HELLO`. A
+`HELLO` sent before the `LEAVE` but arriving after it (reordered, or held in the test lag queue) would count a player
+who is gone, so for 2 s after a `LEAVE` the host ignores `HELLO` from that address, also when the `LEAVE` overtook all
+of them; a game that starts again gets a new port. A client sends `LEAVE` only once it has said `HELLO`, so the Game
+End that DELTARUNE fires when it restarts itself at chapter start, before the first `HELLO`, sends nothing. With 2
+players this cannot happen, since the host connects the moment its only client says `HELLO`. Protocol-5 builds from
+before `LEAVE` ignore it, and the 2 s rule works with any client, so this needs no protocol change. What remains is a
+client that crashes in the 2 s before the last player arrives, and a `HELLO` from before a `LEAVE` that arrives more
+than 2 s late.
+
 `delay=<frames>` in `dronline.ini` fixes *D* instead; with a fixed 0 the game waits out the network every
 frame and slows down above roughly 30 ms ping.
 
@@ -235,7 +252,10 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 - `sh native/test_handshake.sh`: checks that peers with matching `-game` files connect with identical checksums,
   while mismatched `data.win` hashes (with both SHA-256 prefixes) and mismatched player counts are refused promptly
   without aborting the host or waiting compatible peers, and a missing `data.win` (even on both sides) fails on
-  start (Wine on Linux, native on Windows).
+  start (Wine on Linux, native on Windows). With 3 players, player 2 leaves the lobby before player 3 arrives: with
+  `LEAVE`, with `LEAVE` and 300 ms test latency (so its last `HELLO`s reach the host after the `LEAVE`), and killed
+  without a word (`test_drnet … lobby` / `lobby-crash`). The host's count of players (`drnet_lobby`) must drop back,
+  the host must wait for a new player 2 instead of starting with player 3 alone, and all three must end in sync.
 - `python3 native/test_agent.py [solo] [long] [online]`: the Agent API of the DLL, with `test_agent.exe` standing
   in for the game (see "Agent API" below). About a minute; CI runs it on Linux under Wine and on Windows.
   `tests/test_agent_client.py`, among the unit tests, covers `tools/agent_client.py` without a game or a network
