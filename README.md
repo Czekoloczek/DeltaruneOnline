@@ -25,6 +25,10 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
   waits, so the game keeps its full 30 fps. Your own SOUL is still drawn without delay, and bullets hit it where you
   see it: your game decides your hits and tells the others, so dodging feels like single player. The other players'
   hearts are drawn faint on your screen (`other_souls`, 10 % by default), so you never mistake one for your own.
+- **Waiting screen.** Until everybody is connected, the game is paused and shows "Waiting for the Other Player" in
+  the game's own font, with your role, the address, the time left (it gives up after 2 minutes) and, on the host,
+  why a player was turned away. Hold Esc to quit. Who hosts is set in each player's `dronline.ini` (`mode=host` or
+  `mode=client` with `host=<address>`). Not yet tried in the game.
 
 ### Roadmap
 
@@ -39,8 +43,8 @@ Every player runs the game on their own PC, and the games stay in sync by exchan
 5. **Patcher**: UndertaleModTool CLI scripts that apply the changes to the user's own files.
 
 6. **Own SOUL**: your heart reacts without delay and is hit where you see it (done for the red SOUL), and the
-   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; not yet
-   checked in the game); next: your character in the overworld and the FIGHT timing bar.
+   other players' hearts are drawn faint (`other_souls` in `dronline.ini`, default 0.1, 0 hides them; checked in
+   an online two-player battle); next: your character in the overworld and the FIGHT timing bar.
 7. **Online-only quality of life** (planned):
    - **your own camera and arrows** (draft, not tested in the game yet): in the overworld your screen follows your
      own character when it walks away from the others (`camera=own`), and an arrow at the screen edge points to
@@ -91,6 +95,10 @@ To install, whichever way you built it:
 Without a config file the patched game behaves like the original. To enable a mode, copy
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it
 works and how to test determinism.
+
+For tests, `immortal=1` in `dronline.ini` keeps the party alive in battles: damage does not lower HP and there is
+no game over (story battles meant to be lost still end as written). Online the host's setting applies to everyone.
+The status line shows `IMMORTAL SOUL` while it is on. Not tried in the game yet.
 
 ## Requirements
 

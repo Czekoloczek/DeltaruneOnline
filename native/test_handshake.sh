@@ -69,7 +69,7 @@ run_exe() {
     fi
 }
 
-# Prompt refusal bound: well below the 30 s drnet_connect timeout, tolerant of Wine/CI jitter.
+# Prompt refusal bound: well below the 30 s connect timeout of test_drnet (drnet_connect_poll), tolerant of Wine/CI jitter.
 MAX_REFUSAL_S=15
 
 check_sync() {

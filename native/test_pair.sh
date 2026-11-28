@@ -1,11 +1,11 @@
 #!/bin/sh
 # Lockstep check for drnet.dll without the game: runs native/build/test_drnet.exe as a host and its clients
 # on this machine and checks that every side received exactly the same input (same running checksum, no
-# desync). On Linux it runs them under Wine (WINE=path picks another Wine, e.g. Proton's files/bin/wine);
+# desync) and uses the host's session flags. On Linux it runs them under Wine (WINE=path picks another Wine, e.g. Proton's files/bin/wine);
 # on Windows (Git Bash) it runs them natively. Used by .github/workflows/tests.yml.
 #   sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]      defaults: 0 450 2 0
 # late_s: the last client starts that many seconds after the others, as when a friend joins late. The others must
-# wait for it (test_drnet connects with a 30 s timeout) instead of giving up after the 10 s exchange timeout.
+# wait for it (test_drnet connects with a 30 s timeout, polling like the game) instead of giving up after the 10 s exchange timeout.
 # Needs native/build/drnet.dll and native/build/test_drnet.exe (sh native/build.sh).
 set -eu
 lag=${1:-0}
@@ -74,6 +74,9 @@ while [ "$p" -le "$players" ]; do
         desync=$(echo "$done_line" | sed -E 's/.*desync (-?[0-9]+).*/\1/')
         echo "  player $p: final sum $sum, desync $desync"
         [ "$desync" = "-1" ] || ok=0
+        # the host asks for session flags 5, the clients for 0: every side must use the host's (Wine's printf
+        # ends lines with \r\n, so the \r goes first)
+        tr -d '\r' < "$out/$p.txt" | grep -q ' session 5$' || { echo "  player $p does not use the host's session flags:"; grep ' session ' "$out/$p.txt" | sed 's/^/    /'; ok=0; }
         if [ -z "$first" ]; then first=$sum; elif [ "$sum" != "$first" ]; then ok=0; fi
     fi
     p=$((p + 1))

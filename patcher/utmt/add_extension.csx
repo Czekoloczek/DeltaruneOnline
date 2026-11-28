@@ -41,6 +41,9 @@ void Fn(string name, UndertaleExtensionVarType ret, params UndertaleExtensionVar
 Fn("drnet_set_host", D, S);
 Fn("drnet_start", D, D, D, D, D, D);
 Fn("drnet_connect", D, D);
+Fn("drnet_connect_poll", D, D);
+Fn("drnet_lobby", D);
+Fn("drnet_lobby_note", S);
 Fn("drnet_exchange", D, D, D);
 Fn("drnet_hash", D, D, D);
 Fn("drnet_desync", D);
@@ -56,6 +59,7 @@ Fn("drnet_pending", D, D);
 Fn("drnet_delay", D);
 Fn("drnet_ping", D);
 Fn("drnet_wait", D);
+Fn("drnet_session", D);
 // Agent API (docs/agent-api.md): the protocol lives in the DLL, the game only supplies its state and takes input.
 Fn("drnet_agent_start", D, D);
 Fn("drnet_agent_frame", D);

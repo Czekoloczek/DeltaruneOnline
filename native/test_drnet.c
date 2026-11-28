@@ -9,6 +9,8 @@
  * Each side feeds pseudo-random bits and events, folds every frame's result (all players' bits and
  * events) into a running checksum and prints it: lockstep works if all sides print the same checksums.
  * It also prints the delay, ping, average wait and frame time, so a slowdown shows up as frame time > 33 ms.
+ * The host asks for session flags 5 and every client for 0: after connecting, every side must print the host's
+ * ("session 5"), as the game applies the host's settings everywhere (immortal SOUL).
  */
 #include <windows.h>
 #include <stdio.h>
@@ -62,7 +64,7 @@ int main(int argc, char **argv)
     f_start start = (f_start)GetProcAddress(h, "drnet_start");
     f_str set_host = (f_str)GetProcAddress(h, "drnet_set_host");
     f_sd option = (f_sd)GetProcAddress(h, "drnet_option");
-    f_d connect = (f_d)GetProcAddress(h, "drnet_connect");
+    f_d connect_poll = (f_d)GetProcAddress(h, "drnet_connect_poll");
     f_dd exchange = (f_dd)GetProcAddress(h, "drnet_exchange");
     f_d set_aux = (f_d)GetProcAddress(h, "drnet_set_aux");
     f_d aux = (f_d)GetProcAddress(h, "drnet_aux");
@@ -75,11 +77,18 @@ int main(int argc, char **argv)
     f_s status = (f_s)GetProcAddress(h, "drnet_status");
     f_v stop = (f_v)GetProcAddress(h, "drnet_stop");
     f_str bye = (f_str)GetProcAddress(h, "drnet_bye");
+    f_v session = (f_v)GetProcAddress(h, "drnet_session");
+    if (!session) { printf("drnet.dll has no drnet_session\n"); return 1; }
     set_host(ip);
     if (lag > 0) option("lag", lag);
+    option("session", strcmp(role, "host") == 0 ? 5 : 0);
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
     printf("%s: connecting...\n", status());
-    if (!connect(30000)) { printf("connect failed: %s\n", status()); stop(); return 1; }
+    /* like the game: one drnet_connect_poll per 33 ms frame (it draws its waiting screen in between) */
+    double r;
+    while ((r = connect_poll(30000)) == 0) Sleep(33);
+    if (r < 0) { printf("connect failed: %s\n", status()); stop(); return 1; }
+    printf("%s session %g\n", role, session());
     double t0 = now_ms(), tblock = t0;
     for (f = 0; f < frames; f++) {
         double tf = now_ms();

@@ -51,13 +51,29 @@ the native DLL `native/drnet.c` (Windows build, also under Proton) handles UDP, 
 A network thread receives packets the moment they arrive, so the ping is measured exactly and the host relays
 input without waiting for its own next frame. Star topology: clients talk only to the host, which relays
 everyone's input, so only the host needs an open UDP port (default 7845). Every packet carries the sender's
-last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `REJECT`, protocol 4),
+last 16 frames, so a lost packet is covered by the next one. During the handshake (`HELLO` / `WELCOME` / `REJECT`, protocol 5),
 `drnet.dll` hashes the running chapter's `data.win` (from `-game <path>` or next to `drnet.dll`) with SHA-256 —
 refusing to start if `data.win` cannot be read — and the host rejects clients with a build, protocol or player-count
 mismatch (showing both SHA-256 hash prefixes on a `data.win` mismatch) while keeping the lobby open for valid peers
-so an incompatible or stray packet cannot abort a session. All players must update `drnet.dll` together: mixing
-protocol 3 and protocol 4 peers can still hit the connection timeout on the protocol-3 side. State fingerprints are
-exchanged every 30 frames to detect desyncs.
+so an incompatible or stray packet cannot abort a session. `WELCOME` carries the host's session flags (bit 0: immortal
+SOUL, below), and every machine applies the host's, so a setting that changes the game cannot differ between
+players. All players must update `drnet.dll` together: mixing protocol 4 and protocol 5 peers is refused as a
+version mismatch, and mixing protocol 3 with a newer one can still hit the connection timeout on the protocol-3 side.
+State fingerprints are exchanged every 30 frames to detect desyncs.
+
+**Waiting for the others** (issue #46). Frame 0 runs as usual on every machine, without input. From frame 1 the game
+is frozen until everybody is connected, and it keeps running frames meanwhile, so the window stays responsive: obj_time
+draws "Waiting for the Other Player" in the game's own font (`fnt_mainbig`), with the role, the address and port, the
+time waited and left (2 minutes), on the host the players in so far (3 players) and why it last turned someone away
+(`drnet_lobby`, `drnet_lobby_note`). Holding Esc for a second closes the game. Each frame calls
+`drnet_connect_poll` once, which sends the client's HELLO every 200 ms and never blocks. Frozen works like the game's
+own console pause: `instance_deactivate_all(true)` from obj_time and `audio_pause_all()`. The patcher's hook is
+`if (dronline_step()) exit;`, so the rest of obj_time's Begin Step (the game's input polling and `global.time`) is
+skipped too, and `global.dro_frame`, which drives every virtual clock, does not move. So the state that comes out
+does not depend on how long a machine waited: every machine deactivates in its first frozen frame and activates
+again in a later one (never the same frame), and the connected frame then runs as frame 1 did before. What keeps
+running while frozen is outside the instances: obj_time's own Step, Draw and alarms (window and debug only on PC),
+room layers and `call_later` time sources, which the chapter start does not use.
 
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
@@ -140,6 +156,30 @@ state), obj_dashpath (the mod draws it at heart 1 for every player) and the mod'
 (also always at heart 1). The patcher prints how many calls it changed per object after "other players' SOULs
 drawn faint".
 
+## Immortal SOUL (test aid)
+
+`immortal=1` in `[online]` keeps the party alive, so an AI player (`tools/deepseek_player.py`, which cannot dodge
+bullets) or a tester can get through battles. It works in every mode but `off`; the status line then shows
+`IMMORTAL SOUL`.
+
+- **Where.** In Chapter 5 the bullets reach `scr_damage` or `scr_damage_all` through obj_collidebullet's User
+  Event 5 (also from the own SOUL hit path above). `scr_damage_proportional`, `scr_damage_sneo_final_attack`,
+  `scr_damage_all_overworld` and `scr_damage_all_platmode` lower HP too, and each of these scripts ends with the
+  game-over check: no party member above 0 HP calls `scr_gameover`. A few objects call `scr_gameover` directly.
+- **How.** The patcher puts `if (dro_immortal()) return;` at the start of each damage script, so HP never drops,
+  and `if (dro_immortal_gameover()) return;` at the start of `scr_gameover`, which gives every party member at 0 HP
+  their full HP back and skips the game over. It is all or nothing like the own SOUL hooks: if `scr_damage` or
+  `scr_gameover` is missing or a script looks different, nothing changes, the patcher prints why after "immortal
+  SOUL hooks", and the status line says `immortal SOUL not in this build`.
+- **Story losses still happen.** With `global.flag[35]` set, running out of HP is a scripted loss (the battle goes
+  on) or an instant retry, so the guards let damage through then; some story battles need it.
+- **Online.** HP is shared state, so immortality must be the same on every machine in every frame. The host's
+  value goes to the clients in `WELCOME`, every machine sets it in the frame it connects (frame 1, the first frame
+  after the waiting screen, before anything can hurt: `dronline_step` reads `drnet_session()` as soon as
+  `dronline_wait` reports everybody there), and a client's own `immortal=` is only logged in `drnet.log`. The
+  hooks only read shared state, so the lockstep and the desync check are unchanged.
+- **Not tried in the game yet.**
+
 `native/test_drnet.c` checks the DLL alone: host and client exchange pseudo-random input and events under
 Wine, optionally with test latency, and print running checksums of everything they received; they must match.
 Results: no latency → delay 0, 33 ms frames; 30 ms each way → ping 61 ms, delay 1, 33 ms frames; 60 ms each
@@ -178,9 +218,9 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
 
 - `python3 -m unittest discover -s tests -v` (standard library only):
   - `tests/test_patcher.py`: the rewrite rules (word boundaries, idempotence, only `PLAYER_AMOUNT` among the mod's
-    settings), the obj_heart hooks, including "all or nothing" when the game's code looks different, and the faint
-    SOULs of the other players (which heart a draw belongs to, nothing but the alpha changes). The GML snippets are
-    written for the tests and only imitate the game's code.
+    settings), the obj_heart hooks and the immortal SOUL guards, including "all or nothing" when the game's
+    code looks different, and the faint SOULs of the other players (which heart a draw belongs to, nothing
+    but the alpha changes). The GML snippets are written for the tests and only imitate the game's code.
   - `tests/test_consistency.py`: every function the patcher points the game at exists in `gml/scr_dronline.gml`,
     and every `drnet_*` call is exported by `native/drnet.c` and registered in `add_extension.csx` with the same
     types, with no function of more than 4 arguments taking a string (the pitfalls below). Every option the GML
@@ -188,7 +228,7 @@ They also run on every pull request and push to main (`.github/workflows/tests.y
     `config/dronline.ini.example` and in the settings comment of `gml/scr_dronline.gml`.
 - `sh native/build.sh && sh native/test_pair.sh [lag_ms] [frames] [players] [late_s]`: runs `test_drnet.exe` as a
   host and its clients and fails unless every side ends with the same checksum of all received input and no
-  desync. With `late_s`, the last client starts that many seconds after the others. On Linux it uses Wine
+  desync, and uses the host's session flags (the host asks for 5, the clients for 0). With `late_s`, the last client starts that many seconds after the others. On Linux it uses Wine
   (`WINE=…/GE-Proton…/files/bin/wine` tests Proton's Wine), on Windows (Git Bash, `CC=gcc`) it runs natively. CI
   runs it on Linux under Wine and on a real Windows machine, each with 0, 30 and 60 ms test latency, with 3
   players, and with a third player who joins 12 s late.
@@ -409,7 +449,9 @@ WireGuard puts both PCs on one private network, so the game works as on a LAN:
 
 `tools/headless_test.sh` starts a host and a client of the patched chapter directly (no launcher) inside
 invisible `gamescope --backend headless` instances and prints both `drnet.log` files. Result on Chapter 5
-(Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync.
+(Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync. (That run was before the
+waiting screen; since then a game that waits for the others logs "frozen at frame 1" and "connected at frame 1
+after N frames frozen, immortal SOUL off".)
 
 ## Own camera and arrows
 

@@ -44,6 +44,11 @@
 //   other_souls = 0.1                          (host/client) opacity of the other players' SOULs in battle on this screen,
 //                                              so they are not mistaken for your own: 0 = hidden, 1 = as in the game.
 //                                              Drawing only, the hearts still dodge and get hit on every machine
+//   immortal = 0 | 1                           (testing; any mode but off) 1: damage does not lower HP and there is
+//                                              no game over, for AI test runs. Online the host's value applies on
+//                                              every machine (sent in WELCOME); a client's own is only logged. Not
+//                                              in battles that are meant to be lost (story). The status line shows
+//                                              IMMORTAL SOUL while it is on
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -62,6 +67,9 @@ function dronline_init()
     global.dro_srec_file = "";
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
+    global.dro_immortal_ini = 0;
+    global.dro_immortal_want = false;   // asked for: immortal= here, or online the host's flag
+    global.dro_immortal = false;        // on: asked for, and the hooks are in this build
     global.dro_agent_tries = 0;
     global.dro_arrows = 1;
     global.dro_camera = "shared";
@@ -100,6 +108,7 @@ function dronline_init()
         global.dro_arrows = ini_read_real("online", "arrows", 1);
         global.dro_camera = string_lower(ini_read_string("online", "camera", "shared"));
         global.dro_other_souls = clamp(ini_read_real("online", "other_souls", 0.1), 0, 1);
+        global.dro_immortal_ini = (ini_read_real("online", "immortal", 0) != 0) ? 1 : 0;
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -117,6 +126,10 @@ function dronline_init()
     global.dro_hashlog = -1;
     global.dro_net = false;
     global.dro_connecting = false;
+    global.dro_wait = 0;
+    global.dro_wait_ms = 120000;
+    global.dro_wait_start = 0;
+    global.dro_wait_quit = 0;
     global.dro_leaving = false;
     global.dro_restarting = false;
     global.dro_netframe = 0;
@@ -158,6 +171,8 @@ function dronline_init()
             drnet_option("lag", global.dro_lag);
         if (global.dro_jitter > 0)
             drnet_option("jitter", global.dro_jitter);
+        // session flags: the host's go to every machine in WELCOME (bit 0: immortal SOUL)
+        drnet_option("session", global.dro_immortal_ini);
         if (!drnet_start(global.dro_mode == "host", global.dro_port, global.dro_players, global.dro_player, global.dro_delay))
         {
             var why = drnet_status();
@@ -170,8 +185,9 @@ function dronline_init()
         // The session decides the Local Multiplayer player count, not each machine's keyconfig_mod.ini
         // (the game read it at startup; later reads go through dro_ini_player_amount).
         global.playeramount = global.dro_players;
-        // Connect on the next frame: frame 0 runs without input on every machine (so they stay identical)
-        // and draws the "waiting" text, then frame 1 blocks until everybody is there.
+        // Connect from the next frame on: frame 0 runs without input on every machine (so they stay identical),
+        // then the game is frozen from frame 1 until everybody is there, with the waiting screen drawn every
+        // frame (dronline_wait).
         global.dro_net = true;
         global.dro_connecting = true;
         drnet_log("init: network started, room " + room_get_name(room) + ", config " + global.dro_ini);
@@ -186,6 +202,12 @@ function dronline_init()
         }
         global.dro_netframe = 0;
         global.dro_msg = drnet_status();
+    }
+    else
+    {
+        // offline modes: this machine's own immortal=; online it is set once connected (dronline_step)
+        global.dro_immortal_want = (global.dro_immortal_ini != 0);
+        global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
     }
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_agent_init();
@@ -389,10 +411,12 @@ function dronline_press(k)
 }
 
 // ---- called first in obj_time Begin Step, once per frame ----
+// The patcher inserts `if (dronline_step()) exit;`: true = the game is frozen this frame (waiting for the others),
+// so the rest of obj_time's Begin Step (the game's input polling, global.time) does not run either.
 function dronline_step()
 {
     if (!dronline_ready())
-        return;
+        return false;
     dronline_agent_poll();
     global.dro_restarting = false;
     dronline_cam_end();
@@ -417,26 +441,22 @@ function dronline_step()
     if (!global.dro_net)
         mine = dronline_script_frame(mine);
     global.dro_bits[global.dro_player] = mine;
-    if (global.dro_net && global.dro_frame < 5)
+    if (global.dro_net && global.dro_frame < 5 && !(global.dro_connecting && global.dro_wait > 0))
         drnet_log("step frame " + string(global.dro_frame) + " room " + room_get_name(room) + " connecting " + string(global.dro_connecting));
     if (global.dro_net && global.dro_connecting)
     {
         if (global.dro_frame == 0)
             mine = 0;
-        else if (!drnet_connect(120000))
-        {
-            var why = drnet_status();
-            drnet_stop();
-            global.dro_net = false;
-            global.dro_connecting = false;
-            show_message("DeltaruneOnline: could not connect (" + global.dro_mode + "): " + why + ". Closing the game.");
-            game_end();
-            return;
-        }
+        else if (dronline_wait())
+            return true;
         else
         {
             global.dro_connecting = false;
-            drnet_log("connected at frame " + string(global.dro_frame));
+            // the host's session flags, the same on every machine from this frame on (the first frame after the wait)
+            var _sf = drnet_session();
+            global.dro_immortal_want = (_sf >= 0) && ((_sf & 1) != 0);
+            global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
+            drnet_log("connected at frame " + string(global.dro_frame) + " after " + string(global.dro_wait) + " frames frozen, immortal SOUL " + (global.dro_immortal ? "on" : "off"));
         }
         global.dro_bits[global.dro_player] = mine;
     }
@@ -457,14 +477,14 @@ function dronline_step()
             {
                 // this game is changing chapter too (dro_game_change), so the others leaving is expected
                 drnet_log("network closed while changing chapter at frame " + string(global.dro_frame));
-                return;
+                return false;
             }
             if (_all == -2)
                 show_message("DeltaruneOnline: " + why + " (frame " + string(global.dro_frame) + "). Closing the game.");
             else
                 show_message("DeltaruneOnline: connection lost at frame " + string(global.dro_frame) + ".");
             game_end();
-            return;
+            return false;
         }
         for (var p = 1; p <= 3; p++)
         {
@@ -493,6 +513,58 @@ function dronline_step()
     // (room_gms_debug_failsafe -> ROOM_INITIALIZE), which closed the socket before the first connect.
     // The socket is closed by the system when the game really exits.
     global.dro_frame++;
+    return false;
+}
+
+// ---- waiting for the others (issue #46): frozen game, live waiting screen ----
+// Called by dronline_step in every frame from frame 1 on until everybody is there; true = still waiting (frozen).
+// Frame 0 runs as usual on every machine, without input. Then the game is frozen the way its own console pause does
+// it: every instance except obj_time is deactivated (instance_deactivate_all(true)) and the sound paused. obj_time's
+// Begin Step stops right after dronline_step (no input polling, no global.time), and global.dro_frame, which drives
+// every virtual clock (current_time, get_timer, the sound positions), stays where it is. So the game state that comes
+// out is the same however many frames a machine waited: the instances are deactivated in the first frozen frame and
+// activated again in a later one, never in the same frame, on every machine. Meanwhile the game keeps running its
+// frames, so the window stays responsive, dronline_draw shows the waiting screen and Esc works.
+function dronline_wait()
+{
+    if (global.dro_wait == 0)
+    {
+        instance_deactivate_all(true);
+        audio_pause_all();
+        global.dro_wait_start = current_time;
+        drnet_log("frozen at frame " + string(global.dro_frame) + " until everybody is there");
+    }
+    else
+    {
+        var r = drnet_connect_poll(global.dro_wait_ms);
+        if (r > 0)
+        {
+            instance_activate_all();
+            audio_resume_all();
+            return false;
+        }
+        if (r < 0)
+        {
+            var why = drnet_status();
+            drnet_stop();
+            global.dro_net = false;
+            global.dro_connecting = false;
+            show_message("DeltaruneOnline: could not connect (" + global.dro_mode + "): " + why + ". Closing the game.");
+            game_end();
+            return true;
+        }
+    }
+    global.dro_wait++;
+    // Esc held for a second closes the game, like the game's own quit key (which is in the Begin Step that is skipped)
+    global.dro_wait_quit = keyboard_check(vk_escape) ? global.dro_wait_quit + 1 : 0;
+    if (global.dro_wait_quit >= 30)
+    {
+        drnet_log("Esc held while waiting: closing the game");
+        drnet_stop();
+        global.dro_net = false;
+        game_end();
+    }
+    return true;
 }
 
 // Cheap state fingerprint for desync checks: frame, room, instances, summed positions.
@@ -546,12 +618,7 @@ function dronline_draw()
         return;
     if (global.dro_net && global.dro_connecting)
     {
-        draw_set_color(c_black);
-        draw_rectangle(0, 0, display_get_gui_width(), display_get_gui_height(), false);
-        draw_set_color(c_white);
-        draw_set_halign(fa_center);
-        draw_text(display_get_gui_width() / 2, display_get_gui_height() / 2 - 10, "Waiting for other players...");
-        draw_set_halign(fa_left);
+        dronline_draw_waiting();
         return;
     }
     var txt = "ONLINE " + global.dro_mode;
@@ -563,6 +630,10 @@ function dronline_draw()
         txt += " | REC";
     if (global.dro_desync >= 0)
         txt += " | DESYNC at frame " + string(global.dro_desync);
+    if (global.dro_immortal)
+        txt += " | IMMORTAL SOUL";
+    else if (global.dro_immortal_want && !dro_immortal_hooked())
+        txt += " | immortal SOUL not in this build";
     draw_set_alpha(0.8);
     draw_set_color((global.dro_desync >= 0) ? c_red : c_white);
     draw_text(4, 4, txt);
@@ -758,6 +829,71 @@ function dronline_cam_end()
     global.dro_cam_pending = false;
     if (global.dro_cam_handle != -1 && view_camera[0] == global.dro_cam_handle && room == global.dro_cam_moved_room)
         camera_set_view_pos(global.dro_cam_handle, global.dro_cam_sx, global.dro_cam_sy);
+}
+
+// The waiting screen (dronline_wait), in the game's own fonts: "Waiting for the Other Player" and what this machine
+// is doing. Drawing only; the draw settings it changes are put back, since game code may measure text with the font
+// that is set.
+function dronline_draw_waiting()
+{
+    var gw = display_get_gui_width();
+    var gh = display_get_gui_height();
+    var s = max(1, gw / 640);
+    var big = asset_get_index("fnt_mainbig");
+    var small = asset_get_index("fnt_main");
+    var old_font = draw_get_font();
+    var old_col = draw_get_color();
+    var old_alpha = draw_get_alpha();
+    var old_ha = draw_get_halign();
+    var old_va = draw_get_valign();
+    draw_set_alpha(1);
+    draw_set_color(c_black);
+    draw_rectangle(0, 0, gw, gh, false);
+    draw_set_halign(fa_center);
+    draw_set_valign(fa_top);
+    var cx = gw / 2;
+    var y0 = gh / 2 - 90 * s;
+    if (big >= 0 && font_exists(big))
+        draw_set_font(big);
+    draw_set_color(c_white);
+    var title = (global.dro_players > 2) ? "Waiting for the Other Players" : "Waiting for the Other Player";
+    draw_text_transformed(cx, y0, title, s, s, 0);
+    // three dots that fill up once a second: the game is alive, not hung
+    var dots = string_repeat(".", 1 + (floor(current_time / 333) mod 3));
+    draw_text_transformed(cx, y0 + 34 * s, dots, s, s, 0);
+    if (small >= 0 && font_exists(small))
+        draw_set_font(small);
+    var line;
+    if (global.dro_mode == "host")
+    {
+        line = "You are the host (player 1), waiting on UDP port " + string(global.dro_port) + ".";
+        if (global.dro_players > 2)
+            line += " " + string(drnet_lobby()) + " of " + string(global.dro_players) + " players are here.";
+    }
+    else
+    {
+        line = "You are player " + string(global.dro_player) + ", calling the host at " + global.dro_host + ":" + string(global.dro_port) + ".";
+    }
+    draw_set_color(c_ltgray);
+    var w = 600 * s;
+    draw_text_ext_transformed(cx, y0 + 90 * s, line, -1, w / s, s, s, 0);
+    var t = (global.dro_wait > 0) ? floor((current_time - global.dro_wait_start) / 1000) : 0;
+    var left = max(0, floor(global.dro_wait_ms / 1000) - t);
+    draw_text_transformed(cx, y0 + 130 * s, "Waited " + string(t) + " s, giving up in " + string(left) + " s.", s, s, 0);
+    // the host keeps waiting when it turns a player away; say why, so nobody waits out the timeout for nothing
+    var note = drnet_lobby_note();
+    if (note != "")
+    {
+        draw_set_color(c_yellow);
+        draw_text_ext_transformed(cx, y0 + 160 * s, "Turned away: " + note, -1, w / s, s, s, 0);
+    }
+    draw_set_color(c_gray);
+    draw_text_transformed(cx, gh - 40 * s, (global.dro_wait_quit > 0) ? "Quitting..." : "Hold Esc to quit", s, s, 0);
+    draw_set_font(old_font);
+    draw_set_color(old_col);
+    draw_set_alpha(old_alpha);
+    draw_set_halign(old_ha);
+    draw_set_valign(old_va);
 }
 
 // Writes the recorded input when the game ends (called from obj_time Game End / Clean Up by the patcher).
@@ -1656,6 +1792,50 @@ function dronline_heart_alpha_at(px, py)
         }
     }
     return dronline_heart_alpha(best);
+}
+
+// ---- immortal SOUL: a test aid (immortal=1), so an AI player can walk through battles it cannot play ----
+// The patcher puts `if (dro_immortal()) return;` at the start of Chapter 5's damage scripts (scr_damage,
+// scr_damage_all and their relatives) and `if (dro_immortal_gameover()) return;` at the start of scr_gameover, and
+// appends dro_immortal_hooked() (false when the scripts looked different and nothing was changed). Online,
+// global.dro_immortal comes from the host in WELCOME and is set in the same frame on every machine, and the hooks
+// only read shared state, so the game stays in lockstep.
+
+// Is damage ignored now? Not with global.flag[35] set: then running out of HP is a scripted loss (the battle goes
+// on) or an instant retry, which some story battles need.
+function dro_immortal()
+{
+    if (!variable_global_exists("dro_immortal") || !global.dro_immortal)
+        return false;
+    if (variable_global_exists("flag") && is_array(global.flag) && array_length(global.flag) > 35 && global.flag[35] != 0)
+        return false;
+    return true;
+}
+
+// Start of scr_gameover: true = no game over (the party gets its HP back), false = the game's own code goes on.
+function dro_immortal_gameover()
+{
+    if (!dro_immortal())
+        return false;
+    dro_immortal_heal();
+    if (global.dro_net)
+        drnet_log("immortal SOUL: game over skipped at frame " + string(global.dro_frame));
+    return true;
+}
+
+// Every party member at 0 HP or below gets their full HP back.
+function dro_immortal_heal()
+{
+    if (!variable_global_exists("char") || !variable_global_exists("hp") || !variable_global_exists("maxhp"))
+        return;
+    if (!is_array(global.char) || !is_array(global.hp) || !is_array(global.maxhp))
+        return;
+    for (var i = 0; i < min(3, array_length(global.char)); i++)
+    {
+        var c = global.char[i];
+        if (is_real(c) && c > 0 && c < array_length(global.hp) && global.hp[c] <= 0)
+            global.hp[c] = (c < array_length(global.maxhp)) ? max(1, global.maxhp[c]) : 1;
+    }
 }
 
 // ---- Agent API: a program on this PC reads the game state and plays (docs/agent-api.md) ----
