@@ -61,6 +61,20 @@ players. All players must update `drnet.dll` together: mixing protocol 4 and pro
 version mismatch, and mixing protocol 3 with a newer one can still hit the connection timeout on the protocol-3 side.
 State fingerprints are exchanged every 30 frames to detect desyncs.
 
+**Waiting for the others** (issue #46). Frame 0 runs as usual on every machine, without input. From frame 1 the game
+is frozen until everybody is connected, and it keeps running frames meanwhile, so the window stays responsive: obj_time
+draws "Waiting for the Other Player" in the game's own font (`fnt_mainbig`), with the role, the address and port, the
+time waited and left (2 minutes), on the host the players in so far (3 players) and why it last turned someone away
+(`drnet_lobby`, `drnet_lobby_note`). Holding Esc for a second closes the game. Each frame calls
+`drnet_connect_poll` once, which sends the client's HELLO every 200 ms and never blocks. Frozen works like the game's
+own console pause: `instance_deactivate_all(true)` from obj_time and `audio_pause_all()`. The patcher's hook is
+`if (dronline_step()) exit;`, so the rest of obj_time's Begin Step (the game's input polling and `global.time`) is
+skipped too, and `global.dro_frame`, which drives every virtual clock, does not move. So the state that comes out
+does not depend on how long a machine waited: every machine deactivates in its first frozen frame and activates
+again in a later one (never the same frame), and the connected frame then runs as frame 1 did before. What keeps
+running while frozen is outside the instances: obj_time's own Step, Draw and alarms (window and debug only on PC),
+room layers and `call_later` time sources, which the chapter start does not use.
+
 Neither input delay nor a slowing game is acceptable in DELTARUNE, where a few milliseconds decide whether
 a bullet hits, so the design avoids both:
 
@@ -160,9 +174,10 @@ bullets) or a tester can get through battles. It works in every mode but `off`; 
 - **Story losses still happen.** With `global.flag[35]` set, running out of HP is a scripted loss (the battle goes
   on) or an instant retry, so the guards let damage through then; some story battles need it.
 - **Online.** HP is shared state, so immortality must be the same on every machine in every frame. The host's
-  value goes to the clients in `WELCOME`, every machine sets it in the frame it connects (frame 1, before
-  anything can hurt), and a client's own `immortal=` is only logged in `drnet.log`. The hooks only read shared
-  state, so the lockstep and the desync check are unchanged.
+  value goes to the clients in `WELCOME`, every machine sets it in the frame it connects (frame 1, the first frame
+  after the waiting screen, before anything can hurt: `dronline_step` reads `drnet_session()` as soon as
+  `dronline_wait` reports everybody there), and a client's own `immortal=` is only logged in `drnet.log`. The
+  hooks only read shared state, so the lockstep and the desync check are unchanged.
 - **Not tried in the game yet.**
 
 `native/test_drnet.c` checks the DLL alone: host and client exchange pseudo-random input and events under
@@ -434,7 +449,9 @@ WireGuard puts both PCs on one private network, so the game works as on a LAN:
 
 `tools/headless_test.sh` starts a host and a client of the patched chapter directly (no launcher) inside
 invisible `gamescope --backend headless` instances and prints both `drnet.log` files. Result on Chapter 5
-(Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync.
+(Proton GE 10-34, one PC): connected at frame 1, 1500 frames in lockstep, no desync. (That run was before the
+waiting screen; since then a game that waits for the others logs "frozen at frame 1" and "connected at frame 1
+after N frames frozen, immortal SOUL off".)
 
 ## Planned: split camera
 

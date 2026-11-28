@@ -64,7 +64,7 @@ int main(int argc, char **argv)
     f_start start = (f_start)GetProcAddress(h, "drnet_start");
     f_str set_host = (f_str)GetProcAddress(h, "drnet_set_host");
     f_sd option = (f_sd)GetProcAddress(h, "drnet_option");
-    f_d connect = (f_d)GetProcAddress(h, "drnet_connect");
+    f_d connect_poll = (f_d)GetProcAddress(h, "drnet_connect_poll");
     f_dd exchange = (f_dd)GetProcAddress(h, "drnet_exchange");
     f_d set_aux = (f_d)GetProcAddress(h, "drnet_set_aux");
     f_d aux = (f_d)GetProcAddress(h, "drnet_aux");
@@ -84,7 +84,10 @@ int main(int argc, char **argv)
     option("session", strcmp(role, "host") == 0 ? 5 : 0);
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
     printf("%s: connecting...\n", status());
-    if (!connect(30000)) { printf("connect failed: %s\n", status()); stop(); return 1; }
+    /* like the game: one drnet_connect_poll per 33 ms frame (it draws its waiting screen in between) */
+    double r;
+    while ((r = connect_poll(30000)) == 0) Sleep(33);
+    if (r < 0) { printf("connect failed: %s\n", status()); stop(); return 1; }
     printf("%s session %g\n", role, session());
     double t0 = now_ms(), tblock = t0;
     for (f = 0; f < frames; f++) {
