@@ -653,7 +653,10 @@ function dronline_draw_waiting()
     {
         line = "You are the host (player 1), waiting on UDP port " + string(global.dro_port) + ".";
         if (global.dro_players > 2)
-            line += " " + string(drnet_lobby()) + " of " + string(global.dro_players) + " players are here.";
+        {
+            var _here = drnet_lobby();
+            line += " " + string(_here) + " of " + string(global.dro_players) + " players " + ((_here == 1) ? "is" : "are") + " here.";
+        }
     }
     else
     {

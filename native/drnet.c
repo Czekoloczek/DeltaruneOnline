@@ -5,6 +5,9 @@
  * everyone, so only the host needs an open port. Every INPUT packet carries the sender's last
  * WINDOW frames, so lost packets are covered by the next one. A background thread receives packets
  * the moment they arrive (exact ping measurement, immediate relaying) and sends delayed test packets.
+ * Nothing polls: that thread sleeps until a packet arrives or a delayed test packet is due, and a game waiting in
+ * drnet_exchange sleeps until input arrives or its resend is due (both woke every 1-2 ms before, a few percent of
+ * a core per game, more under Proton, where each wake is a call to wineserver).
  *
  * Input delay is per player and automatic by default: each machine measures its ping and sends its
  * input just as many frames ahead as the network needs, so the game never has to wait. The other
@@ -132,6 +135,9 @@ static SOCKET sock = INVALID_SOCKET;
 static CRITICAL_SECTION cs;
 static int cs_ready;
 static HANDLE ev_input, thr;
+static HANDLE ev_sock;                      /* set by Winsock when a packet arrives (WSAEventSelect) */
+static HANDLE ev_wake;                      /* wakes the network thread: a delayed test packet was queued, or stop */
+static int sock_events;                     /* ev_sock works; 0 = the network thread polls every 1 ms as before */
 static volatile LONG running;
 static int is_host, players, me, connected, connect_err;
 static uint8_t my_data_hash[32];            /* SHA-256 of data.win, or all zeros when no data.win is present */
@@ -253,6 +259,7 @@ static void send_to(const struct sockaddr_in *a, const void *buf, int len)
     q = &queue[qcount++];
     q->due = now_us() + (uint64_t)((lag_ms + (jitter_ms > 0 ? jitter_ms * (rand() % 1000) / 1000.0 : 0)) * 1000);
     q->to = *a; q->len = len; memcpy(q->data, buf, len);
+    SetEvent(ev_wake);                          /* the network thread sleeps until the next packet is due */
 }
 
 static void flush_queue(uint64_t now)
@@ -753,26 +760,54 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
     }
 }
 
+/* How long the network thread may sleep (lock held): until the next delayed test packet is due, at most 100 ms.
+ * A packet that arrives (ev_sock), a packet queued for later and drnet_stop (ev_wake) wake it at once. */
+static DWORD net_sleep_ms(uint64_t now)
+{
+    uint64_t soonest; int i;
+    if (!sock_events) return 1;
+    if (!qcount) return 100;
+    soonest = queue[0].due;
+    for (i = 1; i < qcount; i++) if (queue[i].due < soonest) soonest = queue[i].due;
+    if (soonest <= now) return 0;
+    return soonest - now >= 100000 ? 100 : (DWORD)((soonest - now + 999) / 1000);
+}
+
 static DWORD WINAPI net_thread(LPVOID unused)
 {
-    char buf[1024]; struct sockaddr_in from; int fl, n;
+    char buf[1024]; struct sockaddr_in from; int fl, n, i;
+    HANDLE evs[2];
+    DWORD w;
     (void)unused;
+    evs[0] = ev_sock; evs[1] = ev_wake;
     while (running) {
-        fd_set rs; struct timeval tv;
-        FD_ZERO(&rs); FD_SET(sock, &rs);
-        tv.tv_sec = 0; tv.tv_usec = 1000;
-        n = select(0, &rs, NULL, NULL, &tv);
+        lock(); w = net_sleep_ms(now_us()); unlock();
+        if (sock_events) {
+            w = WaitForMultipleObjects(2, evs, FALSE, w);
+        } else {                                /* no events (see drnet_start): poll the socket every 1 ms, as before */
+            fd_set rs; struct timeval tv;
+            FD_ZERO(&rs); FD_SET(sock, &rs);
+            tv.tv_sec = 0; tv.tv_usec = 1000;
+            w = select(0, &rs, NULL, NULL, &tv) < 0 ? WAIT_FAILED : 0;
+        }
         lock();
-        if (n > 0) {
-            for (;;) {
+        if (w != WAIT_FAILED) {
+            if (sock_events) {                  /* resets ev_sock; if that fails, reset it here, or the wait would spin */
+                WSANETWORKEVENTS ne;
+                if (WSAEnumNetworkEvents(sock, ev_sock, &ne) != 0) ResetEvent(ev_sock);
+            }
+            /* Read until nothing is left: then Winsock sets ev_sock again for the next packet. A failed read
+               (an ICMP "port unreachable" from a peer that closed, WSAECONNRESET, or an oversized datagram) does
+               not mean the queue is empty, so only WSAEWOULDBLOCK ends it, after at most 256 reads per round. */
+            for (i = 0; i < 256; i++) {
                 fl = sizeof(from);
                 n = recvfrom(sock, buf, sizeof(buf), 0, (struct sockaddr *)&from, &fl);
-                if (n <= 0) break;
-                handle(buf, n, &from, now_us());
+                if (n > 0) handle(buf, n, &from, now_us());
+                else if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK) break;
             }
-        } else if (n < 0) {
-            static int sel_err;
-            if (sel_err++ < 3) logm("select error WSA %d", WSAGetLastError());
+        } else {
+            static int wait_err;
+            if (wait_err++ < 3) logm("network thread: wait error %lu", GetLastError());
             unlock(); Sleep(5); lock();
         }
         lobby_forget_silent(now_us());
@@ -888,7 +923,11 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     WSADATA w; struct sockaddr_in a; u_long nb = 1; int p, i;
     logm("start %s host=%s port=%g players=%g me=%g delay=%g (protocol %d)", host_flag ? "host" : "client", host_ip, port, nplayers, my_player, dly, PROTO);
     if (sock != INVALID_SOCKET) return 1;
-    if (!cs_ready) { InitializeCriticalSection(&cs); ev_input = CreateEventA(NULL, FALSE, FALSE, NULL); cs_ready = 1; }
+    if (!cs_ready) { InitializeCriticalSection(&cs); cs_ready = 1; }
+    /* Made here, not once with cs, so that one CreateEventA that failed is tried again at the next start. */
+    if (!ev_input) ev_input = CreateEventA(NULL, FALSE, FALSE, NULL);
+    if (!ev_sock) ev_sock = CreateEventA(NULL, TRUE, FALSE, NULL);     /* manual reset, like WSACreateEvent */
+    if (!ev_wake) ev_wake = CreateEventA(NULL, FALSE, FALSE, NULL);
     if (WSAStartup(MAKEWORD(2, 2), &w) != 0) return fail("WSAStartup");
     is_host = host_flag != 0;
     players = (int)nplayers; me = (int)my_player;
@@ -915,6 +954,10 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
             logm("SetHandleInformation failed (%lu): a chapter change may keep port %g busy", GetLastError(), port);
     }
     ioctlsocket(sock, FIONBIO, &nb);
+    /* The network thread sleeps on ev_sock until a packet arrives. Without the events, or if Winsock refuses (never
+       seen), it polls the socket every 1 ms instead, as all versions before did. */
+    if (!ev_sock || !ev_wake) { sock_events = 0; logm("CreateEvent failed (%lu): the network thread polls every 1 ms", GetLastError()); }
+    else if (!(sock_events = WSAEventSelect(sock, ev_sock, FD_READ) == 0)) logm("WSAEventSelect failed (WSA %d): the network thread polls every 1 ms", WSAGetLastError());
     memset(&a, 0, sizeof(a)); a.sin_family = AF_INET;
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
@@ -1122,7 +1165,13 @@ EXPORT double drnet_exchange(double frame, double my_bits)
         if (ready) break;
         if (left) { logm("exchange: player %d left before frame %d", left, f); return -2; }
         if (now - start > 10000000) { logm("exchange timeout at frame %d", f); return -1; }      /* peer gone */
-        WaitForSingleObject(ev_input, 2);
+        /* Sleep until input arrives (the network thread sets ev_input for every input or goodbye packet, so this
+           adds no latency) or the next resend is due. ev_input is auto-reset: one set while nobody waited only
+           makes the next wait return at once, and the loop checks again. */
+        {
+            uint64_t due = last_send + 16000;
+            WaitForSingleObject(ev_input, due > now ? (DWORD)((due - now + 999) / 1000) : 1);
+        }
         if (now - start > 100000) pump_window_messages();
     }
     lock();
@@ -1219,6 +1268,7 @@ EXPORT double drnet_stop(void)
     if (sock != INVALID_SOCKET) {
         lock(); send_bye(); unlock();
         running = 0;
+        SetEvent(ev_wake);                      /* the network thread may be asleep for up to 100 ms */
         if (thr) { WaitForSingleObject(thr, 1000); CloseHandle(thr); thr = NULL; }
         closesocket(sock); sock = INVALID_SOCKET; WSACleanup();
     }
