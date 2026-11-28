@@ -218,41 +218,46 @@ echo "  OK: 3-player mismatched peer refused promptly (${elapsed}s) without abor
 # counting it. Otherwise it welcomes player 3 at once, and the host and player 3 wait for player 2's input until the
 # 10 s exchange timeout, while the player 2 who comes back later is never let in. Here a new player 2 completes the
 # session, and all three must end in sync.
-#   lobby_quit <mode> <s>: player 3 starts <s> seconds after player 2 is gone. Mode "lobby" leaves with a goodbye
-#   (drnet_bye, as when the window is closed), and 0.5 s is well within the 2 s the host gives a silent client, so
-#   only the goodbye can make it stop counting player 2; "lobby-crash" exits without a word (a killed game), and 3 s
-#   is after the host has given up on player 2.
+#   lobby_quit <mode> <s> [lag_ms]: player 3 starts <s> seconds after player 2 is gone. Mode "lobby" leaves with a
+#   goodbye (drnet_bye, as when the window is closed), and 0.5 s is well within the 2 s the host gives a silent client,
+#   so only the goodbye can make it stop counting player 2; "lobby-crash" exits without a word (a killed game), and
+#   3 s is after the host has given up on player 2. With lag_ms, player 2's last HELLOs, held in its test lag queue,
+#   reach the host after the goodbye (as reordered packets would), and must not count player 2 again.
 lobby_quit() {
     mode=$1
     gap=$2
-    run_exe "$out/$mode-1.txt" host 3 1 30 -game test_a.win
+    lag2=${3:-0}
+    tag=$mode-$lag2
+    run_exe "$out/$tag-1.txt" host 3 1 30 -game test_a.win
     q1=$!
     sleep 1
-    run_exe "$out/$mode-2.txt" client 3 2 30 0 -1 127.0.0.1 "$mode" -game test_a.win
+    run_exe "$out/$tag-2.txt" client 3 2 30 "$lag2" -1 127.0.0.1 "$mode" -game test_a.win
     q2=$!
     r2=0; wait "$q2" || r2=$?
-    if [ "$r2" -ne 0 ] || ! grep -q "the lobby before everybody is there" "$out/$mode-2.txt"; then
-        echo "FAIL: $mode: player 2 did not leave the lobby as planned:"; cat "$out/$mode-2.txt"; kill "$q1" 2>/dev/null || true; exit 1
+    if [ "$r2" -ne 0 ] || ! grep -q "the lobby before everybody is there" "$out/$tag-2.txt"; then
+        echo "FAIL: $mode: player 2 did not leave the lobby as planned:"; cat "$out/$tag-2.txt"; kill "$q1" 2>/dev/null || true; exit 1
     fi
     sleep "$gap"
-    run_exe "$out/$mode-3.txt" client 3 3 30 -game test_a.win
+    run_exe "$out/$tag-3.txt" client 3 3 30 -game test_a.win
     q3=$!
     # with the bug, the host and player 3 start now and give up 10 s later
     sleep 3
-    run_exe "$out/$mode-4.txt" client 3 2 30 -game test_a.win
+    run_exe "$out/$tag-4.txt" client 3 2 30 -game test_a.win
     q4=$!
-    if ! wait "$q1"; then echo "FAIL: $mode: host failed after player 2 left the lobby:"; cat "$out/$mode-1.txt"; kill "$q3" "$q4" 2>/dev/null || true; exit 1; fi
-    if ! wait "$q3"; then echo "FAIL: $mode: player 3 failed after player 2 left the lobby:"; cat "$out/$mode-3.txt"; kill "$q4" 2>/dev/null || true; exit 1; fi
-    if ! wait "$q4"; then echo "FAIL: $mode: the new player 2 failed:"; cat "$out/$mode-4.txt"; exit 1; fi
-    check_sync "$mode" "$out/$mode-1.txt" "$out/$mode-3.txt" "$out/$mode-4.txt"
+    if ! wait "$q1"; then echo "FAIL: $mode: host failed after player 2 left the lobby:"; cat "$out/$tag-1.txt"; kill "$q3" "$q4" 2>/dev/null || true; exit 1; fi
+    if ! wait "$q3"; then echo "FAIL: $mode: player 3 failed after player 2 left the lobby:"; cat "$out/$tag-3.txt"; kill "$q4" 2>/dev/null || true; exit 1; fi
+    if ! wait "$q4"; then echo "FAIL: $mode: the new player 2 failed:"; cat "$out/$tag-4.txt"; exit 1; fi
+    check_sync "$mode" "$out/$tag-1.txt" "$out/$tag-3.txt" "$out/$tag-4.txt"
     # the waiting screen's count (drnet_lobby) went 1, 2 (player 2), 1 (player 2 gone), 2 (player 3)
-    counts=$(tr -d '\r' < "$out/$mode-1.txt" | sed -n 's/^lobby: \([0-9]\) of 3 players here$/\1/p' | tr -d '\n')
+    counts=$(tr -d '\r' < "$out/$tag-1.txt" | sed -n 's/^lobby: \([0-9]\) of 3 players here$/\1/p' | tr -d '\n')
     if [ "$counts" != "1212" ]; then
-        echo "FAIL: $mode: the host's player count went $counts, expected 1212:"; cat "$out/$mode-1.txt"; exit 1
+        echo "FAIL: $mode: the host's player count went $counts, expected 1212:"; cat "$out/$tag-1.txt"; exit 1
     fi
 }
 lobby_quit lobby 0.5
 echo "  OK: 3 players, player 2 said goodbye in the lobby: the host waited for a new player 2 (sum $LAST_SUM)"
+lobby_quit lobby 0.5 300
+echo "  OK: 3 players, player 2's HELLOs came after its goodbye (300 ms test latency): the host ignored them (sum $LAST_SUM)"
 lobby_quit lobby-crash 3
 echo "  OK: 3 players, player 2 was killed in the lobby: the host stopped counting it, waited for a new one (sum $LAST_SUM)"
 echo "OK: all handshake checks passed"

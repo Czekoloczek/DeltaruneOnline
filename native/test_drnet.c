@@ -7,6 +7,8 @@
  *   quit_at "lobby" or "lobby-crash" (a client): say HELLO for 2 s without being welcomed (the host still waits
  *   for another player), then leave before everybody is there, with a goodbye (drnet_bye, as a closed window) or
  *   without a word (as a killed game). The host must stop counting this player (issue #58, test_handshake.sh).
+ *   After the goodbye it lingers 0.5 s, as a closing game does, so with lag_ms the HELLOs still in the lag queue
+ *   reach the host after the goodbye; the host must ignore them.
  * While connecting, a host of 3 prints "lobby: N of 3 players here" each time drnet_lobby (the waiting screen's
  * count) changes.
  * delay -1 (default) = automatic. lag_ms adds test latency to every packet this side sends.
@@ -98,7 +100,7 @@ int main(int argc, char **argv)
         if (r > 0) { printf("%s was welcomed: the host did not wait for the others\n", role); stop(); return 1; }
         printf("%s %s the lobby before everybody is there\n", role, crash ? "crashes in" : "leaves");
         fflush(stdout);
-        if (!crash) bye("test lobby quit");
+        if (!crash) { bye("test lobby quit"); Sleep(500); }
         ExitProcess(0);
     }
     printf("%s: connecting...\n", status());

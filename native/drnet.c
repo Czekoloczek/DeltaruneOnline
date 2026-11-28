@@ -144,6 +144,8 @@ static int reject_logged;
 static struct sockaddr_in peer[MAXP + 1];   /* host: client addresses; client: peer[1] = host */
 static int have_peer[MAXP + 1];
 static uint64_t hello_us[MAXP + 1];         /* host, before connected: when each client last said HELLO */
+static struct sockaddr_in left_addr[MAXP + 1];  /* host, before connected: where a client's LEAVE came from */
+static uint64_t left_us[MAXP + 1];          /* ... and when (0 = none) */
 static int32_t frame_of[MAXP + 1][RING];    /* which frame the slot currently holds */
 static uint16_t bits_of[MAXP + 1][RING];
 static uint32_t aux_of[MAXP + 1][RING];
@@ -656,6 +658,11 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
             }
             return;
         }
+        /* a HELLO sent before that client's LEAVE but overtaken by it (reordered, or held in the test lag queue):
+           it is gone, and counting it again would let the host welcome the others without it. A game that starts
+           again gets a new port, and takes longer than 2 s anyway. */
+        if (left_us[h->player] && now - left_us[h->player] < LOBBY_SILENT_US && same_addr(&left_addr[h->player], from))
+            return;
         peer[h->player] = *from; have_peer[h->player] = 1; hello_us[h->player] = now;
         /* WELCOME only once every player is in: a welcomed client starts playing, and with 3 players its first
            exchange would wait for a host that still waits for the third, and give up after 10 s. Clients repeat
@@ -671,9 +678,11 @@ static void handle(const char *buf, int len, const struct sockaddr_in *from, uin
         }
     } else if (h->type == T_LEAVE && is_host) {
         /* a client leaves before everybody is there: the others must not be welcomed into a session that waits
-           for it. Only from the address that said HELLO for that player; it counts again with its next HELLO. */
+           for it. Only from the address that said HELLO for that player; HELLOs from that address are ignored for
+           2 s after it, and a new game for that player counts as soon as it says HELLO. */
         if (!connected && h->player >= 2 && h->player <= players && have_peer[h->player] && same_addr(&peer[h->player], from)) {
             have_peer[h->player] = 0;
+            left_addr[h->player] = *from; left_us[h->player] = now;
             logm("player %d left before everybody was there (goodbye): no longer counted", h->player);
         }
     } else if (h->type == T_REJECT && !is_host && len >= (int)sizeof(reject_pkt) && have_peer[1] && same_addr(from, &peer[1])) {
@@ -904,7 +913,7 @@ EXPORT double drnet_start(double host_flag, double port, double nplayers, double
     a.sin_port = htons(is_host ? (u_short)port : 0); a.sin_addr.s_addr = INADDR_ANY;
     if (bind(sock, (struct sockaddr *)&a, sizeof(a)) != 0) { int r = fail("bind"); closesocket(sock); sock = INVALID_SOCKET; WSACleanup(); return r; }
     for (p = 0; p <= MAXP; p++) {
-        have_peer[p] = 0; hello_us[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
+        have_peer[p] = 0; hello_us[p] = 0; left_us[p] = 0; gone[p] = 0; bye_last[p] = -1; srtt[p] = rttvar[p] = 0; rx_ts[p] = 0;
         for (i = 0; i < RING; i++) frame_of[p][i] = -1;
         for (i = 0; i < HRING; i++) hash_frame[p][i] = -1;
     }
