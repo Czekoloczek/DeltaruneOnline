@@ -75,6 +75,11 @@ class PatcherTargetsExist(unittest.TestCase):
         self.assertEqual(missing, [], "patcher inserts calls to functions missing from gml/scr_dronline.gml")
         for name in generated:
             self.assertIn("function " + name, dp.HEART_OFF)
+        # immortal SOUL: the guards call module functions, and the patcher appends dro_immortal_hooked
+        for name in set(re.findall(r"\b(dro_immortal\w*)\(\)", PATCHER)) - {"dro_immortal_hooked"}:
+            self.assertIn(name, GML_FUNCS, "patcher inserts a call to a function missing from gml/scr_dronline.gml")
+        self.assertIn("function dro_immortal_hooked", dp.IMMORTAL_OFF)
+        self.assertNotIn("dro_immortal_hooked", GML_FUNCS, "the patcher appends it; a second one would clash")
 
 
 # What the replaced engine functions return (checked against YoYoGames/GameMaker-Manual). A new rewrite rule must

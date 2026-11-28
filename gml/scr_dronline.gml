@@ -38,6 +38,11 @@
 //   other_souls = 0.1                          (host/client) opacity of the other players' SOULs in battle on this screen,
 //                                              so they are not mistaken for your own: 0 = hidden, 1 = as in the game.
 //                                              Drawing only, the hearts still dodge and get hit on every machine
+//   immortal = 0 | 1                           (testing; any mode but off) 1: damage does not lower HP and there is
+//                                              no game over, for AI test runs. Online the host's value applies on
+//                                              every machine (sent in WELCOME); a client's own is only logged. Not
+//                                              in battles that are meant to be lost (story). The status line shows
+//                                              IMMORTAL SOUL while it is on
 // With no file (or mode=off) the game behaves exactly like the unpatched one.
 
 function dronline_init()
@@ -56,6 +61,9 @@ function dronline_init()
     global.dro_srec_file = "";
     global.dro_agent_port = 0;
     global.dro_agent_on = false;
+    global.dro_immortal_ini = 0;
+    global.dro_immortal_want = false;   // asked for: immortal= here, or online the host's flag
+    global.dro_immortal = false;        // on: asked for, and the hooks are in this build
     global.dro_agent_tries = 0;
     global.dro_other_souls = 0.1;
     // Two copies on one PC share the save folder. With the environment variable DRONLINE_ROLE=<name>
@@ -90,6 +98,7 @@ function dronline_init()
         global.dro_srec_file = ini_read_string("online", "script_record", "");
         global.dro_agent_port = ini_read_real("online", "agent", 0);
         global.dro_other_souls = clamp(ini_read_real("online", "other_souls", 0.1), 0, 1);
+        global.dro_immortal_ini = (ini_read_real("online", "immortal", 0) != 0) ? 1 : 0;
         ini_close();
     }
     global.dro_on = (global.dro_mode != "off");
@@ -135,6 +144,8 @@ function dronline_init()
             drnet_option("lag", global.dro_lag);
         if (global.dro_jitter > 0)
             drnet_option("jitter", global.dro_jitter);
+        // session flags: the host's go to every machine in WELCOME (bit 0: immortal SOUL)
+        drnet_option("session", global.dro_immortal_ini);
         if (!drnet_start(global.dro_mode == "host", global.dro_port, global.dro_players, global.dro_player, global.dro_delay))
         {
             var why = drnet_status();
@@ -164,6 +175,9 @@ function dronline_init()
         global.dro_netframe = 0;
         global.dro_msg = drnet_status();
     }
+    else
+        global.dro_immortal_want = (global.dro_immortal_ini != 0);
+        global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
     if (global.dro_mode == "host" || global.dro_mode == "client" || global.dro_mode == "solo")
         dronline_agent_init();
     else
@@ -411,7 +425,11 @@ function dronline_step()
         else
         {
             global.dro_connecting = false;
-            drnet_log("connected at frame " + string(global.dro_frame));
+            // the host's session flags, the same on every machine from this frame on
+            var _sf = drnet_session();
+            global.dro_immortal_want = (_sf >= 0) && ((_sf & 1) != 0);
+            global.dro_immortal = global.dro_immortal_want && dro_immortal_hooked();
+            drnet_log("connected at frame " + string(global.dro_frame) + ", immortal SOUL " + (global.dro_immortal ? "on" : "off"));
         }
         global.dro_bits[global.dro_player] = mine;
     }
@@ -538,6 +556,10 @@ function dronline_draw()
         txt += " | REC";
     if (global.dro_desync >= 0)
         txt += " | DESYNC at frame " + string(global.dro_desync);
+    if (global.dro_immortal)
+        txt += " | IMMORTAL SOUL";
+    else if (global.dro_immortal_want && !dro_immortal_hooked())
+        txt += " | immortal SOUL not in this build";
     draw_set_alpha(0.8);
     draw_set_color((global.dro_desync >= 0) ? c_red : c_white);
     draw_text(4, 4, txt);
@@ -1441,6 +1463,50 @@ function dronline_heart_alpha_at(px, py)
         }
     }
     return dronline_heart_alpha(best);
+}
+
+// ---- immortal SOUL: a test aid (immortal=1), so an AI player can walk through battles it cannot play ----
+// The patcher puts `if (dro_immortal()) return;` at the start of Chapter 5's damage scripts (scr_damage,
+// scr_damage_all and their relatives) and `if (dro_immortal_gameover()) return;` at the start of scr_gameover, and
+// appends dro_immortal_hooked() (false when the scripts looked different and nothing was changed). Online,
+// global.dro_immortal comes from the host in WELCOME and is set in the same frame on every machine, and the hooks
+// only read shared state, so the game stays in lockstep.
+
+// Is damage ignored now? Not with global.flag[35] set: then running out of HP is a scripted loss (the battle goes
+// on) or an instant retry, which some story battles need.
+function dro_immortal()
+{
+    if (!variable_global_exists("dro_immortal") || !global.dro_immortal)
+        return false;
+    if (variable_global_exists("flag") && is_array(global.flag) && array_length(global.flag) > 35 && global.flag[35] != 0)
+        return false;
+    return true;
+}
+
+// Start of scr_gameover: true = no game over (the party gets its HP back), false = the game's own code goes on.
+function dro_immortal_gameover()
+{
+    if (!dro_immortal())
+        return false;
+    dro_immortal_heal();
+    if (global.dro_net)
+        drnet_log("immortal SOUL: game over skipped at frame " + string(global.dro_frame));
+    return true;
+}
+
+// Every party member at 0 HP or below gets their full HP back.
+function dro_immortal_heal()
+{
+    if (!variable_global_exists("char") || !variable_global_exists("hp") || !variable_global_exists("maxhp"))
+        return;
+    if (!is_array(global.char) || !is_array(global.hp) || !is_array(global.maxhp))
+        return;
+    for (var i = 0; i < min(3, array_length(global.char)); i++)
+    {
+        var c = global.char[i];
+        if (is_real(c) && c > 0 && c < array_length(global.hp) && global.hp[c] <= 0)
+            global.hp[c] = (c < array_length(global.maxhp)) ? max(1, global.maxhp[c]) : 1;
+    }
 }
 
 // ---- Agent API: a program on this PC reads the game state and plays (docs/agent-api.md) ----

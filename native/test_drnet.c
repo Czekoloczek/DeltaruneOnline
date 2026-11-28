@@ -9,6 +9,8 @@
  * Each side feeds pseudo-random bits and events, folds every frame's result (all players' bits and
  * events) into a running checksum and prints it: lockstep works if all sides print the same checksums.
  * It also prints the delay, ping, average wait and frame time, so a slowdown shows up as frame time > 33 ms.
+ * The host asks for session flags 5 and every client for 0: after connecting, every side must print the host's
+ * ("session 5"), as the game applies the host's settings everywhere (immortal SOUL).
  */
 #include <windows.h>
 #include <stdio.h>
@@ -75,11 +77,15 @@ int main(int argc, char **argv)
     f_s status = (f_s)GetProcAddress(h, "drnet_status");
     f_v stop = (f_v)GetProcAddress(h, "drnet_stop");
     f_str bye = (f_str)GetProcAddress(h, "drnet_bye");
+    f_v session = (f_v)GetProcAddress(h, "drnet_session");
+    if (!session) { printf("drnet.dll has no drnet_session\n"); return 1; }
     set_host(ip);
     if (lag > 0) option("lag", lag);
+    option("session", strcmp(role, "host") == 0 ? 5 : 0);
     if (!start(strcmp(role, "host") == 0, 7845, players, me, dly)) { printf("start failed: %s\n", status()); return 1; }
     printf("%s: connecting...\n", status());
     if (!connect(30000)) { printf("connect failed: %s\n", status()); stop(); return 1; }
+    printf("%s session %g\n", role, session());
     double t0 = now_ms(), tblock = t0;
     for (f = 0; f < frames; f++) {
         double tf = now_ms();

@@ -91,6 +91,10 @@ Without a config file the patched game behaves like the original. To enable a mo
 `config/dronline.ini.example` to the save folder as `dronline.ini`. See [docs/DESIGN.md](docs/DESIGN.md) for how it
 works and how to test determinism.
 
+For tests, `immortal=1` in `dronline.ini` keeps the party alive in battles: damage does not lower HP and there is
+no game over (story battles meant to be lost still end as written). Online the host's setting applies to everyone.
+The status line shows `IMMORTAL SOUL` while it is on. Not tried in the game yet.
+
 ## Requirements
 
 Every player needs:
